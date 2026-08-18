@@ -322,7 +322,7 @@ function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
         try {
           const type = file.type.startsWith("image/") ? "image" : file.type.startsWith("video/") ? "video" : "audio";
           const uploaded = await uploadFile(file, type, () => undefined);
-          const result = await api.post<{ Id: string }>("/api/assets", { groupId: groups[0].Id, uploadId: uploaded.uploadId ?? uploaded.id, url: uploaded.url, type: `${type[0].toUpperCase()}${type.slice(1)}`, name: file.name });
+          const result = await api.post<{ Id: string }>("/api/assets", { groupId: groups[0].Id, uploadId: uploaded.uploadId ?? uploaded.id, url: "url" in uploaded ? uploaded.url : undefined, type: `${type[0].toUpperCase()}${type.slice(1)}`, name: file.name });
           setAssets((old) => [{ Id: result.Id, Name: file.name, AssetType: `${type[0].toUpperCase()}${type.slice(1)}` as LibraryAsset["AssetType"], Status: "Processing", GroupId: groups[0].Id }, ...old]);
         } catch { failures.push(file.name); }
         finally { setBatchProgress((progress) => progress ? { ...progress, done: progress.done + 1 } : progress); }
