@@ -28,3 +28,6 @@ Thumbs.db
 # 设计参考工程的构建产物
 .next/
 out/
+# 密钥/凭据占位文件
+APIKEY+MODEL.txt
+参考文档.txt
