@@ -24,3 +24,7 @@ output/
 # 系统文件
 .DS_Store
 Thumbs.db
+
+# 设计参考工程的构建产物
+.next/
+out/
