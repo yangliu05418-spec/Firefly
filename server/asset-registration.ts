@@ -2,6 +2,7 @@ import { config } from "./config.js";
 import { callAssetApi } from "./asset-api.js";
 import { users } from "./db.js";
 import { redis } from "./redis.js";
+import { resolveUploadMediaUrl } from "./media-url.js";
 
 import type { GenerationInput } from "./provider.js";
 
@@ -42,7 +43,7 @@ const defaultDeps: RegistrationDeps = {
   cacheGet: (key) => redis.get(key),
   cacheSet: (key, value) => redis.set(key, value, "EX", CACHE_TTL_SECONDS),
   callAsset: callAssetApi,
-  resolveMediaUrl: (media) => import("./media-url.js").then((module) => module.resolveUploadMediaUrl(media)),
+  resolveMediaUrl: (media) => resolveUploadMediaUrl(media),
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now: Date.now,
   readOwnedAsset: (assetId, ownerId) => users.readUserAsset(assetId)?.ownerId === ownerId,
