@@ -73,6 +73,17 @@ export type UserAsset = {
   deletedAt?: number;
 };
 
+export type CanvasProject = {
+  id: string;
+  ownerId: string;
+  title: string;
+  documentJson: string;
+  revision: number;
+  createdAt: number;
+  updatedAt: number;
+  deletedAt?: number;
+};
+
 type UserRow = {
   id: string;
   feishu_open_id: string;
@@ -105,6 +116,11 @@ type UserAssetRow = {
   created_at: number; updated_at: number; deleted_at: number | null;
 };
 
+type CanvasProjectRow = {
+  id: string; owner_id: string; title: string; document_json: string; revision: number;
+  created_at: number; updated_at: number; deleted_at: number | null;
+};
+
 const mapUser = (row?: UserRow): User | null => row ? ({
   id: row.id, feishuOpenId: row.feishu_open_id, feishuUnionId: row.feishu_union_id,
   tenantKey: row.tenant_key, email: row.email, name: row.name, avatarUrl: row.avatar_url,
@@ -131,6 +147,12 @@ const mapUserAsset = (row?: UserAssetRow): UserAsset | null => row ? ({
   id: row.id, ownerId: row.owner_id, groupId: row.group_id, uploadId: row.upload_id ?? undefined,
   name: row.name, assetType: row.asset_type, status: row.status, url: row.url ?? undefined,
   createdAt: row.created_at, updatedAt: row.updated_at, deletedAt: row.deleted_at ?? undefined
+}) : null;
+
+const mapCanvasProject = (row?: CanvasProjectRow): CanvasProject | null => row ? ({
+  id: row.id, ownerId: row.owner_id, title: row.title, documentJson: row.document_json,
+  revision: row.revision, createdAt: row.created_at, updatedAt: row.updated_at,
+  deletedAt: row.deleted_at ?? undefined
 }) : null;
 
 export class UserStore {
@@ -218,6 +240,18 @@ export class UserStore {
       );
       CREATE INDEX IF NOT EXISTS user_assets_owner_updated_idx ON user_assets(owner_id, updated_at DESC);
       CREATE UNIQUE INDEX IF NOT EXISTS user_assets_owner_upload_idx ON user_assets(owner_id, upload_id) WHERE upload_id IS NOT NULL AND deleted_at IS NULL;
+      CREATE TABLE IF NOT EXISTS canvas_projects (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        document_json TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        deleted_at INTEGER,
+        FOREIGN KEY (owner_id) REFERENCES users(id)
+      );
+      CREATE INDEX IF NOT EXISTS canvas_projects_owner_updated_idx ON canvas_projects(owner_id, updated_at DESC);
     `);
     const mediaSchema = this.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'media_objects'").get() as { sql?: string } | undefined;
     if (mediaSchema?.sql && !mediaSchema.sql.includes("'preview'")) {
@@ -448,6 +482,45 @@ export class UserStore {
       LIMIT 1
     `).get(ownerId, `%${escaped}%`) as { found: number } | undefined;
     return Boolean(row?.found);
+  }
+
+  createCanvasProject(project: CanvasProject) {
+    this.database.prepare(`INSERT INTO canvas_projects (id, owner_id, title, document_json, revision, created_at, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(project.id, project.ownerId, project.title, project.documentJson, project.revision, project.createdAt, project.updatedAt, project.deletedAt ?? null);
+    return project;
+  }
+
+  readCanvasProject(id: string) {
+    return mapCanvasProject(this.database.prepare("SELECT * FROM canvas_projects WHERE id = ? AND deleted_at IS NULL").get(id) as CanvasProjectRow | undefined);
+  }
+
+  listCanvasProjects(ownerId: string, limit: number, offset: number) {
+    const rows = this.database.prepare("SELECT * FROM canvas_projects WHERE owner_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT ? OFFSET ?").all(ownerId, limit, offset) as CanvasProjectRow[];
+    return rows.map((row) => mapCanvasProject(row)!);
+  }
+
+  updateCanvasProjectDocument(id: string, ownerId: string, documentJson: string, expectedRevision: number) {
+    return this.database.transaction(() => {
+      const current = this.readCanvasProject(id);
+      if (!current || current.ownerId !== ownerId) return null;
+      if (current.revision !== expectedRevision) return { status: "conflict" as const, currentRevision: current.revision };
+      const nextRevision = expectedRevision + 1;
+      const result = this.database.prepare("UPDATE canvas_projects SET document_json = ?, revision = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND deleted_at IS NULL AND revision = ?")
+        .run(documentJson, nextRevision, Date.now(), id, ownerId, expectedRevision);
+      if (!result.changes) return { status: "conflict" as const, currentRevision: this.readCanvasProject(id)?.revision ?? current.revision };
+      return { status: "ok" as const, revision: nextRevision };
+    })();
+  }
+
+  renameCanvasProject(id: string, ownerId: string, title: string) {
+    const result = this.database.prepare("UPDATE canvas_projects SET title = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").run(title, Date.now(), id, ownerId);
+    return result.changes > 0;
+  }
+
+  softDeleteCanvasProject(id: string, ownerId: string) {
+    const now = Date.now();
+    const result = this.database.prepare("UPDATE canvas_projects SET deleted_at = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").run(now, now, id, ownerId);
+    return result.changes > 0;
   }
 
   clearGenerationHistory() {

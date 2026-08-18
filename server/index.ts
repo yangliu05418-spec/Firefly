@@ -10,7 +10,9 @@ import { z } from "zod";
 import { config } from "./config.js";
 import { MODELS } from "./capabilities.js";
 import { clearSession, createSession, getSessionUser, publicUser, requireAuth, type SessionUser } from "./auth.js";
-import { users, type UserAsset } from "./db.js";
+import { users, type CanvasProject, type UserAsset } from "./db.js";
+import { canvasDocumentSchema, DEFAULT_CANVAS_DOCUMENT } from "./canvas-document.js";
+import { publicCanvasProject, publicCanvasProjectDetail } from "./canvas-public.js";
 import { consumeFeishuAuthorization, createFeishuAuthorization, exchangeFeishuCode } from "./feishu.js";
 import { generationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, readTask, redis, saveTask, type StoredTask } from "./redis.js";
 import { canAccessTask } from "./task-access.js";
@@ -27,7 +29,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 app.locals.redis = redis;
 app.use(cookieParser());
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "4mb" })); // 4mb: canvas documents (whole-project PUT) can exceed 1mb
 const applicationOrigin = new URL(config.origin).origin;
 const previewRedirectCacheHeader = previewRedirectCacheControl(config.tosPreviewTtlSeconds);
 app.use((req, res, next) => {
@@ -440,6 +442,86 @@ app.patch("/api/assets/:id", requireAuth, async (req, res) => {
 });
 app.delete("/api/assets/:id", requireAuth, async (req, res) => {
   try { const user = res.locals.user as SessionUser; const id = param(req.params.id); if (!ownedUserAsset(id, user.id)) return res.status(404).json({ error: "素材不存在" }); if (users.isUserAssetInActiveTask(id, user.id)) return res.status(409).json({ error: "素材正被运行中的任务引用，任务结束后即可删除" }); await callAssetApi("DeleteAsset", { Id: id }); users.deleteUserAsset(id, user.id); console.info(JSON.stringify({ type: "user_asset_mutation", action: "delete_asset", userId: user.id, assetId: id, at: new Date().toISOString() })); res.status(204).end(); } catch (error) { respondError(res, error, 502); }
+});
+
+
+// ---- Canvas projects ----
+const canvasListQuerySchema = z.object({ page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(50) });
+const canvasTitleBodySchema = z.object({ title: z.string().trim().min(1, "画布名称不能为空").max(80, "画布名称不能超过 80 个字符") });
+const canvasSaveBodySchema = z.object({ revision: z.number().int().min(0), document: canvasDocumentSchema });
+const accessibleCanvas = (id: string, userId: string) => {
+  const project = users.readCanvasProject(id);
+  return project && project.ownerId === userId ? project : null;
+};
+
+app.get("/api/canvases", requireAuth, async (req, res) => {
+  try {
+    const query = canvasListQuerySchema.parse(req.query);
+    const user = res.locals.user as SessionUser;
+    const projects = users.listCanvasProjects(user.id, query.pageSize + 1, (query.page - 1) * query.pageSize);
+    const hasMore = projects.length > query.pageSize;
+    res.json({ Items: projects.slice(0, query.pageSize).map(publicCanvasProject), PageNumber: query.page, PageSize: query.pageSize, HasMore: hasMore });
+  } catch (error) { respondError(res, error, 502); }
+});
+
+app.post("/api/canvases", requireAuth, async (req, res) => {
+  try {
+    const { title } = z.object({ title: z.string().trim().min(1).max(80).optional() }).parse(req.body);
+    const user = res.locals.user as SessionUser;
+    const now = Date.now();
+    const project: CanvasProject = {
+      id: `canvas-${crypto.randomUUID()}`, ownerId: user.id, title: title ?? "未命名画布",
+      documentJson: JSON.stringify(DEFAULT_CANVAS_DOCUMENT), revision: 0, createdAt: now, updatedAt: now
+    };
+    users.createCanvasProject(project);
+    console.info(JSON.stringify({ type: "canvas_mutation", action: "create", userId: user.id, canvasId: project.id, at: new Date().toISOString() }));
+    res.status(201).json({ id: project.id, title: project.title });
+  } catch (error) { respondError(res, error, 502); }
+});
+
+app.get("/api/canvases/:id", requireAuth, async (req, res) => {
+  try {
+    const user = res.locals.user as SessionUser;
+    const project = accessibleCanvas(param(req.params.id), user.id);
+    if (!project) return res.status(404).json({ error: "画布不存在" });
+    res.json(publicCanvasProjectDetail(project));
+  } catch (error) { respondError(res, error, 502); }
+});
+
+app.put("/api/canvases/:id", requireAuth, async (req, res) => {
+  try {
+    const { revision, document } = canvasSaveBodySchema.parse(req.body);
+    const user = res.locals.user as SessionUser;
+    const id = param(req.params.id);
+    const result = users.updateCanvasProjectDocument(id, user.id, JSON.stringify(document), revision);
+    if (result === null) return res.status(404).json({ error: "画布不存在" });
+    if (result.status === "conflict") return res.status(409).json({ error: "画布已在其他窗口被修改，已保留最新版本", currentRevision: result.currentRevision });
+    const project = users.readCanvasProject(id)!;
+    console.info(JSON.stringify({ type: "canvas_mutation", action: "save", userId: user.id, canvasId: id, revision: result.revision, at: new Date().toISOString() }));
+    res.json(publicCanvasProjectDetail(project));
+  } catch (error) { respondError(res, error, 502); }
+});
+
+app.patch("/api/canvases/:id", requireAuth, async (req, res) => {
+  try {
+    const { title } = canvasTitleBodySchema.parse(req.body);
+    const user = res.locals.user as SessionUser;
+    const id = param(req.params.id);
+    if (!users.renameCanvasProject(id, user.id, title)) return res.status(404).json({ error: "画布不存在" });
+    const project = users.readCanvasProject(id)!;
+    console.info(JSON.stringify({ type: "canvas_mutation", action: "rename", userId: user.id, canvasId: id, at: new Date().toISOString() }));
+    res.json({ id: project.id, title: project.title });
+  } catch (error) { respondError(res, error, 502); }
+});
+
+app.delete("/api/canvases/:id", requireAuth, async (req, res) => {
+  try {
+    const user = res.locals.user as SessionUser;
+    const id = param(req.params.id);
+    if (!users.softDeleteCanvasProject(id, user.id)) return res.status(404).json({ error: "画布不存在" });
+    console.info(JSON.stringify({ type: "canvas_mutation", action: "delete", userId: user.id, canvasId: id, at: new Date().toISOString() }));
+    res.status(204).end();
+  } catch (error) { respondError(res, error, 502); }
 });
 
 let latestTosHealth: { configured: boolean; reachable: boolean; checkedAt?: string } = { configured: tosConfigured(), reachable: false };
