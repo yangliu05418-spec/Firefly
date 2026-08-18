@@ -1,7 +1,7 @@
 /**
  * 画布工作台：接管 /studio/canvas/:id 路由。
- * M2：载入文档 → 渲染视口/网格/节点/连线/小地图/工具栏；交互（选中/重命名/文本编辑/缩放节点）已接线，
- * 拖拽/框选/连线/剪贴板/撤销重做在 M3 接入。
+ * M3：拖拽（分组跟随/吸附）、框选（shift 加选）、连线创建、剪贴板、撤销/重做、快捷键全部接线。
+ * 自动保存（800ms debounce PUT）与 409 冲突处理在 M5。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Archive, ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
@@ -12,9 +12,10 @@ import { ActiveConnectionPath, ConnectionPath } from "./components/CanvasConnect
 import { CanvasMinimap } from "./components/CanvasMinimap";
 import { CanvasNode } from "./components/CanvasNode";
 import { CanvasToolbar } from "./components/CanvasToolbar";
-import { getRelatedNodeIds } from "./core/connections";
+import { boxRectFromPoints } from "./core/selection";
 import { resetViewport, setZoomScale } from "./core/viewport";
 import { relativeTime } from "./format";
+import { useCanvasInteractions } from "./useCanvasInteractions";
 
 export function CanvasWorkspace({ canvasId, navigate }: { canvasId: string; navigate: (path: string) => void }) {
   const [loadState, setLoadState] = useState<"loading" | "error" | "ready">("loading");
@@ -35,6 +36,11 @@ export function CanvasWorkspace({ canvasId, navigate }: { canvasId: string; navi
   const viewportSize = useCanvasStore((state) => state.viewportSize);
   const minimapOpen = useCanvasStore((state) => state.minimapOpen);
   const hoveredNodeId = useCanvasStore((state) => state.hoveredNodeId);
+  const connecting = useCanvasStore((state) => state.connecting);
+  const mouseWorld = useCanvasStore((state) => state.mouseWorld);
+  const connectionTargetNodeId = useCanvasStore((state) => state.connectionTargetNodeId);
+
+  const { handlers, selectionBox, dropTargetGroupId, resetHistory, getRelatedIds } = useCanvasInteractions({ surfaceRef });
 
   const load = useCallback(async () => {
     setLoadState("loading");
@@ -43,6 +49,7 @@ export function CanvasWorkspace({ canvasId, navigate }: { canvasId: string; navi
       const project = await getCanvas(canvasId);
       if (!project.document) throw new Error("画布文档无法解析");
       useCanvasStore.getState().hydrate(project.document);
+      resetHistory();
       setProjectTitle(project.title);
       setProjectUpdatedAt(project.updatedAt);
       setLoadState("ready");
@@ -50,7 +57,7 @@ export function CanvasWorkspace({ canvasId, navigate }: { canvasId: string; navi
       setLoadError(error instanceof Error ? error.message : "画布暂时无法载入");
       setLoadState("error");
     }
-  }, [canvasId]);
+  }, [canvasId, resetHistory]);
 
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
@@ -73,24 +80,12 @@ export function CanvasWorkspace({ canvasId, navigate }: { canvasId: string; navi
     return () => observer.disconnect();
   }, [loadState]);
 
-  const relatedIds = useMemo(() => (hoveredNodeId ? getRelatedNodeIds(hoveredNodeId, connections) : new Set<string>()), [hoveredNodeId, connections]);
+  const relatedIds = useMemo(() => (hoveredNodeId ? getRelatedIds(hoveredNodeId) : new Set<string>()), [hoveredNodeId, getRelatedIds]);
   const selectedSet = useMemo(() => new Set(selection), [selection]);
-
   const store = useCanvasStore.getState;
 
-  const handleNodeMouseDown = useCallback((event: React.MouseEvent, nodeId: string) => {
-    event.stopPropagation();
-    // M3：拖拽。M2 仅确保选中态稳定。
-  }, []);
-
-  const handleNodeSelectCapture = useCallback(
-    (event: React.MouseEvent, nodeId: string) => {
-      if (event.button !== 0) return;
-      store().setHoveredNodeId(null);
-      store().toggleNodeSelection(nodeId, event.shiftKey || event.metaKey || event.ctrlKey);
-    },
-    [store],
-  );
+  const connectingNode = connecting ? nodes.find((node) => node.id === connecting.nodeId) : undefined;
+  const connectingTarget = connectionTargetNodeId ? nodes.find((node) => node.id === connectionTargetNodeId) : undefined;
 
   if (loadState === "loading") {
     return (
@@ -138,8 +133,9 @@ export function CanvasWorkspace({ canvasId, navigate }: { canvasId: string; navi
           tool={tool}
           backgroundMode={background}
           onViewportChange={(next) => store().setViewport(next)}
-          onCanvasMouseDown={() => store().clearSelection()}
-          onCanvasDeselect={() => store().clearSelection()}
+          onCanvasMouseDown={handlers.onCanvasMouseDown}
+          onCanvasDeselect={handlers.onCanvasDeselect}
+          onCanvasDoubleClick={handlers.onCanvasDoubleClick}
           onContextMenu={(event) => event.preventDefault()}
         >
           <svg className="canvas-connections-layer" width="10000" height="10000" style={{ pointerEvents: "none" }}>
@@ -158,10 +154,23 @@ export function CanvasWorkspace({ canvasId, navigate }: { canvasId: string; navi
                     store().setSelectedConnectionId(connection.id);
                     store().setSelection([]);
                   }}
+                  onContextMenu={(event) => event.preventDefault()}
                 />
               );
             })}
+            {connecting && mouseWorld && <ActiveConnectionPath node={connectingNode} handle={connecting} mouseWorld={mouseWorld} target={connectingTarget} />}
           </svg>
+          {selectionBox && (
+            <div
+              className="canvas-selection-box"
+              style={{
+                left: boxRectFromPoints(selectionBox.startWorldX, selectionBox.startWorldY, selectionBox.currentWorldX, selectionBox.currentWorldY).x,
+                top: boxRectFromPoints(selectionBox.startWorldX, selectionBox.startWorldY, selectionBox.currentWorldX, selectionBox.currentWorldY).y,
+                width: boxRectFromPoints(selectionBox.startWorldX, selectionBox.startWorldY, selectionBox.currentWorldX, selectionBox.currentWorldY).width,
+                height: boxRectFromPoints(selectionBox.startWorldX, selectionBox.startWorldY, selectionBox.currentWorldX, selectionBox.currentWorldY).height,
+              }}
+            />
+          )}
           {nodes.map((node) => (
             <CanvasNode
               key={node.id}
@@ -169,18 +178,21 @@ export function CanvasWorkspace({ canvasId, navigate }: { canvasId: string; navi
               scale={viewport.k}
               isSelected={selectedSet.has(node.id)}
               isRelated={relatedIds.has(node.id)}
-              isConnectionTarget={false}
-              isConnecting={false}
+              isConnectionTarget={connectionTargetNodeId === node.id}
+              isConnecting={connecting !== null}
+              interactive
+              isGroupDropTarget={dropTargetGroupId === node.id}
               groupChildCount={node.type === "group" ? nodes.filter((child) => child.metadata.groupId === node.id).length : 0}
-              onMouseDown={handleNodeMouseDown}
-              onSelectCapture={handleNodeSelectCapture}
-              onHoverStart={(nodeId) => store().setHoveredNodeId(nodeId)}
-              onHoverEnd={() => store().setHoveredNodeId(null)}
-              onResizeStart={() => {}}
-              onResize={(nodeId, width, height, position) => store().updateNode(nodeId, { width, height, ...(position ? { position } : {}) })}
-              onResizeEnd={() => {}}
-              onContentChange={(nodeId, content) => store().updateNode(nodeId, { metadata: { ...nodes.find((n) => n.id === nodeId)?.metadata ?? {}, content } })}
-              onTitleChange={(nodeId, title) => store().updateNode(nodeId, { title })}
+              onMouseDown={handlers.onNodeMouseDown}
+              onSelectCapture={handlers.onNodeSelectCapture}
+              onHoverStart={handlers.onNodeHoverStart}
+              onHoverEnd={handlers.onNodeHoverEnd}
+              onConnectStart={handlers.onNodeConnectStart}
+              onResizeStart={handlers.onNodeResizeStart}
+              onResize={handlers.onNodeResize}
+              onResizeEnd={handlers.onNodeResizeEnd}
+              onContentChange={handlers.onNodeContentChange}
+              onTitleChange={handlers.onNodeTitleChange}
               onContextMenu={(event) => event.preventDefault()}
             />
           ))}

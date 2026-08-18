@@ -20,6 +20,7 @@ type CanvasStore = {
   connectionTargetNodeId: string | null;
 
   hydrate: (document: CanvasDocument) => void;
+  replaceSnapshot: (nodes: CanvasNode[], connections: CanvasConnection[], background: CanvasBackground) => void;
   setViewport: (viewport: CanvasViewportTransform) => void;
   setViewportSize: (size: { width: number; height: number }) => void;
   setBackground: (background: CanvasBackground) => void;
@@ -58,6 +59,7 @@ export const useCanvasStore = create<CanvasStore>((set) => ({
   connectionTargetNodeId: null,
 
   hydrate: (document) => set({ document: { ...document, nodes: [...document.nodes], connections: [...document.connections] }, selection: [], selectedConnectionId: null, connecting: null, mouseWorld: null, connectionTargetNodeId: null, tool: "select" }),
+  replaceSnapshot: (nodes, connections, background) => set((state) => ({ document: { ...state.document, nodes: [...nodes], connections: [...connections], background } })),
   setViewport: (viewport) => set((state) => ({ document: { ...state.document, viewport } })),
   setViewportSize: (viewportSize) => set({ viewportSize }),
   setBackground: (background) => set((state) => ({ document: { ...state.document, background } })),
