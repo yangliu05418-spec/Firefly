@@ -26,7 +26,7 @@ import { abortMultipartUpload, completeMultipartUpload, createMultipartUpload, h
 import { createCanvasAssetFromUpload } from "./canvas-assets.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
 import { IMAGE_MODELS, IMAGE_RATIOS, imageModelById, computeImageSize, DEFAULT_IMAGE_MODEL } from "./image-models.js";
-import { downloadImageBuffer, generateSingleImage, openRouterPool, OpenRouterError } from "./openrouter.js";
+import { acquireImageSlot, downloadImageBuffer, generateSingleImage, openRouterPool, OpenRouterError, releaseImageSlot } from "./openrouter.js";
 import { storeGeneratedImage } from "./generated-media.js";
 
 const app = express();
@@ -484,7 +484,12 @@ app.post("/api/image-generation", requireAuth, async (req, res) => {
       references.push(signedObjectUrl(media.objectKey, { expires: 2 * 3600, fileName: media.fileName }));
     }
     if (!openRouterPool().size) return res.status(503).json({ error: "服务端尚未配置 OpenRouter API Key" });
+    if (!acquireImageSlot(user.id)) return res.status(429).json({ error: "图片生成繁忙，请等当前生成完成后再试（每用户同时最多 2 组）" });
     const startedAt = Date.now();
+    let slotReleased = false;
+    const releaseSlot = () => { if (!slotReleased) { slotReleased = true; releaseImageSlot(user.id); } };
+    res.on("finish", releaseSlot);
+    res.on("close", releaseSlot);
     console.info(JSON.stringify({ type: "image_generation_started", at: new Date().toISOString(), userId: user.id, model: body.model, ratio: body.ratio, resolution: body.resolution, size, count: body.count, references: references.length, healthyKeys: openRouterPool().healthyCount() }));
     // 并发生成（上限 2），逐个落盘
     let cursor = 0;

@@ -13,6 +13,9 @@
     "tos:audit": "node dist-server/tos-audit.js",
     "history:clear": "node dist-server/clear-history.js",
     "test": "vitest run",
+    "typecheck:frontend": "tsc --noEmit -p tsconfig.frontend.json",
+    "typecheck:server": "tsc --noEmit -p tsconfig.server.json",
+    "typecheck": "npm run typecheck:frontend && npm run typecheck:server",
     "user:disable": "node dist-server/user-admin.js disable"
   },
   "dependencies": {

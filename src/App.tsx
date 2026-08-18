@@ -223,7 +223,7 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
   const referenceSlots = engine === "image" ? ["参考图"] : mode === "text" ? [] : mode === "first_frame" ? ["首帧"] : mode === "first_last" ? ["首帧", "尾帧"] : mode === "edit" ? ["编辑视频", "参考内容"] : mode === "extend" ? ["续写视频", "参考内容"] : ["参考内容"];
   const fileAccept = engine === "image" || mode === "first_frame" || mode === "first_last" ? "image/*" : "image/*,video/mp4,video/quicktime,audio/mpeg,audio/wav";
   const imageSpec = imageModels.find((item) => item.id === imageModelId) ?? imageModels[0];
-  const imageReady = engine === "image" ? Boolean(prompt.trim()) : undefined;
+  const imageReady = engine === "image" ? Boolean(prompt.trim()) && Boolean(imageSpec) : undefined;
 
   useEffect(() => {
     void api.get<{ Items: ImageModel[]; DefaultModel: string }>("/api/image-models").then((result) => {
@@ -248,7 +248,7 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
   if (!model) return null;
 
   const pickFiles = async (files: FileList | null) => {
-    if (!files || mode === "text") return;
+    if (!files || (mode === "text" && engine === "video")) return;
     const plannedAssets = [...assets];
     for (const file of Array.from(files)) {
       const type: UploadAsset["type"] = file.type.startsWith("image/") ? "image" : file.type.startsWith("video/") ? "video" : "audio";
@@ -279,7 +279,7 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
     const typeCount = assets.filter((asset) => asset.type === candidate.type).length;
     const allowed = candidate.type === "image" ? model.imageLimit : candidate.type === "video" ? model.videoLimit : model.audioLimit;
     if (!allowed || typeCount >= allowed) { setError(`当前模型最多支持 ${allowed} 个${candidate.type === "image" ? "图片" : candidate.type === "video" ? "视频" : "音频"}参考`); return null; }
-    if (mode === "text") { setError("文本生成模式不接受参考素材"); return null; }
+    if (mode === "text" && engine === "video") { setError("文本生成模式不接受参考素材"); return null; }
     if (engine === "image" && candidate.type !== "image") { setError("图片生成只接受图片参考（图生图）"); return null; }
     if (mode === "first_frame" && (candidate.type !== "image" || assets.length)) { setError("首帧模式只接受一张图片"); return null; }
     if (mode === "first_last" && (candidate.type !== "image" || assets.length >= 2)) { setError("首尾帧模式只接受两张图片"); return null; }
@@ -318,7 +318,7 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
       {!!assets.length && <div className="asset-strip">{assets.map((asset, index) => <div className="asset-chip" key={asset.id}>{asset.preview ? <img src={asset.preview} /> : asset.type === "video" ? <Video /> : <AudioLines />}<span><b>{asset.role === "first_frame" ? "首帧" : asset.role === "last_frame" ? "尾帧" : `${asset.type === "image" ? "图片" : asset.type === "video" ? "视频" : "音频"} ${index + 1}`}</b><small>{asset.progress === 100 ? asset.name : `上传 ${asset.progress ?? 0}%`}</small></span>{asset.progress !== 100 && <i style={{ width: `${asset.progress ?? 0}%` }} />}<button onClick={() => setAssets((old) => old.filter((a) => a.id !== asset.id))}><X /></button></div>)}</div>}
       <div className={`prompt-row ${referenceSlots.length > 1 ? "prompt-row--dual" : ""} ${!referenceSlots.length ? "prompt-row--text" : ""}`}>
         {!!referenceSlots.length && <div className="reference-slots">{referenceSlots.map((label, index) => <button className="add-reference" key={label} onClick={() => fileInput.current?.click()} disabled={(mode === "first_frame" && assets.length >= 1) || (mode === "first_last" && assets.length > index)}><Plus /><span>{label}</span></button>)}</div>}
-        <PromptEditor value={prompt} change={setPrompt} placeholder={engine === "image" ? "描述你想生成的画面；上传参考图即可进行图生图……" : modePlaceholders[mode]} assets={assets} disabled={mode === "text"} attach={attachMentionAsset} />
+        <PromptEditor value={prompt} change={setPrompt} placeholder={engine === "image" ? "描述你想生成的画面；上传参考图即可进行图生图……" : modePlaceholders[mode]} assets={assets} disabled={mode === "text" && engine === "video"} attach={attachMentionAsset} />
         <input ref={fileInput} hidden type="file" multiple={mode !== "first_frame"} accept={fileAccept} onChange={(e) => pickFiles(e.target.files)} />
       </div>
       <div className="control-row">

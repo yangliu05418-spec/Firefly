@@ -75,6 +75,24 @@ const pool = new OpenRouterKeyPool(config.openrouterApiKeys);
 
 export const openRouterPool = () => pool;
 
+/** 每用户图片生成并发上限（成本防护；单实例部署，内存计数即可） */
+export const MAX_USER_IMAGE_INFLIGHT = 2;
+
+const userInflight = new Map<string, number>();
+
+export const acquireImageSlot = (userId: string): boolean => {
+  const current = userInflight.get(userId) ?? 0;
+  if (current >= MAX_USER_IMAGE_INFLIGHT) return false;
+  userInflight.set(userId, current + 1);
+  return true;
+};
+
+export const releaseImageSlot = (userId: string) => {
+  const current = userInflight.get(userId) ?? 0;
+  if (current <= 1) userInflight.delete(userId);
+  else userInflight.set(userId, current - 1);
+};
+
 const chatCompletionsUrl = () => config.openrouterBaseUrl.replace(/\/$/, "") + "/chat/completions";
 
 type ChatRequestBody = {
@@ -194,12 +212,19 @@ const isDataUrl = (url: string) => url.startsWith("data:");
 export const generateSingleImage = async (input: { model: string; prompt: string; references: string[]; size: string }): Promise<string> => {
   const content: (OpenRouterReference | { type: "image_url"; image_url: { url: string } })[] = [{ type: "text", text: input.prompt }];
   input.references.forEach((url) => content.push({ type: "image_url", image_url: { url } }));
-  const { data } = await callWithRetry({
+  const base: ChatRequestBody = {
     model: input.model,
     messages: [{ role: "user", content }],
     modalities: ["image", "text"],
-    image: { size: input.size },
-  });
+  };
+  let data: unknown;
+  try {
+    ({ data } = await callWithRetry({ ...base, image: { size: input.size } }));
+  } catch (error) {
+    // 部分模型不接受 image.size 参数（400）→ 去掉尺寸参数重试一次
+    if (!(error instanceof OpenRouterError) || error.status !== 400) throw error;
+    ({ data } = await callWithRetry(base));
+  }
   const images = parseOpenRouterImages(data);
   if (!images.length) throw new OpenRouterError("OpenRouter 未返回图片内容（模型可能不支持当前参数）", 400);
   return images[0];
