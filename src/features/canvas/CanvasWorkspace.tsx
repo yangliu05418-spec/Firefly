@@ -12,6 +12,7 @@ import { ActiveConnectionPath, ConnectionPath } from "./components/CanvasConnect
 import { CanvasMinimap } from "./components/CanvasMinimap";
 import { CanvasNode } from "./components/CanvasNode";
 import { CanvasToolbar } from "./components/CanvasToolbar";
+import { CanvasMediaInsertModal } from "./components/CanvasMediaInsertModal";
 import { boxRectFromPoints } from "./core/selection";
 import { resetViewport, setZoomScale } from "./core/viewport";
 import { relativeTime } from "./format";
@@ -21,6 +22,7 @@ export function CanvasWorkspace({ canvasId, navigate }: { canvasId: string; navi
   const [loadState, setLoadState] = useState<"loading" | "error" | "ready">("loading");
   const [loadError, setLoadError] = useState("");
   const [projectTitle, setProjectTitle] = useState("");
+  const [mediaModalOpen, setMediaModalOpen] = useState(false);
   const [projectUpdatedAt, setProjectUpdatedAt] = useState(0);
   const [now, setNow] = useState(Date.now());
   const surfaceRef = useRef<HTMLDivElement>(null);
@@ -199,6 +201,7 @@ export function CanvasWorkspace({ canvasId, navigate }: { canvasId: string; navi
         </CanvasSurface>
         {minimapOpen && <CanvasMinimap nodes={nodes} viewport={viewport} viewportSize={viewportSize} onViewportChange={(next) => store().setViewport(next)} />}
         <CanvasToolbar
+          onInsertMedia={() => setMediaModalOpen(true)}
           tool={tool}
           onToolChange={(nextTool) => store().setTool(nextTool)}
           scale={viewport.k}
@@ -210,6 +213,15 @@ export function CanvasWorkspace({ canvasId, navigate }: { canvasId: string; navi
           onBackgroundChange={(nextBackground) => store().setBackground(nextBackground)}
         />
       </div>
+      <CanvasMediaInsertModal
+        open={mediaModalOpen}
+        canvasId={canvasId}
+        onClose={() => setMediaModalOpen(false)}
+        onInserted={(node) => {
+          store().addNode(node);
+          store().setSelection([node.id]);
+        }}
+      />
     </div>
   );
 }

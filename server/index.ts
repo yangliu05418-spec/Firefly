@@ -23,6 +23,7 @@ import { ensureAutoReferenceGroup } from "./asset-registration.js";
 import { previewRedirectCacheControl } from "./media-cache.js";
 import { stablePreviewUrl } from "./preview-url-cache.js";
 import { abortMultipartUpload, completeMultipartUpload, createMultipartUpload, headObject, inputObjectKey, inspectMediaObject, signUploadPart, signedObjectUrl, tosConfigured, tosEnabled, tosHealth } from "./tos.js";
+import { createCanvasAssetFromUpload } from "./canvas-assets.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -364,7 +365,7 @@ app.post("/api/media-events", requireAuth, async (req, res) => {
 });
 
 type ProviderAssetRecord = { Id: string; Name?: string; AssetType?: UserAsset["assetType"]; Status?: UserAsset["status"]; URL?: string; GroupId?: string };
-const publicUserAsset = (asset: UserAsset) => ({ Id: asset.id, Name: asset.name, AssetType: asset.assetType, Status: asset.status, URL: asset.url, GroupId: asset.groupId });
+const publicUserAsset = (asset: UserAsset) => ({ Id: asset.id, Name: asset.name, AssetType: asset.assetType, Status: asset.status, URL: asset.url, GroupId: asset.groupId, UploadId: asset.uploadId });
 const refreshUserAsset = async (asset: UserAsset) => {
   if (asset.status === "Active" && asset.url) return asset;
   try {
@@ -449,6 +450,10 @@ app.delete("/api/assets/:id", requireAuth, async (req, res) => {
 const canvasListQuerySchema = z.object({ page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(50) });
 const canvasTitleBodySchema = z.object({ title: z.string().trim().min(1, "画布名称不能为空").max(80, "画布名称不能超过 80 个字符") });
 const canvasSaveBodySchema = z.object({ revision: z.number().int().min(0), document: canvasDocumentSchema });
+const canvasMediaImportSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("generation"), taskId: z.string().min(1).max(120) }),
+  z.object({ kind: z.literal("upload"), uploadId: z.string().min(20).max(200) }),
+]);
 const accessibleCanvas = (id: string, userId: string) => {
   const project = users.readCanvasProject(id);
   return project && project.ownerId === userId ? project : null;
@@ -521,6 +526,52 @@ app.delete("/api/canvases/:id", requireAuth, async (req, res) => {
     if (!users.softDeleteCanvasProject(id, user.id)) return res.status(404).json({ error: "画布不存在" });
     console.info(JSON.stringify({ type: "canvas_mutation", action: "delete", userId: user.id, canvasId: id, at: new Date().toISOString() }));
     res.status(204).end();
+  } catch (error) { respondError(res, error, 502); }
+});
+
+
+app.post("/api/canvases/:id/media", requireAuth, async (req, res) => {
+  try {
+    const body = canvasMediaImportSchema.parse(req.body);
+    const user = res.locals.user as SessionUser;
+    const canvasId = param(req.params.id);
+    if (!accessibleCanvas(canvasId, user.id)) return res.status(404).json({ error: "画布不存在" });
+    if (body.kind === "generation") {
+      const task = await readTask(body.taskId);
+      if (!task || !canAccessTask(task, user.id) || task.status !== "succeeded" || task.mediaStatus !== "ready") return res.status(404).json({ error: "成片不存在或尚未就绪" });
+      const media = users.readTaskMedia(task.id, "output") ?? users.readTaskMedia(task.id, "preview");
+      if (!media) return res.status(425).json({ error: "成片正在归档，请稍后重试" });
+      let width: number | undefined;
+      let height: number | undefined;
+      let durationMs: number | undefined;
+      try {
+        const info = await inspectMediaObject(media.objectKey, "video") as { Streams?: { Width?: number; Height?: number; Duration?: number }[]; Format?: { Duration?: number } } | null;
+        const stream = info?.Streams?.[0];
+        width = stream?.Width ? Number(stream.Width) : undefined;
+        height = stream?.Height ? Number(stream.Height) : undefined;
+        const seconds = stream?.Duration ?? info?.Format?.Duration;
+        durationMs = typeof seconds === "number" && Number.isFinite(seconds) ? Math.round(seconds * 1000) : undefined;
+      } catch { /* 元信息读取失败时节点使用默认尺寸 */ }
+      console.info(JSON.stringify({ type: "canvas_media_import", kind: "generation", userId: user.id, canvasId, taskId: task.id, width, height, durationMs, at: new Date().toISOString() }));
+      res.json({ mediaRef: { source: "generation", taskId: task.id }, title: task.prompt || "参考素材生成", fileName: media.fileName, width, height, durationMs });
+      return;
+    }
+    const asset = await createCanvasAssetFromUpload({ uploadId: body.uploadId, ownerId: user.id, canvasId });
+    console.info(JSON.stringify({ type: "canvas_media_import", kind: "upload", userId: user.id, canvasId, assetId: asset.id, at: new Date().toISOString() }));
+    res.status(201).json({ mediaRef: { source: "canvas-asset", assetId: asset.id }, title: asset.fileName, fileName: asset.fileName, status: asset.status });
+  } catch (error) { respondError(res, error, 502); }
+});
+
+app.get("/api/canvas-media/:assetId", requireAuth, async (req, res) => {
+  try {
+    const user = res.locals.user as SessionUser;
+    const asset = users.readCanvasAsset(param(req.params.id));
+    if (!asset || asset.ownerId !== user.id) return res.status(404).json({ error: "画布素材不存在" });
+    if (asset.status === "copying") return res.status(425).json({ error: "素材正在迁移到长期存储，请稍后重试" });
+    if (asset.status === "failed") return res.status(425).json({ error: "素材迁移失败，请删除节点后重新插入" });
+    res.setHeader("Cache-Control", previewRedirectCacheHeader);
+    res.setHeader("Vary", "Cookie");
+    res.redirect(302, signedObjectUrl(asset.objectKey, { fileName: asset.fileName }));
   } catch (error) { respondError(res, error, 502); }
 });
 

@@ -4,4 +4,4 @@ export type UploadAsset = { id: string; uploadId?: string; name: string; type: "
 export type SessionUser = { id: string; email: string; name: string; avatarUrl: string };
 export type Task = { id: string; caseId: string; ownerId?: string; visibility?: "private" | "shared"; providerId?: string; status: "queued" | "submitting" | "running" | "succeeded" | "failed"; mediaStatus?: "none" | "archiving" | "ready" | "fallback" | "failed"; mediaRevision?: number; prompt: string; model: string; mode: string; ratio: string; resolution: string; duration: number; createdAt: number; updatedAt: number; videoUrl?: string; downloadUrl?: string; posterUrl?: string; videoExpiresAt?: number; error?: string };
 export type LibraryGroup = { Id: string; Name: string; Description?: string };
-export type LibraryAsset = { Id: string; Name: string; AssetType: "Image" | "Video" | "Audio"; Status: "Active" | "Processing" | "Failed"; URL?: string; GroupId: string };
+export type LibraryAsset = { Id: string; Name: string; AssetType: "Image" | "Video" | "Audio"; Status: "Active" | "Processing" | "Failed"; URL?: string; GroupId: string; UploadId?: string };

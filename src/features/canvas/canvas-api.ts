@@ -1,5 +1,5 @@
 import { api, notifySignedOut } from "../../api";
-import type { CanvasDocument, CanvasListResult, CanvasProjectDetail } from "./canvas-types";
+import type { CanvasDocument, CanvasListResult, CanvasMediaRef, CanvasProjectDetail } from "./canvas-types";
 
 const encode = (id: string) => encodeURIComponent(id);
 
@@ -17,6 +17,20 @@ export const renameCanvas = (id: string, title: string): Promise<{ id: string; t
 
 export const deleteCanvas = (id: string): Promise<void> =>
   api.delete<void>("/api/canvases/" + encode(id));
+
+export type CanvasMediaImportResult = {
+  mediaRef: CanvasMediaRef;
+  title: string;
+  fileName: string;
+  width?: number;
+  height?: number;
+  durationMs?: number;
+  status?: "copying" | "ready";
+};
+
+/** 导入媒体到画布（generation 引用或上传对象迁移到 canvas/ 前缀） */
+export const importCanvasMedia = (canvasId: string, body: { kind: "generation"; taskId: string } | { kind: "upload"; uploadId: string }): Promise<CanvasMediaImportResult> =>
+  api.post<CanvasMediaImportResult>("/api/canvases/" + encode(canvasId) + "/media", body);
 
 export type CanvasSaveError = Error & { status: number; currentRevision?: number };
 

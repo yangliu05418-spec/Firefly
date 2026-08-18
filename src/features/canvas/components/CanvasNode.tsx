@@ -7,6 +7,8 @@ import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { Group, Image as ImageIcon, Music2, Video } from "lucide-react";
 import type { CanvasNode as CanvasNodeData, CanvasPosition } from "../canvas-types";
 import { getNodeSpec, NODE_MIN_HEIGHT, NODE_MIN_WIDTH } from "../core/nodes";
+import { canvasMediaUrl } from "../canvas-media";
+import { LazyCanvasVideo } from "./media/LazyCanvasVideo";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 
@@ -331,26 +333,28 @@ function TextNodeContent({ node, isEditingContent, textareaRef, onContentChange,
 }
 
 function ImageNodeContent({ node }: { node: CanvasNodeData }) {
-  const content = (node.metadata.content as string) || "";
-  if (!content) {
+  const src = canvasMediaUrl(node);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [src]);
+  if (!src || failed) {
     return (
       <div className="canvas-node__empty">
         <i><ImageIcon /></i>
-        <span>图片节点</span>
-        <small>通过资产归档插入</small>
+        <span>{failed ? "图片加载失败" : "图片节点"}</span>
+        <small>{failed ? "可在资产归档中重新插入" : "通过资产归档插入"}</small>
       </div>
     );
   }
   return (
     <div className="canvas-node__media">
-      <img src={content} alt={node.title} draggable={false} onDragStart={(event) => event.preventDefault()} className={node.metadata.freeResize ? "canvas-node__img canvas-node__img--fill" : "canvas-node__img"} data-canvas-no-zoom />
+      <img src={src} alt={node.title} draggable={false} loading="lazy" decoding="async" onDragStart={(event) => event.preventDefault()} onError={() => setFailed(true)} className={node.metadata.freeResize ? "canvas-node__img canvas-node__img--fill" : "canvas-node__img"} data-canvas-no-zoom />
     </div>
   );
 }
 
 function VideoNodeContent({ node }: { node: CanvasNodeData }) {
-  const content = (node.metadata.content as string) || "";
-  if (!content) {
+  const src = canvasMediaUrl(node);
+  if (!src) {
     return (
       <div className="canvas-node__empty">
         <i><Video /></i>
@@ -359,7 +363,7 @@ function VideoNodeContent({ node }: { node: CanvasNodeData }) {
       </div>
     );
   }
-  return <video src={content} controls preload="metadata" className="canvas-node__video" data-canvas-no-zoom />;
+  return <LazyCanvasVideo src={src} />;
 }
 
 function AudioNodeContent({ node }: { node: CanvasNodeData }) {

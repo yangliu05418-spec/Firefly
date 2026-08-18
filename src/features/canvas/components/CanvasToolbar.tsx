@@ -3,7 +3,7 @@
  * 交互惯例对齐 Figma/Miro：滑杆缩放、快捷键弹层、图标按钮均带 aria-label 与 title。
  */
 import { useEffect, useState } from "react";
-import { Compass, Focus, Hand, HelpCircle, MousePointer2, X } from "lucide-react";
+import { Compass, Focus, Hand, HelpCircle, ImagePlus, MousePointer2, X } from "lucide-react";
 import type { CanvasBackground } from "../canvas-types";
 import type { CanvasTool } from "../canvas-store";
 
@@ -19,7 +19,7 @@ const SHORTCUTS: { keys: string; label: string }[] = [
   { keys: "双击节点标题", label: "重命名节点" },
 ];
 
-export function CanvasToolbar({ tool, onToolChange, scale, onScaleChange, onReset, isMiniMapOpen, onToggleMiniMap, background, onBackgroundChange }: {
+export function CanvasToolbar({ tool, onToolChange, scale, onScaleChange, onReset, isMiniMapOpen, onToggleMiniMap, background, onBackgroundChange, onInsertMedia }: {
   tool: CanvasTool;
   onToolChange: (tool: CanvasTool) => void;
   scale: number;
@@ -29,6 +29,7 @@ export function CanvasToolbar({ tool, onToolChange, scale, onScaleChange, onRese
   onToggleMiniMap: () => void;
   background: CanvasBackground;
   onBackgroundChange: (background: CanvasBackground) => void;
+  onInsertMedia?: () => void;
 }) {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
@@ -54,6 +55,7 @@ export function CanvasToolbar({ tool, onToolChange, scale, onScaleChange, onRese
         <button type="button" onClick={onReset} aria-label="重置视图" title="重置视图"><Focus /></button>
       </div>
       <div className="canvas-toolbar__divider" aria-hidden="true" />
+      {onInsertMedia && <button type="button" onClick={onInsertMedia} aria-label="插入素材" title="插入素材（成片或图片）"><ImagePlus /></button>}
       <button type="button" className={isMiniMapOpen ? "active" : ""} onClick={onToggleMiniMap} aria-label="小地图" title="小地图"><Compass /></button>
       <div className="canvas-toolbar__divider" aria-hidden="true" />
       <div className="canvas-toolbar__background" role="group" aria-label="背景样式">

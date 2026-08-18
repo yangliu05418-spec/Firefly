@@ -45,6 +45,9 @@ export type CanvasNode = {
 
 export type CanvasConnection = { id: string; fromNodeId: string; toNodeId: string };
 
+/** 媒体稳定引用：节点只存引用，不存签名 URL（铁律） */
+export type CanvasMediaRef = { source: "generation"; taskId: string } | { source: "canvas-asset"; assetId: string };
+
 export type CanvasDocument = {
   version: 1;
   viewport: CanvasViewportTransform;

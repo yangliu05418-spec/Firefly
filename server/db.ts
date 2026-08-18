@@ -73,6 +73,22 @@ export type UserAsset = {
   deletedAt?: number;
 };
 
+export type CanvasAsset = {
+  id: string;
+  ownerId: string;
+  canvasId: string;
+  sourceUploadId?: string;
+  objectKey: string;
+  fileName: string;
+  contentType: string;
+  size: number;
+  etag: string;
+  status: "copying" | "ready" | "failed";
+  createdAt: number;
+  updatedAt: number;
+  deletedAt?: number;
+};
+
 export type CanvasProject = {
   id: string;
   ownerId: string;
@@ -121,6 +137,12 @@ type CanvasProjectRow = {
   created_at: number; updated_at: number; deleted_at: number | null;
 };
 
+type CanvasAssetRow = {
+  id: string; owner_id: string; canvas_id: string; source_upload_id: string | null;
+  object_key: string; file_name: string; content_type: string; size: number; etag: string;
+  status: "copying" | "ready" | "failed"; created_at: number; updated_at: number; deleted_at: number | null;
+};
+
 const mapUser = (row?: UserRow): User | null => row ? ({
   id: row.id, feishuOpenId: row.feishu_open_id, feishuUnionId: row.feishu_union_id,
   tenantKey: row.tenant_key, email: row.email, name: row.name, avatarUrl: row.avatar_url,
@@ -152,6 +174,13 @@ const mapUserAsset = (row?: UserAssetRow): UserAsset | null => row ? ({
 const mapCanvasProject = (row?: CanvasProjectRow): CanvasProject | null => row ? ({
   id: row.id, ownerId: row.owner_id, title: row.title, documentJson: row.document_json,
   revision: row.revision, createdAt: row.created_at, updatedAt: row.updated_at,
+  deletedAt: row.deleted_at ?? undefined
+}) : null;
+
+const mapCanvasAsset = (row?: CanvasAssetRow): CanvasAsset | null => row ? ({
+  id: row.id, ownerId: row.owner_id, canvasId: row.canvas_id, sourceUploadId: row.source_upload_id ?? undefined,
+  objectKey: row.object_key, fileName: row.file_name, contentType: row.content_type, size: row.size,
+  etag: row.etag, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at,
   deletedAt: row.deleted_at ?? undefined
 }) : null;
 
@@ -252,6 +281,25 @@ export class UserStore {
         FOREIGN KEY (owner_id) REFERENCES users(id)
       );
       CREATE INDEX IF NOT EXISTS canvas_projects_owner_updated_idx ON canvas_projects(owner_id, updated_at DESC);
+      CREATE TABLE IF NOT EXISTS canvas_assets (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        canvas_id TEXT NOT NULL,
+        source_upload_id TEXT,
+        object_key TEXT NOT NULL UNIQUE,
+        file_name TEXT NOT NULL,
+        content_type TEXT NOT NULL,
+        size INTEGER NOT NULL DEFAULT 0,
+        etag TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL CHECK (status IN ('copying', 'ready', 'failed')),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        deleted_at INTEGER,
+        FOREIGN KEY (owner_id) REFERENCES users(id),
+        FOREIGN KEY (canvas_id) REFERENCES canvas_projects(id)
+      );
+      CREATE INDEX IF NOT EXISTS canvas_assets_canvas_idx ON canvas_assets(canvas_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS canvas_assets_delete_idx ON canvas_assets(status, updated_at);
     `);
     const mediaSchema = this.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'media_objects'").get() as { sql?: string } | undefined;
     if (mediaSchema?.sql && !mediaSchema.sql.includes("'preview'")) {
@@ -515,6 +563,34 @@ export class UserStore {
   renameCanvasProject(id: string, ownerId: string, title: string) {
     const result = this.database.prepare("UPDATE canvas_projects SET title = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").run(title, Date.now(), id, ownerId);
     return result.changes > 0;
+  }
+
+  createCanvasAsset(asset: CanvasAsset) {
+    this.database.prepare(`INSERT INTO canvas_assets (id, owner_id, canvas_id, source_upload_id, object_key, file_name, content_type, size, etag, status, created_at, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(asset.id, asset.ownerId, asset.canvasId, asset.sourceUploadId ?? null, asset.objectKey, asset.fileName, asset.contentType, asset.size, asset.etag, asset.status, asset.createdAt, asset.updatedAt, asset.deletedAt ?? null);
+    return asset;
+  }
+
+  readCanvasAsset(id: string) {
+    return mapCanvasAsset(this.database.prepare("SELECT * FROM canvas_assets WHERE id = ? AND deleted_at IS NULL").get(id) as CanvasAssetRow | undefined);
+  }
+
+  updateCanvasAsset(id: string, patch: { status?: CanvasAsset["status"]; size?: number; etag?: string; contentType?: string }) {
+    const current = this.readCanvasAsset(id);
+    if (!current) return null;
+    const now = Date.now();
+    this.database.prepare("UPDATE canvas_assets SET status = ?, size = ?, etag = ?, content_type = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL")
+      .run(patch.status ?? current.status, patch.size ?? current.size, patch.etag ?? current.etag, patch.contentType ?? current.contentType, now, id);
+    return this.readCanvasAsset(id)!;
+  }
+
+  softDeleteCanvasAsset(id: string, ownerId: string) {
+    const result = this.database.prepare("UPDATE canvas_assets SET deleted_at = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").run(Date.now(), Date.now(), id, ownerId);
+    return result.changes > 0;
+  }
+
+  pendingCanvasAssetDeletes(limit = 100) {
+    return (this.database.prepare("SELECT * FROM canvas_assets WHERE deleted_at IS NOT NULL AND status = 'ready' ORDER BY updated_at LIMIT ?").all(limit) as CanvasAssetRow[]).map((row) => mapCanvasAsset(row)!);
   }
 
   softDeleteCanvasProject(id: string, ownerId: string) {
