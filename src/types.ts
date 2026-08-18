@@ -3,5 +3,18 @@ export type ModelCapability = { id: string; name: string; note: string; modes: C
 export type UploadAsset = { id: string; uploadId?: string; name: string; type: "image" | "video" | "audio"; size: number; url?: string; assetId?: string; role: "reference_image" | "reference_video" | "reference_audio" | "first_frame" | "last_frame"; progress?: number; preview?: string; status?: "Active" | "Processing" | "Failed" };
 export type SessionUser = { id: string; email: string; name: string; avatarUrl: string };
 export type Task = { id: string; caseId: string; ownerId?: string; visibility?: "private" | "shared"; providerId?: string; status: "queued" | "submitting" | "running" | "succeeded" | "failed"; mediaStatus?: "none" | "archiving" | "ready" | "fallback" | "failed"; mediaRevision?: number; prompt: string; model: string; mode: string; ratio: string; resolution: string; duration: number; createdAt: number; updatedAt: number; videoUrl?: string; downloadUrl?: string; posterUrl?: string; videoExpiresAt?: number; mediaSource?: "tos" | "upstream"; error?: string };
+export type ImageModel = { id: string; name: string; resolutions: string[]; defaultResolution: string; maxCount: number };
+export type ImageGenItem = { mediaId: string; width?: number; height?: number };
+export type ImageGenResponse = { Items: ImageGenItem[]; Model: string; Ratio: string; Resolution: string; Failed?: string[] };
+export type ImageResultBundle = {
+  id: string;
+  modelName: string;
+  ratio: string;
+  resolution: string;
+  prompt: string;
+  items: ImageGenItem[];
+  createdAt: number;
+  failed?: string[];
+};
 export type LibraryGroup = { Id: string; Name: string; Description?: string };
 export type LibraryAsset = { Id: string; Name: string; AssetType: "Image" | "Video" | "Audio"; Status: "Active" | "Processing" | "Failed"; URL?: string; GroupId: string; UploadId?: string };

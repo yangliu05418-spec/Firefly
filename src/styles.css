@@ -487,6 +487,45 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 @media(max-width:760px){.asset-tabs{margin-top:0}.image-assets__toolbar{align-items:stretch;flex-direction:column}.image-assets__toolbar>label{width:100%}.image-assets__toolbar>div{width:100%;overflow-x:auto;padding-bottom:2px}.image-assets__toolbar button{flex:0 0 auto}.image-assets__grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.image-asset-card__body{padding:0 8px}.image-assets__empty{min-height:300px}}
 @media(max-width:390px){.image-assets__grid{grid-template-columns:1fr}.image-asset-card__media{aspect-ratio:1.45}}
 
+/* OpenRouter 图片生成 */
+.engine-tabs{display:flex;gap:4px;margin:0 6px 10px;padding:3px;border:1px solid rgba(255,255,255,.08);border-radius:11px;background:rgba(0,0,0,.22)}
+.engine-tabs button{height:32px;flex:1;padding:0 10px;border:0;border-radius:8px;display:flex;align-items:center;justify-content:center;gap:6px;color:#7f8b9f;background:transparent;cursor:pointer;font-size:11px}
+.engine-tabs button svg{width:13px}
+.engine-tabs button:hover{color:#d1e4fa;background:rgba(255,255,255,.04)}
+.engine-tabs button.active{color:#eef7ff;background:rgba(199,211,234,.1);box-shadow:var(--shadow-subtle)}
+.image-model-pop .model-icon svg{width:15px}
+.image-format-pop{width:400px}
+.image-count-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:0 6px 7px}
+.image-count-grid button{height:40px;border:0;border-radius:8px;color:#c7d3ea;background:rgba(5,6,15,.25);cursor:pointer;font-size:11px}
+.image-count-grid button.selected{background:rgba(199,211,234,.11);box-shadow:var(--shadow-subtle)}
+.image-count-grid button:hover{background:rgba(199,211,234,.07)}
+
+.image-results{margin:0 0 26px;display:flex;flex-direction:column;gap:14px}
+.image-result{position:relative;padding:16px 16px 14px;border:1px solid rgba(255,255,255,.08);border-radius:16px;background:rgba(18,21,32,.6);box-shadow:var(--shadow-subtle-4)}
+.image-result>header{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.image-result__badge{height:26px;padding:0 10px;border-radius:999px;display:inline-flex;align-items:center;gap:6px;color:#b8d9cf;background:rgba(184,217,207,.08);border:1px solid rgba(184,217,207,.18);font-size:10px}
+.image-result__badge svg{width:12px}
+.image-result>header b{color:#d8d7d2;font-size:12px;font-weight:500}
+.image-result>header small{color:#6f747c;font-size:10px}
+.image-result__prompt{margin:10px 0 0;color:#7f8b9f;font-size:11px;line-height:1.6}
+.image-result__grid{margin-top:12px;display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
+.image-result__grid figure{position:relative;margin:0;overflow:hidden;border:1px solid rgba(255,255,255,.08);border-radius:12px;background:#0a0b0e}
+.image-result__grid img{display:block;width:100%;aspect-ratio:1;object-fit:cover;transition:transform .4s cubic-bezier(.16,1,.3,1)}
+.image-result__grid figure:hover img{transform:scale(1.03)}
+.image-result__grid figcaption{position:absolute;inset:auto 0 0 0;padding:9px;display:flex;gap:6px;justify-content:flex-end;background:linear-gradient(180deg,transparent,rgba(3,4,10,.85))}
+.image-result__grid figcaption a,.image-result__grid figcaption button{height:28px;padding:0 9px;border:0;border-radius:8px;display:inline-flex;align-items:center;gap:5px;color:#e8e7e1;background:rgba(255,255,255,.1);backdrop-filter:blur(8px);cursor:pointer;text-decoration:none;font-size:10px}
+.image-result__grid figcaption a:hover,.image-result__grid figcaption button:hover{background:rgba(255,255,255,.2)}
+.image-result__grid figcaption svg{width:11px}
+.image-result__failed{margin:10px 0 0;color:#e6a898;font-size:10px}
+.image-result__remove{position:absolute;right:12px;top:14px;height:26px;padding:0 8px;border:0;border-radius:7px;display:inline-flex;align-items:center;gap:5px;color:#697487;background:transparent;cursor:pointer;font-size:10px}
+.image-result__remove:hover{color:#ffad9b;background:rgba(228,109,76,.07)}
+.image-result__remove svg{width:11px}
+@media(max-width:760px){
+  .image-format-pop{left:12px;right:12px;width:auto;max-height:65vh;overflow-y:auto}
+  .image-result__grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .image-result__remove{position:static;margin-top:10px}
+}
+
 /* Canvas projects (M1) */
 .canvas-page{width:min(1280px,100%);margin:0 auto;padding:34px clamp(20px,4vw,56px) 80px}
 .canvas-page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:30px}

@@ -25,6 +25,9 @@ import { stablePreviewUrl } from "./preview-url-cache.js";
 import { abortMultipartUpload, completeMultipartUpload, createMultipartUpload, headObject, inputObjectKey, inspectMediaObject, signUploadPart, signedObjectUrl, tosConfigured, tosEnabled, tosHealth } from "./tos.js";
 import { createCanvasAssetFromUpload } from "./canvas-assets.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
+import { IMAGE_MODELS, IMAGE_RATIOS, imageModelById, computeImageSize, DEFAULT_IMAGE_MODEL } from "./image-models.js";
+import { downloadImageBuffer, generateSingleImage, openRouterPool, OpenRouterError } from "./openrouter.js";
+import { storeGeneratedImage } from "./generated-media.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -449,6 +452,85 @@ app.delete("/api/assets/:id", requireAuth, async (req, res) => {
 });
 
 
+
+// ---- OpenRouter 图片生成 ----
+const imageGenerationSchema = z.object({
+  model: z.string().min(1).max(120),
+  ratio: z.enum(IMAGE_RATIOS),
+  resolution: z.string().min(1).max(20),
+  count: z.number().int().min(1).max(4),
+  prompt: z.string().trim().min(1).max(2000),
+  references: z.array(z.string().min(20).max(200)).max(4).default([]),
+});
+
+app.get("/api/image-models", requireAuth, async (_req, res) => {
+  res.json({ Items: IMAGE_MODELS, Ratios: IMAGE_RATIOS, DefaultModel: DEFAULT_IMAGE_MODEL });
+});
+
+app.post("/api/image-generation", requireAuth, async (req, res) => {
+  try {
+    const body = imageGenerationSchema.parse(req.body);
+    const user = res.locals.user as SessionUser;
+    const spec = imageModelById(body.model);
+    if (!spec) return res.status(400).json({ error: "未知的图片模型" });
+    if (body.count > spec.maxCount) return res.status(400).json({ error: "该模型单次最多生成 " + spec.maxCount + " 张" });
+    if (!spec.resolutions.includes(body.resolution)) return res.status(400).json({ error: "该模型不支持此分辨率档位" });
+    const size = computeImageSize(body.ratio, Number(body.resolution), spec.maxSize);
+    // 参考图（图生图）：uploadId → 签名地址（临时，仅供本次请求）
+    const references: string[] = [];
+    for (const uploadId of body.references) {
+      const media = users.readUpload(uploadId);
+      if (!media || media.ownerId !== user.id) return res.status(404).json({ error: "参考素材不存在或已过期" });
+      references.push(signedObjectUrl(media.objectKey, { expires: 2 * 3600, fileName: media.fileName }));
+    }
+    if (!openRouterPool().size) return res.status(503).json({ error: "服务端尚未配置 OpenRouter API Key" });
+    const startedAt = Date.now();
+    console.info(JSON.stringify({ type: "image_generation_started", at: new Date().toISOString(), userId: user.id, model: body.model, ratio: body.ratio, resolution: body.resolution, size, count: body.count, references: references.length, healthyKeys: openRouterPool().healthyCount() }));
+    // 并发生成（上限 2），逐个落盘
+    let cursor = 0;
+    const items: { mediaId: string; width?: number; height?: number }[] = [];
+    const failures: string[] = [];
+    const worker = async () => {
+      while (cursor < body.count) {
+        const index = cursor++;
+        try {
+          const url = await generateSingleImage({ model: body.model, prompt: body.prompt, references, size });
+          const buffer = await downloadImageBuffer(url);
+          const contentType = url.startsWith("data:image/png") ? "image/png" : url.startsWith("data:image/webp") ? "image/webp" : url.startsWith("data:image/jpeg") ? "image/jpeg" : "image/png";
+          const media = await storeGeneratedImage({ ownerId: user.id, body: buffer, contentType, fileName: "nano-image-" + (index + 1) + ".png" });
+          items.push({ mediaId: media.id });
+          console.info(JSON.stringify({ type: "image_generation_completed", at: new Date().toISOString(), userId: user.id, mediaId: media.id, index, bytes: buffer.length }));
+        } catch (error) {
+          failures.push(error instanceof Error ? error.message : "生成失败");
+          console.warn(JSON.stringify({ type: "image_generation_failed", at: new Date().toISOString(), userId: user.id, index, code: (error as { code?: string }).code ?? "unknown", message: error instanceof Error ? error.message : undefined }));
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(2, body.count) }, worker));
+    if (!items.length) {
+      const message = failures[0] ?? "图片生成失败";
+      return res.status(502).json({ error: message, requestId: res.locals.requestId });
+    }
+    console.info(JSON.stringify({ type: "image_generation_done", at: new Date().toISOString(), userId: user.id, model: body.model, requested: body.count, ok: items.length, failed: failures.length, elapsedMs: Date.now() - startedAt }));
+    res.json({ Items: items, Model: body.model, Ratio: body.ratio, Resolution: body.resolution, Failed: failures });
+  } catch (error) {
+    if (error instanceof OpenRouterError) console.warn(JSON.stringify({ type: "image_generation_error", at: new Date().toISOString(), status: error.status, message: error.message }));
+    respondError(res, error, error instanceof OpenRouterError ? (error.status === "network" ? 502 : 502) : 400);
+  }
+});
+
+app.get("/api/image-media/:id", requireAuth, async (req, res) => {
+  try {
+    const user = res.locals.user as SessionUser;
+    const media = users.readMedia(param(req.params.id));
+    if (!media || media.ownerId !== user.id || media.kind !== "generated" || media.status !== "ready") return res.status(404).json({ error: "图片不存在" });
+    const download = req.query.download === "1";
+    res.setHeader("Cache-Control", previewRedirectCacheHeader);
+    res.setHeader("Vary", "Cookie");
+    res.redirect(302, signedObjectUrl(media.objectKey, download ? { download: true, fileName: media.fileName } : { fileName: media.fileName }));
+  } catch (error) { respondError(res, error, 502); }
+});
+
 // ---- Canvas projects ----
 const canvasListQuerySchema = z.object({ page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(50) });
 const canvasTitleBodySchema = z.object({ title: z.string().trim().min(1, "画布名称不能为空").max(80, "画布名称不能超过 80 个字符") });
@@ -456,6 +538,7 @@ const canvasSaveBodySchema = z.object({ revision: z.number().int().min(0), docum
 const canvasMediaImportSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("generation"), taskId: z.string().min(1).max(120) }),
   z.object({ kind: z.literal("upload"), uploadId: z.string().min(20).max(200) }),
+  z.object({ kind: z.literal("generated"), mediaId: z.string().min(1).max(120) }),
 ]);
 const accessibleCanvas = (id: string, userId: string) => {
   const project = users.readCanvasProject(id);
@@ -560,9 +643,19 @@ app.post("/api/canvases/:id/media", requireAuth, async (req, res) => {
       res.json({ mediaRef: { source: "generation", taskId: task.id }, title: task.prompt || "参考素材生成", fileName: media.fileName, width, height, durationMs });
       return;
     }
-    const asset = await createCanvasAssetFromUpload({ uploadId: body.uploadId, ownerId: user.id, canvasId });
+    if (body.kind === "upload") {
+    const asset = await createCanvasAssetFromUpload({ source: { kind: "upload", uploadId: body.uploadId }, ownerId: user.id, canvasId });
     console.info(JSON.stringify({ type: "canvas_media_import", kind: "upload", userId: user.id, canvasId, assetId: asset.id, at: new Date().toISOString() }));
     res.status(201).json({ mediaRef: { source: "canvas-asset", assetId: asset.id }, title: asset.fileName, fileName: asset.fileName, status: asset.status });
+    return;
+    }
+    if (body.kind === "generated") {
+      const media = users.readMedia(body.mediaId);
+      if (!media || media.ownerId !== user.id || media.kind !== "generated" || media.status !== "ready") return res.status(404).json({ error: "生成图片不存在或尚未就绪" });
+      const asset = await createCanvasAssetFromUpload({ source: { kind: "object", objectKey: media.objectKey, fileName: media.fileName, contentType: media.contentType, ownerId: media.ownerId }, ownerId: user.id, canvasId });
+      console.info(JSON.stringify({ type: "canvas_media_import", kind: "generated", userId: user.id, canvasId, mediaId: media.id, assetId: asset.id, at: new Date().toISOString() }));
+      res.status(201).json({ mediaRef: { source: "canvas-asset", assetId: asset.id }, title: asset.fileName, fileName: asset.fileName, status: asset.status });
+    }
   } catch (error) { respondError(res, error, 502); }
 });
 

@@ -29,7 +29,7 @@ export type CanvasMediaImportResult = {
 };
 
 /** 导入媒体到画布（generation 引用或上传对象迁移到 canvas/ 前缀） */
-export const importCanvasMedia = (canvasId: string, body: { kind: "generation"; taskId: string } | { kind: "upload"; uploadId: string }): Promise<CanvasMediaImportResult> =>
+export const importCanvasMedia = (canvasId: string, body: { kind: "generation"; taskId: string } | { kind: "upload"; uploadId: string } | { kind: "generated"; mediaId: string }): Promise<CanvasMediaImportResult> =>
   api.post<CanvasMediaImportResult>("/api/canvases/" + encode(canvasId) + "/media", body);
 
 export type CanvasSaveError = Error & { status: number; currentRevision?: number };

@@ -56,7 +56,7 @@ export type MediaObject = {
   ownerId: string;
   taskId?: string;
   uploadId?: string;
-  kind: "input" | "output" | "preview" | "poster";
+  kind: "input" | "output" | "preview" | "poster" | "generated";
   objectKey: string;
   status: "uploading" | "ready" | "delete_pending" | "deleted";
   fileName: string;
@@ -252,7 +252,7 @@ export class UserStore {
         owner_id TEXT NOT NULL,
         task_id TEXT,
         upload_id TEXT,
-        kind TEXT NOT NULL CHECK (kind IN ('input', 'output', 'preview', 'poster')),
+        kind TEXT NOT NULL CHECK (kind IN ('input', 'output', 'preview', 'poster', 'generated')),
         object_key TEXT NOT NULL UNIQUE,
         status TEXT NOT NULL CHECK (status IN ('uploading', 'ready', 'delete_pending', 'deleted')),
         file_name TEXT NOT NULL,
@@ -325,7 +325,7 @@ export class UserStore {
     addTaskColumn("media_attempts", "INTEGER NOT NULL DEFAULT 0");
     addTaskColumn("media_last_error", "TEXT");
     const mediaSchema = this.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'media_objects'").get() as { sql?: string } | undefined;
-    if (mediaSchema?.sql && !mediaSchema.sql.includes("'preview'")) {
+    if (mediaSchema?.sql && (!mediaSchema.sql.includes("'preview'") || !mediaSchema.sql.includes("'generated'"))) {
       this.database.transaction(() => {
         this.database.exec(`
           DROP INDEX IF EXISTS media_objects_task_kind_idx;
@@ -337,7 +337,7 @@ export class UserStore {
             owner_id TEXT NOT NULL,
             task_id TEXT,
             upload_id TEXT,
-            kind TEXT NOT NULL CHECK (kind IN ('input', 'output', 'preview', 'poster')),
+            kind TEXT NOT NULL CHECK (kind IN ('input', 'output', 'preview', 'poster', 'generated')),
             object_key TEXT NOT NULL UNIQUE,
             status TEXT NOT NULL CHECK (status IN ('uploading', 'ready', 'delete_pending', 'deleted')),
             file_name TEXT NOT NULL,

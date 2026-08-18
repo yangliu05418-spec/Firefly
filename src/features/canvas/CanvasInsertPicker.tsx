@@ -11,7 +11,8 @@ import { relativeTime } from "./format";
 
 type CanvasInsertPayload =
   | { kind: "video"; taskId: string; title: string }
-  | { kind: "image"; uploadId: string; name: string };
+  | { kind: "image"; uploadId: string; name: string }
+  | { kind: "generated"; mediaId: string; title: string };
 
 export function CanvasInsertPicker({ payload, onClose, navigate }: { payload: CanvasInsertPayload; onClose: () => void; navigate: (path: string) => void }) {
   const [canvases, setCanvases] = useState<CanvasProjectSummary[] | null>(null);
@@ -57,7 +58,7 @@ export function CanvasInsertPicker({ payload, onClose, navigate }: { payload: Ca
       setBusyId(canvasId);
       setError("");
       try {
-        const mediaBody = payload.kind === "video" ? { kind: "generation" as const, taskId: payload.taskId } : { kind: "upload" as const, uploadId: payload.uploadId };
+        const mediaBody = payload.kind === "video" ? { kind: "generation" as const, taskId: payload.taskId } : payload.kind === "image" ? { kind: "upload" as const, uploadId: payload.uploadId } : { kind: "generated" as const, mediaId: payload.mediaId };
         const imported = await importCanvasMedia(canvasId, mediaBody);
         const project = await getCanvas(canvasId);
         if (!project.document) throw new Error("画布文档无法解析");
@@ -114,7 +115,7 @@ export function CanvasInsertPicker({ payload, onClose, navigate }: { payload: Ca
               <h2 id="canvas-picker-title">插入到哪张画布？</h2>
               <button type="button" aria-label="关闭" disabled={Boolean(busyId || creating)} onClick={onClose}><X /></button>
             </header>
-            <p className="canvas-insert__hint">{payload.kind === "video" ? "「" + payload.title + "」将以视频节点插入" : "「" + payload.name + "」将复制到长期存储后插入"}</p>
+            <p className="canvas-insert__hint">{payload.kind === "video" ? "「" + payload.title + "」将以视频节点插入" : payload.kind === "image" ? "「" + payload.name + "」将复制到长期存储后插入" : "「" + payload.title + "」将以图片节点插入"}</p>
             {error && <div className="canvas-insert__error" role="alert">{error}</div>}
             <div className="canvas-insert__body">
               {canvases === null ? (
@@ -138,7 +139,7 @@ export function CanvasInsertPicker({ payload, onClose, navigate }: { payload: Ca
               )}
             </div>
             <footer className="canvas-insert__foot">
-              <span>{payload.kind === "image" ? "图片会复制到长期存储，原素材删除不影响画布" : "视频以成片引用插入，不占用额外存储"}</span>
+              <span>{payload.kind === "image" || payload.kind === "generated" ? "图片会复制到长期存储，原素材删除不影响画布" : "视频以成片引用插入，不占用额外存储"}</span>
               <button type="button" className="canvas-insert__refresh" disabled={creating || busyId !== null} onClick={() => void createNew()}>{creating ? <LoaderCircle className="spin" /> : <Plus />} 新建画布</button>
             </footer>
           </>

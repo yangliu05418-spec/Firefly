@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Archive, ArrowRight, AudioLines, Check, CheckSquare2, ChevronDown, ChevronRight, Clock3, Clapperboard, Copy, Download, Film, Home, ImageIcon, Layers3, LayoutGrid, Library, LoaderCircle, LogOut, Menu, MessageSquare, PanelLeftClose, Pencil, Play, Plus, RefreshCw, Search, Send, Settings2, Sparkles, Square, Trash2, Upload, Video, WandSparkles, X } from "lucide-react";
 import { api, listenForSignedOut, notifySignedOut, uploadFile } from "./api";
-import type { CreationMode, LibraryAsset, LibraryGroup, ModelCapability, SessionUser, Task, UploadAsset } from "./types";
+import type { CreationMode, ImageGenResponse, ImageModel, ImageResultBundle, LibraryAsset, LibraryGroup, ModelCapability, SessionUser, Task, UploadAsset } from "./types";
 import { materializePromptReferences, promptAssetLabel, promptAssetMarker } from "./prompt-references";
 import { CanvasProjectList } from "./features/canvas/CanvasProjectList";
 import { CanvasWorkspace } from "./features/canvas/CanvasWorkspace";
@@ -197,16 +197,22 @@ function PromptEditor({ value, placeholder, assets, disabled, attach, change }: 
     <footer>↑↓ 选择　Enter 插入　Esc 关闭</footer>
   </div>, document.body);
 
-  return <div className="prompt-editor-wrap"><div ref={editor} className="prompt-editor" contentEditable role="textbox" aria-multiline="true" aria-label="视频创作提示词" data-placeholder={placeholder} suppressContentEditableWarning onInput={() => { sync(); detectMention(); }} onKeyUp={(event) => !["ArrowDown", "ArrowUp", "Enter", "Escape"].includes(event.key) && detectMention()} onKeyDown={keyDown} onBlur={() => window.setTimeout(() => setOpen(false), 120)} onPaste={(event) => { event.preventDefault(); document.execCommand("insertText", false, event.clipboardData.getData("text/plain")); }} />{popup}</div>;
+  return <div className="prompt-editor-wrap"><div ref={editor} className="prompt-editor" contentEditable role="textbox" aria-multiline="true" aria-label="创作提示词" data-placeholder={placeholder} suppressContentEditableWarning onInput={() => { sync(); detectMention(); }} onKeyUp={(event) => !["ArrowDown", "ArrowUp", "Enter", "Escape"].includes(event.key) && detectMention()} onKeyDown={keyDown} onBlur={() => window.setTimeout(() => setOpen(false), 120)} onPaste={(event) => { event.preventDefault(); document.execCommand("insertText", false, event.clipboardData.getData("text/plain")); }} />{popup}</div>;
 }
 
-function Composer({ models, compact, onCreated }: { models: ModelCapability[]; compact: boolean; onCreated: (task: Task) => void }) {
+function Composer({ models, compact, onCreated, onImagesGenerated }: { models: ModelCapability[]; compact: boolean; onCreated: (task: Task) => void; onImagesGenerated?: (bundle: ImageResultBundle) => void }) {
   const defaultModel = models[0];
   const [modelId, setModelId] = useState(defaultModel?.id ?? "");
   const model = models.find((item) => item.id === modelId) ?? defaultModel;
   const [mode, setMode] = useState<CreationMode>("omni");
+  const [engine, setEngine] = useState<"video" | "image">("video");
+  const [imageModels, setImageModels] = useState<ImageModel[]>([]);
+  const [imageModelId, setImageModelId] = useState("");
+  const [imageRatio, setImageRatio] = useState("1:1");
+  const [imageResolution, setImageResolution] = useState("");
+  const [imageCount, setImageCount] = useState(1);
   const [prompt, setPrompt] = useState(""); const [ratio, setRatio] = useState("16:9"); const [resolution, setResolution] = useState("720p"); const [duration, setDuration] = useState(4);
-  const [assets, setAssets] = useState<UploadAsset[]>([]); const [open, setOpen] = useState<"generation" | "model" | "mode" | "format" | "duration" | "advanced" | "library" | null>(null);
+  const [assets, setAssets] = useState<UploadAsset[]>([]); const [open, setOpen] = useState<"generation" | "model" | "mode" | "format" | "duration" | "advanced" | "library" | "image-model" | "image-format" | null>(null);
   const [generateAudio, setGenerateAudio] = useState(true); const [cameraFixed, setCameraFixed] = useState(false); const [watermark, setWatermark] = useState(false); const [seed, setSeed] = useState(-1);
   const [loading, setLoading] = useState(false); const [error, setError] = useState(""); const fileInput = useRef<HTMLInputElement>(null);
 
@@ -214,9 +220,20 @@ function Composer({ models, compact, onCreated }: { models: ModelCapability[]; c
   const ratioLocked = isSeedance25 && (["first_frame", "first_last", "edit", "extend"] as CreationMode[]).includes(mode);
   const durationLocked = isSeedance25 && mode === "edit";
   const availableRatios = ratioLocked ? ["adaptive"] : (model?.ratios ?? []);
-  const referenceSlots = mode === "text" ? [] : mode === "first_frame" ? ["首帧"] : mode === "first_last" ? ["首帧", "尾帧"] : mode === "edit" ? ["编辑视频", "参考内容"] : mode === "extend" ? ["续写视频", "参考内容"] : ["参考内容"];
-  const fileAccept = mode === "first_frame" || mode === "first_last" ? "image/*" : "image/*,video/mp4,video/quicktime,audio/mpeg,audio/wav";
+  const referenceSlots = engine === "image" ? ["参考图"] : mode === "text" ? [] : mode === "first_frame" ? ["首帧"] : mode === "first_last" ? ["首帧", "尾帧"] : mode === "edit" ? ["编辑视频", "参考内容"] : mode === "extend" ? ["续写视频", "参考内容"] : ["参考内容"];
+  const fileAccept = engine === "image" || mode === "first_frame" || mode === "first_last" ? "image/*" : "image/*,video/mp4,video/quicktime,audio/mpeg,audio/wav";
+  const imageSpec = imageModels.find((item) => item.id === imageModelId) ?? imageModels[0];
+  const imageReady = engine === "image" ? Boolean(prompt.trim()) : undefined;
 
+  useEffect(() => {
+    void api.get<{ Items: ImageModel[]; DefaultModel: string }>("/api/image-models").then((result) => {
+      setImageModels(result.Items ?? []);
+      const defaultId = result.DefaultModel ?? result.Items?.[0]?.id ?? "";
+      setImageModelId(defaultId);
+      const spec = result.Items?.find((item) => item.id === defaultId);
+      if (spec) setImageResolution(spec.defaultResolution ?? spec.resolutions[0]);
+    }).catch(() => setImageModels([]));
+  }, []);
   useEffect(() => {
     if (!model) return;
     if (!model.modes.includes(mode)) { setMode(model.modes[0]); return; }
@@ -235,6 +252,7 @@ function Composer({ models, compact, onCreated }: { models: ModelCapability[]; c
     const plannedAssets = [...assets];
     for (const file of Array.from(files)) {
       const type: UploadAsset["type"] = file.type.startsWith("image/") ? "image" : file.type.startsWith("video/") ? "video" : "audio";
+      if (engine === "image" && type !== "image") { setError("图片生成只接受图片参考（图生图）"); continue; }
       if ((mode === "first_frame" || mode === "first_last") && type !== "image") { setError("首帧与首尾帧模式只接受图片"); continue; }
       if (mode === "first_frame" && plannedAssets.length >= 1) { setError("首帧模式只接受一张图片"); continue; }
       if (mode === "first_last" && plannedAssets.length >= 2) { setError("首尾帧模式只接受两张图片"); continue; }
@@ -262,6 +280,7 @@ function Composer({ models, compact, onCreated }: { models: ModelCapability[]; c
     const allowed = candidate.type === "image" ? model.imageLimit : candidate.type === "video" ? model.videoLimit : model.audioLimit;
     if (!allowed || typeCount >= allowed) { setError(`当前模型最多支持 ${allowed} 个${candidate.type === "image" ? "图片" : candidate.type === "video" ? "视频" : "音频"}参考`); return null; }
     if (mode === "text") { setError("文本生成模式不接受参考素材"); return null; }
+    if (engine === "image" && candidate.type !== "image") { setError("图片生成只接受图片参考（图生图）"); return null; }
     if (mode === "first_frame" && (candidate.type !== "image" || assets.length)) { setError("首帧模式只接受一张图片"); return null; }
     if (mode === "first_last" && (candidate.type !== "image" || assets.length >= 2)) { setError("首尾帧模式只接受两张图片"); return null; }
     const role: UploadAsset["role"] = mode === "first_frame" ? "first_frame" : mode === "first_last" ? (assets.some((asset) => asset.role === "first_frame") ? "last_frame" : "first_frame") : candidate.type === "image" ? "reference_image" : candidate.type === "video" ? "reference_video" : "reference_audio";
@@ -272,13 +291,22 @@ function Composer({ models, compact, onCreated }: { models: ModelCapability[]; c
   const submit = async () => {
     setLoading(true); setError("");
     try {
+      if (engine === "image") {
+        const spec = imageModels.find((item) => item.id === imageModelId) ?? imageModels[0];
+        const references = assets.filter((asset) => asset.type === "image" && asset.uploadId).map((asset) => asset.uploadId!);
+        const result = await api.post<ImageGenResponse>("/api/image-generation", { model: imageModelId, ratio: imageRatio, resolution: imageResolution, count: imageCount, prompt: prompt.trim(), references });
+        onImagesGenerated?.({ id: crypto.randomUUID(), modelName: spec?.name ?? imageModelId, ratio: imageRatio, resolution: imageResolution, prompt: prompt.trim(), items: result.Items ?? [], createdAt: Date.now(), failed: result.Failed });
+        setPrompt(""); setAssets([]);
+        return;
+      }
       const task = await api.post<Task>("/api/generations", { prompt: materializePromptReferences(prompt, assets), model: model.id, mode, ratio, resolution, duration, generateAudio: model.supportsAudio && generateAudio, seed, cameraFixed, watermark, outputFormat: "mp4", assets: assets.map(({ preview, progress, size, ...asset }) => asset) });
       onCreated(task); setPrompt(""); setAssets([]);
     } catch (e) { setError(e instanceof Error ? e.message : "无法创建任务"); } finally { setLoading(false); }
   };
 
   const uploadsReady = assets.every((asset) => asset.progress === 100);
-  const modeReady = mode === "text" ? Boolean(prompt.trim())
+  const modeReady = engine === "image" ? imageReady!
+    : mode === "text" ? Boolean(prompt.trim())
     : mode === "first_frame" ? assets.length === 1 && assets[0]?.role === "first_frame"
     : mode === "first_last" ? assets.length === 2 && assets.some((asset) => asset.role === "first_frame") && assets.some((asset) => asset.role === "last_frame")
     : mode === "omni" ? assets.length > 0
@@ -290,19 +318,28 @@ function Composer({ models, compact, onCreated }: { models: ModelCapability[]; c
       {!!assets.length && <div className="asset-strip">{assets.map((asset, index) => <div className="asset-chip" key={asset.id}>{asset.preview ? <img src={asset.preview} /> : asset.type === "video" ? <Video /> : <AudioLines />}<span><b>{asset.role === "first_frame" ? "首帧" : asset.role === "last_frame" ? "尾帧" : `${asset.type === "image" ? "图片" : asset.type === "video" ? "视频" : "音频"} ${index + 1}`}</b><small>{asset.progress === 100 ? asset.name : `上传 ${asset.progress ?? 0}%`}</small></span>{asset.progress !== 100 && <i style={{ width: `${asset.progress ?? 0}%` }} />}<button onClick={() => setAssets((old) => old.filter((a) => a.id !== asset.id))}><X /></button></div>)}</div>}
       <div className={`prompt-row ${referenceSlots.length > 1 ? "prompt-row--dual" : ""} ${!referenceSlots.length ? "prompt-row--text" : ""}`}>
         {!!referenceSlots.length && <div className="reference-slots">{referenceSlots.map((label, index) => <button className="add-reference" key={label} onClick={() => fileInput.current?.click()} disabled={(mode === "first_frame" && assets.length >= 1) || (mode === "first_last" && assets.length > index)}><Plus /><span>{label}</span></button>)}</div>}
-        <PromptEditor value={prompt} change={setPrompt} placeholder={modePlaceholders[mode]} assets={assets} disabled={mode === "text"} attach={attachMentionAsset} />
+        <PromptEditor value={prompt} change={setPrompt} placeholder={engine === "image" ? "描述你想生成的画面；上传参考图即可进行图生图……" : modePlaceholders[mode]} assets={assets} disabled={mode === "text"} attach={attachMentionAsset} />
         <input ref={fileInput} hidden type="file" multiple={mode !== "first_frame"} accept={fileAccept} onChange={(e) => pickFiles(e.target.files)} />
       </div>
       <div className="control-row">
-        <div className="control-wrap"><button className="control control--accent" onClick={() => setOpen(open === "generation" ? null : "generation")}><WandSparkles /> 视频生成 <ChevronDown /></button>{open === "generation" && <Popover className="mode-pop generation-pop"><p>选择创作类型</p><button className="selected" onClick={() => setOpen(null)}><WandSparkles /><span><b>视频生成</b><small>使用 Seedance 生成或编辑视频</small></span><Check /></button></Popover>}</div>
-        <div className="control-wrap"><button className="control" onClick={() => setOpen(open === "model" ? null : "model")}><Layers3 /> {model.name} <Sparkles className="tiny-spark" /></button>{open === "model" && <Popover className="model-pop"><p>选择模型</p>{models.map((item) => <button key={item.id} className={item.id === model.id ? "selected" : ""} onClick={() => { setModelId(item.id); setOpen(null); }}><span className="model-icon"><Sparkles /></span><span><b>{item.name}</b><small>{item.note}</small></span>{item.id === model.id && <Check />}</button>)}</Popover>}</div>
+        <div className="control-wrap"><button className="control control--accent" onClick={() => setOpen(open === "generation" ? null : "generation")}><WandSparkles /> {engine === "video" ? "视频生成" : "图片生成"} <ChevronDown /></button>{open === "generation" && <Popover className="mode-pop generation-pop"><div className="engine-tabs" role="tablist" aria-label="创作类型"><button className={engine === "video" ? "active" : ""} role="tab" aria-selected={engine === "video"} onClick={() => { setEngine("video"); setOpen(null); }}><Film /> 视频生成</button><button className={engine === "image" ? "active" : ""} role="tab" aria-selected={engine === "image"} onClick={() => { setEngine("image"); setOpen(null); }}><ImageIcon /> 图片生成</button></div><p>选择创作类型</p>{engine === "video" ? <button className="selected" onClick={() => setOpen(null)}><WandSparkles /><span><b>视频生成</b><small>使用 Seedance 生成或编辑视频</small></span><Check /></button> : <button className="selected" onClick={() => setOpen(null)}><ImageIcon /><span><b>图片生成</b><small>{imageSpec ? imageSpec.name : "OpenRouter 图像模型"}，支持文生图与图生图</small></span><Check /></button>}</Popover>}</div>
+        {engine === "image" ? <div className="control-wrap"><button className="control" onClick={() => setOpen(open === "image-model" ? null : "image-model")}><Layers3 /> {(imageSpec?.name ?? "选择图片模型")} <ChevronDown /></button>{open === "image-model" && <Popover className="model-pop image-model-pop"><p>选择图片模型</p>{imageModels.map((item) => <button key={item.id} className={item.id === imageModelId ? "selected" : ""} onClick={() => { setImageModelId(item.id); setImageResolution(item.resolutions.includes(imageResolution) ? imageResolution : (item.resolutions.includes("1024") ? "1024" : item.resolutions[item.resolutions.length - 1])); setImageCount((count) => Math.min(count, item.maxCount)); setOpen(null); }}><span className="model-icon"><ImageIcon /></span><span><b>{item.name}</b><small>{item.resolutions.join(" / ")}px · 单次最多 {item.maxCount} 张</small></span>{item.id === imageModelId && <Check />}</button>)}</Popover>}</div> : <div className="control-wrap"><button className="control" onClick={() => setOpen(open === "model" ? null : "model")}><Layers3 /> {model.name} <Sparkles className="tiny-spark" /></button>{open === "model" && <Popover className="model-pop"><p>选择模型</p>{models.map((item) => <button key={item.id} className={item.id === model.id ? "selected" : ""} onClick={() => { setModelId(item.id); setOpen(null); }}><span className="model-icon"><Sparkles /></span><span><b>{item.name}</b><small>{item.note}</small></span>{item.id === model.id && <Check />}</button>)}</Popover>}</div>}
+        {engine === "image" ? (
+          <>
+            <div className="control-wrap"><button className="control" onClick={() => setOpen(open === "image-format" ? null : "image-format")}><ImageIcon /> {imageRatio} <i /> {imageResolution}px <i /> ×{imageCount} <ChevronDown /></button>{open === "image-format" && <Popover className="format-pop image-format-pop"><p>选择比例</p><div className="ratio-grid">{[["21:9", "21:9"], ["16:9", "16:9"], ["3:2", "3:2"], ["4:3", "4:3"], ["1:1", "1:1"], ["3:4", "3:4"], ["2:3", "2:3"], ["9:16", "9:16"]].map(([value, label]) => <button className={imageRatio === value ? "selected" : ""} key={value} onClick={() => setImageRatio(value)}><span className={`ratio-icon ratio-${value.replace(":", "-")}`} />{label}</button>)}</div><p>选择分辨率</p><div className="resolution-grid">{(imageSpec?.resolutions ?? ["1024"]).map((item) => <button className={imageResolution === item ? "selected" : ""} onClick={() => setImageResolution(item)} key={item}>{item}px</button>)}</div><p>生成数量</p><div className="image-count-grid">{Array.from({ length: imageSpec?.maxCount ?? 4 }, (_, index) => index + 1).map((count) => <button className={imageCount === count ? "selected" : ""} onClick={() => setImageCount(count)} key={count}>{count} 张</button>)}</div></Popover>}</div>
+            <div className="control-wrap"><button className="control control--icon" aria-label="选择参考图" onClick={() => setOpen(open === "library" ? null : "library")}>@</button>{open === "library" && <LibraryPanel add={(asset) => { attachMentionAsset(asset); setOpen(null); }} />}</div>
+          </>
+        ) : (
+          <>
         <div className="control-wrap"><button className="control" onClick={() => setOpen(open === "mode" ? null : "mode")}><Clapperboard /> {modeLabels[mode]} <ChevronDown /></button>{open === "mode" && <Popover className="mode-pop">{model.modes.map((item) => <button key={item} className={item === mode ? "selected" : ""} onClick={() => { setMode(item); setOpen(null); }}><Film /><span><b>{modeLabels[item]}</b><small>{modeNotes[item]}</small></span>{item === mode && <Check />}</button>)}</Popover>}</div>
         <div className="control-wrap"><button className="control" onClick={() => setOpen(open === "format" ? null : "format")}><span className={`ratio-icon ${ratio === "adaptive" ? "ratio-adaptive" : `ratio-${ratio.replace(":", "-")}`}`} /> {ratio === "adaptive" ? "自动" : ratio} <i /> {resolution}</button>{open === "format" && <Popover className="format-pop"><p>选择画幅</p><div className="ratio-grid">{availableRatios.map((item) => <button className={item === ratio ? "selected" : ""} key={item} onClick={() => !ratioLocked && setRatio(item)}><span className={`ratio-icon ${item === "adaptive" ? "ratio-adaptive" : `ratio-${item.replace(":", "-")}`}`} />{item === "adaptive" ? "自动" : item}</button>)}</div><p>选择清晰度</p><div className="resolution-grid">{model.resolutions.map((item) => <button className={item === resolution ? "selected" : ""} onClick={() => setResolution(item)} key={item}>{item}{item === "720p" && <Sparkles />}</button>)}</div></Popover>}</div>
         <div className="control-wrap"><button className="control" disabled={durationLocked} onClick={() => !durationLocked && setOpen(open === "duration" ? null : "duration")}><Clock3 /> {durationLocked ? "自动" : `${duration}s`}</button>{open === "duration" && !durationLocked && <Popover className="duration-pop"><p>视频生成时长</p><input type="range" min={model.duration[0]} max={model.duration[1]} value={duration} onChange={(e) => setDuration(Number(e.target.value))} /><div className="duration-scale"><span>{model.duration[0]}s</span><b>{duration} 秒</b><span>{model.duration[1]}s</span></div></Popover>}</div>
         {(["omni", "edit", "extend"] as CreationMode[]).includes(mode) && <div className="control-wrap"><button className="control control--icon" aria-label="选择素材" onClick={() => setOpen(open === "library" ? null : "library")}>@</button>{open === "library" && <LibraryPanel add={(asset) => { attachMentionAsset(asset); setOpen(null); }} />}</div>}
         <div className="control-wrap"><button className="control control--icon" aria-label="高级设置" onClick={() => setOpen(open === "advanced" ? null : "advanced")}><Settings2 /></button>{open === "advanced" && <Popover className="advanced-pop">{model.supportsAudio && <label><span>生成同步音频<small>由模型创作对白与环境声</small></span><input type="checkbox" checked={generateAudio} onChange={(e) => setGenerateAudio(e.target.checked)} /></label>}<label><span>固定镜头<small>减少镜头运动</small></span><input type="checkbox" checked={cameraFixed} onChange={(e) => setCameraFixed(e.target.checked)} /></label><label><span>显示水印<small>添加官方生成标识</small></span><input type="checkbox" checked={watermark} onChange={(e) => setWatermark(e.target.checked)} /></label><label className="seed-input"><span>随机种子<small>-1 为随机</small></span><input type="number" min="-1" value={seed} onChange={(e) => setSeed(Number(e.target.value))} /></label></Popover>}</div>
         <span className="control-spacer" />
-        <button className="send-button" aria-label="生成视频" disabled={loading || !uploadsReady || !modeReady} onClick={submit}>{loading ? <LoaderCircle className="spin" /> : <Send />}</button>
+          </>
+        )}
+        <button className="send-button" aria-label={engine === "image" ? "生成图片" : "生成视频"} disabled={loading || !uploadsReady || !modeReady} onClick={submit}>{loading ? <LoaderCircle className="spin" /> : <Send />}</button>
       </div>
       {error && <div className="composer-error">{error}</div>}
     </div>
@@ -615,10 +652,31 @@ function AssetArchive({ tasks, models, onCreate, onDelete, onInsertCanvas }: { t
   </div>;
 }
 
+function ImageResultsGallery({ results, onInsertCanvas, onRemove }: { results: ImageResultBundle[]; onInsertCanvas: (target: { kind: "generated"; mediaId: string; title: string }) => void; onRemove: (id: string) => void }) {
+  if (!results.length) return null;
+  return <section className="image-results" aria-label="图片生成结果">
+    {results.map((result) => <article className="image-result" key={result.id}>
+      <header><span className="image-result__badge"><ImageIcon /> 图片生成</span><b>{result.modelName}</b><small>{result.ratio} · {result.resolution}px · {result.items.length} 张 · {new Date(result.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</small></header>
+      {result.prompt && <p className="image-result__prompt" title={result.prompt}>「{result.prompt}」</p>}
+      <div className="image-result__grid">
+        {result.items.map((item) => <figure key={item.mediaId}>
+          <img src={"/api/image-media/" + encodeURIComponent(item.mediaId)} alt={result.prompt || "生成图片"} loading="lazy" decoding="async" />
+          <figcaption>
+            <a href={"/api/image-media/" + encodeURIComponent(item.mediaId) + "?download=1"} download title="下载图片"><Download /> 下载</a>
+            <button onClick={() => onInsertCanvas({ kind: "generated", mediaId: item.mediaId, title: (result.prompt || "生成图片").slice(0, 24) })} title="插入画布"><LayoutGrid /> 插入画布</button>
+          </figcaption>
+        </figure>)}
+      </div>
+      {!!result.failed?.length && <p className="image-result__failed" role="alert">{result.failed.length} 张生成失败，可调整参数后重试</p>}
+      <button className="image-result__remove" onClick={() => onRemove(result.id)} title="删除这组结果"><X /> 删除</button>
+    </article>)}
+  </section>;
+}
+
 function Studio({ user, route, navigate, logout }: { user: SessionUser; route: string; navigate: (path: string) => void; logout: () => void }) {
   const view = route.startsWith("/studio/canvas") ? "canvas" : route === "/studio/assets" ? "assets" : "create";
   const [models, setModels] = useState<ModelCapability[]>([]); const [tasks, setTasks] = useState<Task[]>([]); const [sidebar, setSidebar] = useState(() => window.innerWidth > 760); const [loading, setLoading] = useState(true); const [loadError, setLoadError] = useState(""); const [syncIssue, setSyncIssue] = useState(false); const [creatingNew, setCreatingNew] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<Task | null>(null); const [deleting, setDeleting] = useState(false); const [deleteError, setDeleteError] = useState(""); const [profileOpen, setProfileOpen] = useState(false); const [featureNotice, setFeatureNotice] = useState<{ kind: "atlas"; nonce: number; leaving?: boolean } | null>(null); const [pendingCanvasCreate, setPendingCanvasCreate] = useState(false); const [canvasInsertTarget, setCanvasInsertTarget] = useState<{ kind: "video"; task: Task } | { kind: "image"; asset: LibraryAsset } | null>(null); const profileRef = useRef<HTMLDivElement>(null); const atlasExitTimer = useRef<number | undefined>(undefined); const atlasAutoTimer = useRef<number | undefined>(undefined);
+  const [deleteTarget, setDeleteTarget] = useState<Task | null>(null); const [deleting, setDeleting] = useState(false); const [deleteError, setDeleteError] = useState(""); const [profileOpen, setProfileOpen] = useState(false); const [featureNotice, setFeatureNotice] = useState<{ kind: "atlas"; nonce: number; leaving?: boolean } | null>(null); const [pendingCanvasCreate, setPendingCanvasCreate] = useState(false); const [canvasInsertTarget, setCanvasInsertTarget] = useState<{ kind: "video"; task: Task } | { kind: "image"; asset: LibraryAsset } | { kind: "generated"; mediaId: string; title: string } | null>(null); const [imageResults, setImageResults] = useState<ImageResultBundle[]>([]); const profileRef = useRef<HTMLDivElement>(null); const atlasExitTimer = useRef<number | undefined>(undefined); const atlasAutoTimer = useRef<number | undefined>(undefined);
   const [now, setNow] = useState(Date.now());
   const activeTasks = useMemo(() => tasks.filter((task) => !["succeeded", "failed"].includes(task.status) || task.mediaStatus === "archiving"), [tasks]);
   const privateTasks = useMemo(() => tasks.filter((task) => task.visibility !== "shared"), [tasks]);
@@ -685,9 +743,9 @@ function Studio({ user, route, navigate, logout }: { user: SessionUser; route: s
     <aside className="sidebar" aria-hidden={!sidebar} inert={!sidebar ? true : undefined}><div className="sidebar-head"><span>{view === "assets" ? "资产归档" : view === "canvas" ? "画布" : "开始创作"}</span><button aria-label="收起侧栏" onClick={() => setSidebar(false)}><PanelLeftClose /></button></div>{view === "create" ? <><button className="new-chat" onClick={() => showCreate(true)}><Plus /> 新创作</button>{historySection("我的创作", privateTasks)}{historySection("团队历史", sharedTasks)}{!tasks.length && <div className="history-list"><p>还没有创作记录</p></div>}</> : view === "assets" ? <><div className="asset-sidebar-summary"><span>已归档成片</span><strong>{archivedCount}</strong><p>完成生成的视频会自动进入资产页，并长期保留至你主动删除。</p></div><button className="new-chat new-chat--quiet" onClick={() => showCreate(true)}><Plus /> 创建新视频</button></> : <div className="canvas-sidebar-summary"><CanvasNavGlyph /><span>自由画布</span><p>把镜头、素材与灵感组织在同一张画布上，自由排版、连接创作。</p><button className="new-chat new-chat--quiet" onClick={createCanvasFromSidebar}><Plus /> 新建画布</button></div>}</aside>
     {sidebar && <button className="sidebar-scrim" aria-label="关闭侧栏" onClick={() => setSidebar(false)} />}
     <section className="workspace"><header className="workspace-head">{!sidebar && <button className="menu-button" aria-label="打开侧栏" onClick={() => setSidebar(true)}><Menu /></button>}<span>{view === "assets" ? "Firefly media archive" : view === "canvas" ? "Firefly canvas" : "Seedance video studio"}</span><div className={`system-live ${syncIssue ? "system-live--issue" : ""}`} title={syncIssue ? "与服务端的同步暂时中断，系统会自动重试" : undefined}><i /> {syncIssue ? "同步暂时中断" : activeTasks.length ? `${activeTasks.length} 项进行中` : "系统在线"}</div></header>
-      {loading ? <div className="workspace-loading"><LoaderCircle className="spin" /> 正在唤醒 Firefly</div> : loadError ? <div className="workspace-error"><Archive /><h1>创作台暂时无法载入</h1><p>{loadError}</p><button onClick={initialLoad}><RefreshCw /> 重新载入</button></div> : view === "canvas" ? (route === "/studio/canvas" ? <CanvasProjectList navigate={navigate} autoCreate={pendingCanvasCreate} onAutoCreateHandled={() => setPendingCanvasCreate(false)} /> : <CanvasWorkspace canvasId={route.split("/")[3] ?? ""} navigate={navigate} />) : view === "assets" ? <AssetArchive tasks={tasks} models={models} onCreate={() => showCreate(true)} onDelete={requestDelete} onInsertCanvas={setCanvasInsertTarget} /> : creatingNew || !tasks.length ? <div className="empty-workspace"><Composer models={models} compact={false} onCreated={(task) => { setTasks((old) => [task, ...old]); setCreatingNew(false); }} /><div className="creation-footnote">输入素材保留 7 天 · 成片将长期保存至主动删除</div></div> : <div className="conversation"><div className="conversation-inner"><div className="conversation-heading"><span>Current sequence</span><h1>创作正在发生</h1></div>{tasks.map((task) => <TaskCard key={task.id} task={task} models={models} eager={task.id === latestVideoTaskId} now={now} onDelete={requestDelete} canDelete={task.ownerId === user.id} />)}</div><div className="composer-dock"><Composer models={models} compact onCreated={(task) => setTasks((old) => [task, ...old])} /></div></div>}
+      {loading ? <div className="workspace-loading"><LoaderCircle className="spin" /> 正在唤醒 Firefly</div> : loadError ? <div className="workspace-error"><Archive /><h1>创作台暂时无法载入</h1><p>{loadError}</p><button onClick={initialLoad}><RefreshCw /> 重新载入</button></div> : view === "canvas" ? (route === "/studio/canvas" ? <CanvasProjectList navigate={navigate} autoCreate={pendingCanvasCreate} onAutoCreateHandled={() => setPendingCanvasCreate(false)} /> : <CanvasWorkspace canvasId={route.split("/")[3] ?? ""} navigate={navigate} />) : view === "assets" ? <AssetArchive tasks={tasks} models={models} onCreate={() => showCreate(true)} onDelete={requestDelete} onInsertCanvas={setCanvasInsertTarget} /> : creatingNew || !tasks.length ? <div className="empty-workspace"><Composer models={models} compact={false} onCreated={(task) => { setTasks((old) => [task, ...old]); setCreatingNew(false); }} onImagesGenerated={(bundle) => setImageResults((old) => [bundle, ...old])} /><ImageResultsGallery results={imageResults} onInsertCanvas={setCanvasInsertTarget} onRemove={(id) => setImageResults((old) => old.filter((item) => item.id !== id))} /><div className="creation-footnote">输入素材保留 7 天 · 成片将长期保存至主动删除</div></div> : <div className="conversation"><div className="conversation-inner"><ImageResultsGallery results={imageResults} onInsertCanvas={setCanvasInsertTarget} onRemove={(id) => setImageResults((old) => old.filter((item) => item.id !== id))} /><div className="conversation-heading"><span>Current sequence</span><h1>创作正在发生</h1></div>{tasks.map((task) => <TaskCard key={task.id} task={task} models={models} eager={task.id === latestVideoTaskId} now={now} onDelete={requestDelete} canDelete={task.ownerId === user.id} />)}</div><div className="composer-dock"><Composer models={models} compact onCreated={(task) => setTasks((old) => [task, ...old])} onImagesGenerated={(bundle) => setImageResults((old) => [bundle, ...old])} /></div></div>}
     </section>
-    {canvasInsertTarget && <CanvasInsertPicker payload={canvasInsertTarget.kind === "video" ? { kind: "video", taskId: canvasInsertTarget.task.id, title: canvasInsertTarget.task.prompt || "参考素材生成" } : { kind: "image", uploadId: canvasInsertTarget.asset.UploadId ?? "", name: canvasInsertTarget.asset.Name || "图片" }} onClose={() => setCanvasInsertTarget(null)} navigate={navigate} />}
+    {canvasInsertTarget && <CanvasInsertPicker payload={canvasInsertTarget.kind === "video" ? { kind: "video", taskId: canvasInsertTarget.task.id, title: canvasInsertTarget.task.prompt || "参考素材生成" } : canvasInsertTarget.kind === "image" ? { kind: "image", uploadId: canvasInsertTarget.asset.UploadId ?? "", name: canvasInsertTarget.asset.Name || "图片" } : { kind: "generated", mediaId: canvasInsertTarget.mediaId, title: canvasInsertTarget.title }} onClose={() => setCanvasInsertTarget(null)} navigate={navigate} />}
     {deleteTarget && <div className="confirm-backdrop" role="dialog" aria-modal="true" aria-labelledby="delete-title" onClick={() => !deleting && setDeleteTarget(null)}><div className="confirm-dialog" onClick={(event) => event.stopPropagation()}><span><Trash2 /></span><h2 id="delete-title">删除这次创作？</h2><p>项目与已归档成片将被删除，此操作无法撤销。</p>{deleteError && <small className="confirm-error" role="alert">{deleteError}</small>}<div><button autoFocus disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button><button className="danger" disabled={deleting} onClick={confirmDelete}>{deleting ? <LoaderCircle className="spin" /> : <Trash2 />} 删除项目</button></div></div></div>}
     {featureNotice && <div key={`notice-${featureNotice.nonce}`} className={`feature-notice feature-notice--atlas ${featureNotice.leaving ? "feature-notice--leaving" : ""}`} role="status" aria-live="polite"><span className="feature-notice__icon"><AtlasNavGlyph /></span><span><b>Atlas</b><small>功能即将上线</small></span><button aria-label="关闭提示" onClick={dismissAtlas}><X /></button></div>}
   </main>;

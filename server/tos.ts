@@ -22,7 +22,7 @@ export const tos = new TosClient({
 });
 
 const safeSegment = (value: string) => value.normalize("NFKC").replace(/[^\p{L}\p{N}._-]+/gu, "-").replace(/^-+|-+$/g, "").slice(-120) || "media";
-const shard = (id: string) => crypto.createHash("sha256").update(id).digest("hex").slice(0, 2);
+export const shard = (id: string) => crypto.createHash("sha256").update(id).digest("hex").slice(0, 2);
 
 export const inputObjectKey = (ownerId: string, uploadId: string, fileName: string) => `inputs/${shard(uploadId)}/${ownerId}/${uploadId}/${safeSegment(fileName)}`;
 export const outputObjectKey = (ownerId: string, taskId: string, extension: string) => `outputs/${shard(taskId)}/${ownerId}/${taskId}/result${extension.startsWith(".") ? extension : `.${extension}`}`;
@@ -298,6 +298,13 @@ export const createPoster = async (sourceKey: string, targetKey: string) => {
   } finally {
     await tos.deleteObject({ bucket: config.tosBucket, key: stagingKey }).catch(() => undefined);
   }
+};
+
+export const putObjectBuffer = async (key: string, body: Buffer, contentType: string) => {
+  requireTos();
+  const response = await tos.putObject({ bucket: config.tosBucket, key, body, contentType, forbidOverwrite: true });
+  const size = Number((response.data as unknown as { contentLength?: number })?.contentLength ?? body.length) || body.length;
+  return { size, etag: String((response.data as unknown as { etag?: string })?.etag ?? "").replace(/^"|"$/g, "") };
 };
 
 export const deleteObject = async (key: string) => {
