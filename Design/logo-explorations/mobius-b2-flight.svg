@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <title>Firefly Möbius — Flight</title>
+  <g transform="rotate(16 64 64)" stroke="#edebe7" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M61 25C56 17 51 13 44 10M68 25C75 18 82 15 89 14"/>
+    <path d="M55 35Q64 28 73 35L71 46Q64 52 57 46Z"/>
+    <path d="M59 42C43 34 27 41 25 58C22 77 38 96 57 103C66 106 72 98 68 88C62 75 45 68 43 56C41 47 49 42 59 49"/>
+    <path d="M69 43C82 35 96 41 99 55C103 72 92 91 75 100C66 105 58 99 60 90C63 78 78 68 81 57C84 48 78 43 69 50"/>
+    <path d="M58 56Q64 52 70 57L71 90Q69 105 63 114Q57 105 56 91Z"/>
+    <path d="M57 69L70 69M57 79L71 79M57 89L70 89M59 100L68 100" opacity=".72"/>
+  </g>
+  <path d="M45.8 102.9L54.5 105.5L49.1 115.1Z" stroke="#cc6437" stroke-width="3" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,1 @@
+export const canAccessTask = (task: { ownerId?: string; visibility?: "private" | "shared" }, userId: string) => task.visibility === "shared" || (!task.ownerId && task.visibility !== "private") || task.ownerId === userId;

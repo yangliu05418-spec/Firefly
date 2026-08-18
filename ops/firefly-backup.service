@@ -1,0 +1,10 @@
+[Unit]
+Description=Firefly SQLite consistent backup to TOS
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/firefly
+ExecStart=/usr/bin/docker compose exec -T web sh /app/ops/run-backup.sh
+

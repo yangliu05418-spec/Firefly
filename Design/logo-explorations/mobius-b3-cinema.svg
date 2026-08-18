@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <title>Firefly Möbius — Cinema</title>
+  <g stroke="#edebe7" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M59 25C54 18 49 14 43 12M69 25C74 18 79 14 85 12"/>
+    <circle cx="64" cy="30" r="4.5"/>
+    <path d="M55 39L64 33L73 39L70 50L64 55L58 50Z"/>
+    <path d="M59 44C45 36 33 43 32 58C30 77 42 96 58 103C66 107 72 100 68 90C64 78 51 69 49 58C47 49 51 45 59 50"/>
+    <path d="M69 44C83 36 95 43 96 58C98 77 86 96 70 103C62 107 56 100 60 90C64 78 77 69 79 58C81 49 77 45 69 50" opacity=".46"/>
+    <path d="M59 58L64 54L69 58L70 93L64 115L58 93Z"/>
+    <path d="M58.5 70H69.5M58.5 80H69.5M58.5 90H69.5" opacity=".7"/>
+    <path d="M58 93L64 115L70 93" stroke="#cc6437"/>
+  </g>
+</svg>

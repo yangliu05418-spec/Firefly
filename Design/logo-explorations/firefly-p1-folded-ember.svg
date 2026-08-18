@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <title>Firefly — Folded Ember</title>
+  <g stroke="#edebe7" stroke-linecap="round" stroke-linejoin="round">
+    <path stroke-width="4.5" d="M17 27H43L63 46L82 27H108V50L77 81L64 88L51 82L17 50Z"/>
+    <path stroke-width="3" d="M30 39H40L62 60L86 39H95V47L70 72L63 76L56 72L30 47Z" opacity=".72"/>
+    <path stroke-width="2.5" d="M43 27L40 39M63 46L62 60M82 27L86 39M108 50L95 47M77 81L70 72M51 82L56 72M17 50L30 47" opacity=".46"/>
+    <path stroke-width="4.5" d="M42 76L58 91L47 114L29 108L30 88Z"/>
+    <path stroke-width="2.75" d="M42 88L49 94L43 104L36 102L36 92Z" opacity=".72"/>
+    <path stroke-width="2.5" d="M42 76V88M58 91L49 94M47 114L43 104M29 108L36 102M30 88L36 92" opacity=".46"/>
+  </g>
+  <path d="M36 102L43 104L47 114" stroke="#cc6437" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

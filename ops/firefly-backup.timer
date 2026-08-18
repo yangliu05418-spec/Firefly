@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Firefly database backup every six hours
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

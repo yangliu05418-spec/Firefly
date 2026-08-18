@@ -1,0 +1,65 @@
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+      - .env.feishu
+    environment:
+      TOS_PREVIEW_TRANSCODE_ENABLED: ${TOS_PREVIEW_TRANSCODE_ENABLED:-true}
+      TOS_PREVIEW_MAX_BITRATE: ${TOS_PREVIEW_MAX_BITRATE:-3500000}
+      TOS_UPLOAD_REQUEST_TIMEOUT_MS: ${TOS_UPLOAD_REQUEST_TIMEOUT_MS:-180000}
+    ports:
+      - "127.0.0.1:8090:8090"
+    volumes:
+      - /srv/firefly/uploads:/data/uploads
+      - /srv/firefly/data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8090/api/health').then(r=>{if(!r.ok)process.exit(1)})"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+  worker:
+    build: .
+    restart: unless-stopped
+    command: ["node", "dist-server/worker.js"]
+    env_file:
+      - .env
+      - .env.feishu
+    volumes:
+      - /srv/firefly/uploads:/data/uploads
+      - /srv/firefly/data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+  media-worker:
+    build: .
+    restart: unless-stopped
+    command: ["node", "dist-server/media-worker.js"]
+    env_file:
+      - .env
+      - .env.feishu
+    environment:
+      TOS_PREVIEW_TRANSCODE_ENABLED: ${TOS_PREVIEW_TRANSCODE_ENABLED:-true}
+      TOS_PREVIEW_MAX_BITRATE: ${TOS_PREVIEW_MAX_BITRATE:-3500000}
+      TOS_UPLOAD_REQUEST_TIMEOUT_MS: ${TOS_UPLOAD_REQUEST_TIMEOUT_MS:-180000}
+      TOS_TRANSCODE_DEADLINE_MS: ${TOS_TRANSCODE_DEADLINE_MS:-600000}
+    volumes:
+      - /srv/firefly/data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory", "384mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - /srv/firefly/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

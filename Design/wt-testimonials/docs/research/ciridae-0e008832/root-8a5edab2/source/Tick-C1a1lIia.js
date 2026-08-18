@@ -1,0 +1,1 @@
+import{T as s}from"./tempus-f7bxnCCL.js";import{E as e}from"./app.js";class h extends e{constructor(){super(),this.start=Date.now(),this.current=this.start,this.elapsed=0,this.delta=16,s.add(()=>this.tick())}tick(){const t=Date.now();this.delta=t-this.current,this.current=t,this.elapsed=this.current-this.start,this.trigger("tick")}}export{h as default};

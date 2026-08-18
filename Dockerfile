@@ -1,0 +1,27 @@
+FROM node:22-bookworm-slim AS build
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY tsconfig.json tsconfig.server.json vite.config.ts index.html ./
+COPY Design ./Design
+COPY public ./public
+COPY src ./src
+COPY server ./server
+RUN npm run build
+
+FROM node:22-bookworm-slim AS runtime
+ENV NODE_ENV=production
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates python3 make g++ \
+    && npm ci --omit=dev \
+    && npm cache clean --force \
+    && apt-get purge -y --auto-remove python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /app/dist-web ./dist-web
+COPY --from=build /app/dist-server ./dist-server
+COPY ops ./ops
+EXPOSE 8090
+CMD ["node", "dist-server/index.js"]

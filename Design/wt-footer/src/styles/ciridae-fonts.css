@@ -1,0 +1,23 @@
+@font-face {
+  font-family: "Pragmatica Cond";
+  src: url("/sites/ciridae-0e008832/shared/fonts/PragmaticaCond-Book.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Pragmatica";
+  src: url("/sites/ciridae-0e008832/shared/fonts/Pragmatica-Book.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Roboto Mono";
+  src: url("/sites/ciridae-0e008832/shared/fonts/RobotoMono-var.woff2") format("woff2");
+  font-weight: 300 700;
+  font-style: normal;
+  font-display: swap;
+}

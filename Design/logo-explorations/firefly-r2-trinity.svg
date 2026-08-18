@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <title>Firefly — Trinity Loop</title>
+  <g stroke="#edebe7" stroke-width="5.5" stroke-linecap="square" stroke-linejoin="round">
+    <path d="M56 25L49 13M72 25L79 13"/>
+    <path d="M64 34C48 19 21 25 14 47C8 66 28 78 49 68C60 63 64 50 64 34C64 50 68 63 79 68C100 78 120 66 114 47C107 25 80 19 64 34Z"/>
+    <path d="M64 34C49 47 47 66 53 83C57 95 64 105 64 105C64 105 71 95 75 83C81 66 79 47 64 34Z"/>
+  </g>
+  <path d="M58 92L64 105L70 92" stroke="#cc6437" stroke-width="4" stroke-linecap="square" stroke-linejoin="round"/>
+</svg>

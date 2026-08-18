@@ -1,0 +1,16 @@
+node_modules
+dist-web
+dist-server
+.git
+.env
+.env.*
+密钥.txt
+TOS Information.txt
+参考文档.txt
+firefly-release.tgz
+*.tgz
+*.png
+output
+data
+uploads
+*.log

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <title>Firefly — Lumen Knot</title>
+  <g stroke="#edebe7" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M53 25L47 15M75 25L81 15"/>
+    <path d="M64 35C48 20 22 24 14 45C8 61 20 68 37 62C50 58 59 47 64 35C69 47 78 58 91 62C108 68 120 61 114 45C106 24 80 20 64 35"/>
+    <path d="M64 35C53 47 49 62 52 78C55 94 64 108 64 108C64 108 73 94 76 78C79 62 75 47 64 35"/>
+  </g>
+  <circle cx="64" cy="99" r="13" stroke="#cc6437" stroke-width="2.5" opacity=".9"/>
+</svg>

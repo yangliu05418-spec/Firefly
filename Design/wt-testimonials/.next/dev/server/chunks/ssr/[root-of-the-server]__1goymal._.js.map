@@ -1,0 +1,6 @@
+{
+  "version": 3,
+  "sources": [],
+  "sections": [
+    {"offset": {"line": 10, "column": 0}, "map": {"version":3,"sources":["file:///C:/Users/21180/Downloads/AIGC/Design/wt-testimonials/src/app/page.tsx"],"sourcesContent":["export default function Home() {\r\n  return (\r\n    <main className=\"flex min-h-screen items-center justify-center\">\r\n      <p className=\"text-muted-foreground\">\r\n        Clone target not yet built. Run <code className=\"font-mono text-foreground\">/clone-website</code> to start.\r\n      </p>\r\n    </main>\r\n  );\r\n}\r\n"],"names":["Home","className"],"mappings":";;;;;;AAAe,SAASA;IACtB,qBACE,8OAAC;QAAKC,WAAU;kBACd,cAAA,8OAAC;YAAEA,WAAU;;gBAAwB;8BACH,8OAAC;oBAAKA,WAAU;8BAA4B;;;;;;gBAAqB;;;;;;;;;;;;AAIzG"}}]
+}

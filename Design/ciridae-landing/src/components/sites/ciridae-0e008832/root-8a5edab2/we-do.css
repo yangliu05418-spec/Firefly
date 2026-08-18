@@ -1,0 +1,6 @@
+/* WeDo section — component-specific rules.
+   TextScramble renders its reveal line with an inline `text-align: start`;
+   the target centers the big heading line, so force centering here. */
+.we-do_text-center {
+  text-align: center !important;
+}

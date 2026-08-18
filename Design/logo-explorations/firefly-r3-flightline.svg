@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <title>Firefly — Flightline</title>
+  <g transform="rotate(12 64 64)" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M56 27L49 17M73 28L82 20" stroke="#edebe7" stroke-width="5"/>
+    <path d="M66 36C49 18 20 25 13 47C7 65 26 74 44 67C57 62 65 49 69 38C74 27 89 25 103 32C117 39 121 53 112 62C101 73 82 68 70 57" stroke="#edebe7" stroke-width="5"/>
+    <path d="M70 57C76 72 74 90 62 108C51 93 48 75 54 58C58 48 64 41 69 36" stroke="#edebe7" stroke-width="5"/>
+    <path d="M56 92C58 99 60 104 62 108C65 103 68 97 70 91" stroke="#cc6437" stroke-width="3"/>
+  </g>
+</svg>

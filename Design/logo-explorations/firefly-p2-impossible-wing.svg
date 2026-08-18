@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <title>Firefly — Impossible Wing</title>
+  <g stroke="#edebe7" stroke-linecap="square" stroke-linejoin="round">
+    <path stroke-width="4.25" d="M16 31H44L64 50L84 29H108V51L78 82L64 89L49 81L16 51Z"/>
+    <path stroke-width="4.25" d="M44 31L64 50L78 64L64 78L49 64L29 45"/>
+    <path stroke-width="2.5" d="M84 29L78 64M108 51L78 82M64 89V78M49 81V64M16 51L29 45" opacity=".5"/>
+    <path stroke-width="4.25" d="M49 79L66 91L57 114L38 108L37 90Z"/>
+    <path stroke-width="2.5" d="M49 79L49 94L57 114M37 90L49 94L66 91" opacity=".55"/>
+  </g>
+  <path d="M38 108L49 94L57 114" stroke="#cc6437" stroke-width="3" stroke-linecap="square" stroke-linejoin="round"/>
+</svg>

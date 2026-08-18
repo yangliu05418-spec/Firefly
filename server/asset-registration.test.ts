@@ -1,0 +1,76 @@
+import { describe, expect, it, vi } from "vitest";
+import { prepareProviderAssets } from "./asset-registration.js";
+import { buildProviderPayload, type GenerationInput } from "./provider.js";
+
+const input = (): GenerationInput => ({
+  prompt: "Image 1 walks through a room", model: "dreamina-seedance-2-5-260628", mode: "omni",
+  ratio: "16:9", resolution: "720p", duration: 5, generateAudio: true, seed: -1,
+  cameraFixed: false, watermark: false, outputFormat: "mp4",
+  assets: [{ id: "local-1", uploadId: "upload-12345678901234567890", name: "actor.png", type: "image", role: "reference_image" }]
+});
+
+describe("trusted asset registration", () => {
+  it("registers a TOS upload, waits for Active, and passes asset URI metadata", async () => {
+    const callAsset = vi.fn(async (action: string) => {
+      if (action === "ListAssetGroups") return { Items: [{ Id: "group-1", Name: "Firefly Auto References" }] };
+      if (action === "CreateAsset") return { Id: "asset-1" };
+      if (action === "GetAsset") return { Id: "asset-1", Status: "Active" };
+      throw new Error(action);
+    });
+    const result = await prepareProviderAssets(input(), "owner-1", {
+      readUpload: vi.fn(() => ({ ownerId: "owner-1", status: "ready", contentType: "image/png", objectKey: "inputs/a.png", fileName: "actor.png" }) as never),
+      cacheGet: vi.fn(async () => null), cacheSet: vi.fn(async () => undefined), callAsset: callAsset as never,
+      sign: vi.fn(() => "https://tos.example/asset") as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 1)
+    });
+    expect(result.assets[0]).toMatchObject({ uploadId: "upload-12345678901234567890", assetId: "asset-1" });
+    expect(callAsset).toHaveBeenCalledWith("CreateAsset", expect.objectContaining({ GroupId: "group-1", AssetType: "Image" }));
+    expect(buildProviderPayload(result).content).toEqual([
+      { type: "text", text: "Image 1 walks through a room" },
+      { type: "image_url", image_url: { url: "asset://asset-1" }, role: "reference_image" }
+    ]);
+  });
+
+  it("reuses a cached asset id without creating a duplicate", async () => {
+    const callAsset = vi.fn(async (action: string) => action === "GetAsset" ? { Id: "asset-existing", Status: "Active" } : (() => { throw new Error(action); })());
+    const result = await prepareProviderAssets(input(), "owner-1", {
+      readUpload: vi.fn() as never, cacheGet: vi.fn(async () => "asset-existing"), cacheSet: vi.fn(async () => undefined),
+      callAsset: callAsset as never, sign: vi.fn() as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 1)
+    });
+    expect(result.assets[0]?.assetId).toBe("asset-existing");
+    expect(callAsset).toHaveBeenCalledTimes(1);
+  });
+
+  it("validates selected assets and preserves prompt reference order under concurrent preparation", async () => {
+    const selected = input();
+    selected.assets = [
+      { id: "selected-2", assetId: "asset-2", name: "second.png", type: "image", role: "reference_image" },
+      { id: "selected-1", assetId: "asset-1", name: "first.png", type: "image", role: "reference_image" }
+    ];
+    const callAsset = vi.fn(async (_action: string, body: Record<string, unknown>) => ({ Id: body.Id, Status: "Active" }));
+    const result = await prepareProviderAssets(selected, "owner-1", {
+      readUpload: vi.fn() as never, cacheGet: vi.fn(async () => null), cacheSet: vi.fn(async () => undefined),
+      callAsset: callAsset as never, sign: vi.fn() as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 1)
+    });
+    expect(result.assets.map((asset) => asset.assetId)).toEqual(["asset-2", "asset-1"]);
+    expect(callAsset).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a selected asset whose provider status is Failed", async () => {
+    const selected = input();
+    selected.assets[0] = { ...selected.assets[0]!, uploadId: undefined, assetId: "asset-failed" };
+    await expect(prepareProviderAssets(selected, "owner-1", {
+      readUpload: vi.fn() as never, cacheGet: vi.fn(async () => null), cacheSet: vi.fn(async () => undefined),
+      callAsset: vi.fn(async () => ({ Id: "asset-failed", Status: "Failed" })) as never,
+      sign: vi.fn() as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 1)
+    })).rejects.toThrow("可信资产处理失败");
+  });
+
+  it("rejects a selected asset that is not owned by the current user", async () => {
+    const selected = input();
+    selected.assets[0] = { ...selected.assets[0]!, uploadId: undefined, assetId: "asset-other-user" };
+    await expect(prepareProviderAssets(selected, "owner-1", {
+      readUpload: vi.fn() as never, readOwnedAsset: vi.fn(() => false), cacheGet: vi.fn(async () => null), cacheSet: vi.fn(async () => undefined),
+      callAsset: vi.fn() as never, sign: vi.fn() as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 1)
+    })).rejects.toThrow("不属于当前用户");
+  });
+});

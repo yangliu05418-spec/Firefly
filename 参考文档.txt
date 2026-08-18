@@ -1,0 +1,17 @@
+Official Online Docs:
+  - Model list: https://docs.byteplus.com/en/docs/ModelArk/1330310
+  - Model release announcement: https://docs.byteplus.com/en/docs/ModelArk/1159178
+  - Model pricing: https://docs.byteplus.com/en/docs/ModelArk/1544106
+  - Resource package rules: https://docs.byteplus.com/en/docs/ModelArk/2191775
+  - Seedance 2.0 series tutorials: https://docs.byteplus.com/en/docs/ModelArk/2291680
+  - General video generation tutorials: https://docs.byteplus.com/en/docs/ModelArk/2298881
+  - Seedance 2.0 prompt guide: https://docs.byteplus.com/en/docs/ModelArk/2222480
+  - Real-human portrait library Guide: https://docs.byteplus.com/en/docs/ModelArk/2315856
+  - API - Create task: https://docs.byteplus.com/en/docs/ModelArk/1520757
+  - API - Query task status: https://docs.byteplus.com/en/docs/ModelArk/1521309
+  - API - Query list: https://docs.byteplus.com/en/docs/ModelArk/1521675
+  Only for KYC High(hidded page)
+  - Private Virtual Avatar Asset Library Tutorial: https://docs.byteplus.com/en/docs/ModelArk/2333565
+  - Private Virtual Avatar API Reference (9 interfaces in total): https://docs.byteplus.com/en/docs/ModelArk/2333601?lang=en
+  - Real-human portrait library API reference：https://docs.byteplus.com/en/docs/ModelArk/2333602?lang=en
+  - Real-human portrait library Guide:https://docs.byteplus.com/en/docs/ModelArk/2333589?lang=en

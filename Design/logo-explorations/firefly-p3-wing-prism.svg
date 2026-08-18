@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <title>Firefly — Wing Prism</title>
+  <g transform="rotate(-5 64 64)" stroke="#edebe7" stroke-linejoin="round">
+    <path stroke-width="4.5" d="M63 48L43 29H15L19 52L51 78L65 69Z"/>
+    <path stroke-width="4.5" d="M65 48L85 27H111L107 51L78 78L64 69Z"/>
+    <path stroke-width="2.6" d="M43 29L43 43L61 60M15 29L28 42L51 78M85 27L85 42L67 60M111 27L98 41L78 78" opacity=".54"/>
+    <path stroke-width="4.5" d="M57 75L71 78L68 108L59 117L51 108L52 87Z"/>
+    <path stroke-width="2.6" d="M57 75L59 92L51 108M71 78L59 92L68 108M59 92V117" opacity=".58"/>
+  </g>
+  <path d="M55 108L63 117L72 107" stroke="#cc6437" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
