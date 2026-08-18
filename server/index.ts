@@ -58,9 +58,51 @@ const respondError = (res: express.Response, error: unknown, status = 400) => {
 };
 const param = (value: string | string[]) => Array.isArray(value) ? value[0] : value;
 const execFileAsync = promisify(execFile);
+
+/** 全局素材校验并发闸：批量上传时避免 N 个 ffprobe 同时拉取 TOS 对象压垮容器网络 */
+class Semaphore {
+  private readonly queue: (() => void)[] = [];
+  private active = 0;
+  constructor(private readonly limit: number) {}
+  acquire(): Promise<void> {
+    if (this.active < this.limit) { this.active += 1; return Promise.resolve(); }
+    return new Promise((resolve) => this.queue.push(() => { this.active += 1; resolve(); }));
+  }
+  release() {
+    const next = this.queue.shift();
+    if (next) next();
+    else this.active -= 1;
+  }
+}
+const ffprobeGate = new Semaphore(3);
+
+/** 执行 ffprobe：60s 超时 + 瞬时失败重试一次；失败信息携带 stderr/超时标记/耗时（可观测） */
+const runFfprobe = async (filePath: string) => {
+  const startedAt = Date.now();
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt) await new Promise((resolve) => setTimeout(resolve, 1000));
+    try {
+      const { stdout } = await execFileAsync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,codec_name,width,height,r_frame_rate", "-show_entries", "format=duration", "-of", "json", filePath], { timeout: 60000, maxBuffer: 8 * 1024 * 1024 });
+      return { stdout, elapsedMs: Date.now() - startedAt };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  const detail = lastError as { stderr?: string; killed?: boolean; signal?: string; message?: string } | undefined;
+  const reason = detail?.stderr?.trim().slice(0, 300) || detail?.message || "ffprobe 无法读取素材";
+  throw new Error("素材校验失败：" + reason + (detail?.killed ? "（读取超时）" : "") + "（耗时 " + (Date.now() - startedAt) + "ms）");
+};
 const allowedExtensions = { image: new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".gif", ".heic", ".heif"]), video: new Set([".mp4", ".mov"]), audio: new Set([".mp3", ".wav"]) };
 const validateMedia = async (filePath: string, type: "image" | "video" | "audio") => {
-  const { stdout } = await execFileAsync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,codec_name,width,height,r_frame_rate", "-show_entries", "format=duration", "-of", "json", filePath], { timeout: 20000 });
+  await ffprobeGate.acquire();
+  let probeResult: { stdout: string; elapsedMs: number };
+  try {
+    probeResult = await runFfprobe(filePath);
+  } finally {
+    ffprobeGate.release();
+  }
+  const { stdout } = probeResult;
   const probe = JSON.parse(stdout); const stream = probe.streams?.find((item: { codec_type: string }) => item.codec_type === (type === "image" ? "video" : type));
   if (!stream) throw new Error("无法识别素材内容，请检查文件是否损坏");
   if (type === "image" || type === "video") {
@@ -203,7 +245,7 @@ app.post("/api/uploads/:id/complete", requireAuth, async (req, res) => {
         console.info(JSON.stringify({ type: "tos_upload_completed", at: new Date().toISOString(), userId: meta.ownerId, uploadId, size, requestId: head.requestId }));
         return res.json({ id: uploadId, uploadId, name: meta.name, type: meta.type, size });
       } catch (error) {
-        console.warn(JSON.stringify({ type: "tos_upload_failed", at: new Date().toISOString(), userId: meta.ownerId, uploadId, errorCode: (error as { code?: string }).code ?? "validation_failed" }));
+        console.warn(JSON.stringify({ type: "tos_upload_failed", at: new Date().toISOString(), userId: meta.ownerId, uploadId, errorCode: (error as { code?: string }).code ?? "validation_failed", message: error instanceof Error ? error.message.slice(0, 400) : undefined }));
         await abortMultipartUpload(meta.objectKey, meta.tosUploadId).catch(() => undefined);
         await redis.del(`upload:${uploadId}`);
         throw error;
