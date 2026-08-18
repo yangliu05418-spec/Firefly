@@ -18,6 +18,7 @@ type CanvasStore = {
   connecting: ConnectionHandle | null;
   mouseWorld: CanvasPosition | null;
   connectionTargetNodeId: string | null;
+  editRequest: { nodeId: string; nonce: number } | null;
 
   hydrate: (document: CanvasDocument) => void;
   replaceSnapshot: (nodes: CanvasNode[], connections: CanvasConnection[], background: CanvasBackground) => void;
@@ -34,6 +35,8 @@ type CanvasStore = {
   setConnecting: (handle: ConnectionHandle | null) => void;
   setMouseWorld: (world: CanvasPosition | null) => void;
   setConnectionTargetNodeId: (id: string | null) => void;
+  requestEdit: (nodeId: string) => void;
+  clearEditRequest: () => void;
 
   addNode: (node: CanvasNode) => void;
   updateNode: (nodeId: string, patch: Partial<CanvasNode>) => void;
@@ -57,6 +60,7 @@ export const useCanvasStore = create<CanvasStore>((set) => ({
   connecting: null,
   mouseWorld: null,
   connectionTargetNodeId: null,
+  editRequest: null,
 
   hydrate: (document) => set({ document: { ...document, nodes: [...document.nodes], connections: [...document.connections] }, selection: [], selectedConnectionId: null, connecting: null, mouseWorld: null, connectionTargetNodeId: null, tool: "select" }),
   replaceSnapshot: (nodes, connections, background) => set((state) => ({ document: { ...state.document, nodes: [...nodes], connections: [...connections], background } })),
@@ -84,6 +88,8 @@ export const useCanvasStore = create<CanvasStore>((set) => ({
   setConnecting: (connecting) => set({ connecting, selectedConnectionId: null }),
   setMouseWorld: (mouseWorld) => set({ mouseWorld }),
   setConnectionTargetNodeId: (connectionTargetNodeId) => set({ connectionTargetNodeId }),
+  requestEdit: (nodeId) => set({ editRequest: { nodeId, nonce: Date.now() } }),
+  clearEditRequest: () => set({ editRequest: null }),
 
   addNode: (node) => set((state) => ({ document: { ...state.document, nodes: [...state.document.nodes, node] } })),
   updateNode: (nodeId, patch) =>

@@ -141,6 +141,25 @@ const archiveOutput = async (data: { taskId: string; sourceUrl: string; outputFo
   }
 };
 
+const deleteCanvasAssets = async (canvasId?: string) => {
+  const canvases = canvasId ? [canvasId] : users.canvasesPendingAssetCleanup(20);
+  let firstError: unknown;
+  for (const id of canvases) {
+    const assets = users.listCanvasAssetsByCanvas(id);
+    for (const asset of assets) {
+      try {
+        await deleteObject(asset.objectKey);
+        users.softDeleteCanvasAsset(asset.id, asset.ownerId);
+        console.info(JSON.stringify({ type: "canvas_asset_deleted", at: new Date().toISOString(), canvasId: id, assetId: asset.id, userId: asset.ownerId }));
+      } catch (error) {
+        console.warn(JSON.stringify({ type: "canvas_asset_delete_failed", at: new Date().toISOString(), canvasId: id, assetId: asset.id, code: (error as { code?: string }).code ?? "unknown" }));
+        firstError ??= error;
+      }
+    }
+  }
+  if (firstError) throw firstError;
+};
+
 const deletePendingMedia = async (taskId?: string) => {
   const pending = users.pendingMediaDeletes(100).filter((media) => !taskId || media.taskId === taskId);
   let firstError: unknown;
@@ -166,6 +185,7 @@ const worker = new Worker("media", async (job) => {
   if (job.name === "delete-task-media") return deletePendingMedia(job.data.taskId);
   if (job.name === "reconcile-deletes") return deletePendingMedia();
   if (job.name === "create-poster") return createTaskPoster(job.data.taskId);
+  if (job.name === "delete-canvas-assets") return deleteCanvasAssets(job.data.canvasId);
   throw new Error(`Unknown media job: ${job.name}`);
 }, { connection, concurrency: 2, lockDuration: 120000 });
 
@@ -203,6 +223,7 @@ const reconcilePreviews = async () => {
 };
 const previewReconcile = setInterval(() => void reconcilePreviews().catch((error) => console.warn(JSON.stringify({ type: "tos_preview_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }))), 15 * 60 * 1000);
 void mediaQueue.add("reconcile-deletes", {}, { removeOnComplete: true, removeOnFail: true });
+void deleteCanvasAssets().catch((error) => console.warn(JSON.stringify({ type: "canvas_asset_cleanup_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" })));
 void reconcileArchives().catch(() => undefined);
 void reconcilePosters().catch(() => undefined);
 void reconcilePreviews().catch(() => undefined);

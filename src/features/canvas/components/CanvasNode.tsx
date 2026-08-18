@@ -21,6 +21,9 @@ type CanvasNodeProps = {
   isConnecting: boolean;
   /** M2 隐藏连线把手；M3 接线后置 true */
   interactive?: boolean;
+  /** 外部请求进入内容编辑（双击空白创建文本节点后立即编辑） */
+  editRequested?: boolean;
+  editRequestNonce?: number;
   isGroupDropTarget?: boolean;
   groupChildCount?: number;
   onMouseDown: (event: React.MouseEvent, nodeId: string) => void;
@@ -44,6 +47,8 @@ export const CanvasNode = memo(function CanvasNode({
   isConnectionTarget,
   isConnecting,
   interactive = false,
+  editRequested = false,
+  editRequestNonce = 0,
   isGroupDropTarget = false,
   groupChildCount = 0,
   onMouseDown,
@@ -98,6 +103,10 @@ export const CanvasNode = memo(function CanvasNode({
     window.addEventListener("pointerdown", handleOutsidePointerDown, true);
     return () => window.removeEventListener("pointerdown", handleOutsidePointerDown, true);
   }, [finishTitleEditing, isEditingTitle]);
+
+  useEffect(() => {
+    if (editRequested && node.type === "text") setIsEditingContent(true);
+  }, [editRequested, editRequestNonce, node.type]);
 
   useEffect(() => {
     if (!isEditingContent) return;

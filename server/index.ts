@@ -524,6 +524,7 @@ app.delete("/api/canvases/:id", requireAuth, async (req, res) => {
     const user = res.locals.user as SessionUser;
     const id = param(req.params.id);
     if (!users.softDeleteCanvasProject(id, user.id)) return res.status(404).json({ error: "画布不存在" });
+    mediaQueue.add("delete-canvas-assets", { canvasId: id }, { attempts: 5, backoff: { type: "exponential", delay: 10_000 }, removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 24 * 3600 } }).catch((error) => console.warn(JSON.stringify({ type: "canvas_asset_cleanup_queue_failed", at: new Date().toISOString(), canvasId: id, code: (error as { code?: string }).code ?? "unknown" })));
     console.info(JSON.stringify({ type: "canvas_mutation", action: "delete", userId: user.id, canvasId: id, at: new Date().toISOString() }));
     res.status(204).end();
   } catch (error) { respondError(res, error, 502); }

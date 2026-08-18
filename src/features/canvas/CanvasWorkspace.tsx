@@ -4,7 +4,7 @@
  * 自动保存（800ms debounce PUT）与 409 冲突处理在 M5。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Archive, ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
+import { Archive, ArrowLeft, LayoutGrid, LoaderCircle, RefreshCw, X } from "lucide-react";
 import { getCanvas } from "./canvas-api";
 import { useCanvasStore } from "./canvas-store";
 import { CanvasSurface } from "./components/CanvasSurface";
@@ -17,12 +17,16 @@ import { boxRectFromPoints } from "./core/selection";
 import { resetViewport, setZoomScale } from "./core/viewport";
 import { relativeTime } from "./format";
 import { useCanvasInteractions } from "./useCanvasInteractions";
+import { useCanvasAutosave } from "./useCanvasAutosave";
 
 export function CanvasWorkspace({ canvasId, navigate }: { canvasId: string; navigate: (path: string) => void }) {
   const [loadState, setLoadState] = useState<"loading" | "error" | "ready">("loading");
   const [loadError, setLoadError] = useState("");
   const [projectTitle, setProjectTitle] = useState("");
+  const [project, setProject] = useState<Awaited<ReturnType<typeof getCanvas>> | null>(null);
+  const [conflictNotice, setConflictNotice] = useState(false);
   const [mediaModalOpen, setMediaModalOpen] = useState(false);
+  const conflictNoticeTimer = useRef<number | null>(null);
   const [projectUpdatedAt, setProjectUpdatedAt] = useState(0);
   const [now, setNow] = useState(Date.now());
   const surfaceRef = useRef<HTMLDivElement>(null);
@@ -41,6 +45,7 @@ export function CanvasWorkspace({ canvasId, navigate }: { canvasId: string; navi
   const connecting = useCanvasStore((state) => state.connecting);
   const mouseWorld = useCanvasStore((state) => state.mouseWorld);
   const connectionTargetNodeId = useCanvasStore((state) => state.connectionTargetNodeId);
+  const editRequest = useCanvasStore((state) => state.editRequest);
 
   const { handlers, selectionBox, dropTargetGroupId, resetHistory, getRelatedIds } = useCanvasInteractions({ surfaceRef });
 
@@ -52,6 +57,7 @@ export function CanvasWorkspace({ canvasId, navigate }: { canvasId: string; navi
       if (!project.document) throw new Error("画布文档无法解析");
       useCanvasStore.getState().hydrate(project.document);
       resetHistory();
+      setProject(project);
       setProjectTitle(project.title);
       setProjectUpdatedAt(project.updatedAt);
       setLoadState("ready");
@@ -81,6 +87,20 @@ export function CanvasWorkspace({ canvasId, navigate }: { canvasId: string; navi
     observer.observe(element);
     return () => observer.disconnect();
   }, [loadState]);
+
+  const { saveState, retry: retrySave } = useCanvasAutosave({
+    canvasId,
+    revision: project?.revision ?? 0,
+    initialDocument: project?.document ?? null,
+    onConflictReload: () => {
+      resetHistory();
+      setConflictNotice(true);
+      if (conflictNoticeTimer.current) window.clearTimeout(conflictNoticeTimer.current);
+      conflictNoticeTimer.current = window.setTimeout(() => setConflictNotice(false), 6000);
+    },
+  });
+
+  useEffect(() => () => { if (conflictNoticeTimer.current) window.clearTimeout(conflictNoticeTimer.current); }, []);
 
   const relatedIds = useMemo(() => (hoveredNodeId ? getRelatedIds(hoveredNodeId) : new Set<string>()), [hoveredNodeId, getRelatedIds]);
   const selectedSet = useMemo(() => new Set(selection), [selection]);
@@ -126,7 +146,9 @@ export function CanvasWorkspace({ canvasId, navigate }: { canvasId: string; navi
           <h1>{projectTitle}</h1>
           <span>{nodes.length} 个节点 · {connections.length} 条连线 · 更新于 {relativeTime(projectUpdatedAt, now)}</span>
         </div>
-        <div className="canvas-workspace__save" data-status="loaded">已载入 · 自动保存即将接入</div>
+        <div className={"canvas-workspace__save canvas-workspace__save--" + saveState.status} role="status" aria-live="polite">
+          {saveState.status === "saving" ? <><LoaderCircle className="spin" /> 保存中…</> : saveState.status === "error" ? <button type="button" onClick={retrySave} title={saveState.message}>保存失败，点击重试</button> : saveState.status === "conflict" ? saveState.message : "已自动保存"}
+        </div>
       </header>
       <div className="canvas-workspace__body" ref={surfaceRef}>
         <CanvasSurface
@@ -183,6 +205,8 @@ export function CanvasWorkspace({ canvasId, navigate }: { canvasId: string; navi
               isConnectionTarget={connectionTargetNodeId === node.id}
               isConnecting={connecting !== null}
               interactive
+              editRequested={editRequest?.nodeId === node.id}
+              editRequestNonce={editRequest?.nonce ?? 0}
               isGroupDropTarget={dropTargetGroupId === node.id}
               groupChildCount={node.type === "group" ? nodes.filter((child) => child.metadata.groupId === node.id).length : 0}
               onMouseDown={handlers.onNodeMouseDown}
@@ -199,6 +223,13 @@ export function CanvasWorkspace({ canvasId, navigate }: { canvasId: string; navi
             />
           ))}
         </CanvasSurface>
+        {!nodes.length && (
+          <div className="canvas-empty-hint" aria-hidden="true">
+            <span className="canvas-empty-hint__icon"><LayoutGrid /></span>
+            <b>双击空白处添加文本节点</b>
+            <p>或点击左下角「插入素材」，把成片与图片放上画布。</p>
+          </div>
+        )}
         {minimapOpen && <CanvasMinimap nodes={nodes} viewport={viewport} viewportSize={viewportSize} onViewportChange={(next) => store().setViewport(next)} />}
         <CanvasToolbar
           onInsertMedia={() => setMediaModalOpen(true)}
@@ -213,6 +244,12 @@ export function CanvasWorkspace({ canvasId, navigate }: { canvasId: string; navi
           onBackgroundChange={(nextBackground) => store().setBackground(nextBackground)}
         />
       </div>
+      {conflictNotice && (
+        <div className="canvas-conflict-notice" role="alert">
+          <span>画布已在其他窗口被修改，已载入最新版本；此前的本地改动被覆盖。</span>
+          <button type="button" aria-label="关闭提示" onClick={() => setConflictNotice(false)}><X /></button>
+        </div>
+      )}
       <CanvasMediaInsertModal
         open={mediaModalOpen}
         canvasId={canvasId}

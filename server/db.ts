@@ -593,6 +593,19 @@ export class UserStore {
     return (this.database.prepare("SELECT * FROM canvas_assets WHERE deleted_at IS NOT NULL AND status = 'ready' ORDER BY updated_at LIMIT ?").all(limit) as CanvasAssetRow[]).map((row) => mapCanvasAsset(row)!);
   }
 
+  listCanvasAssetsByCanvas(canvasId: string) {
+    return (this.database.prepare("SELECT * FROM canvas_assets WHERE canvas_id = ? AND deleted_at IS NULL AND status = 'ready' ORDER BY created_at ASC").all(canvasId) as CanvasAssetRow[]).map((row) => mapCanvasAsset(row)!);
+  }
+
+  canvasesPendingAssetCleanup(limit = 20) {
+    return (this.database.prepare(`
+      SELECT DISTINCT cp.id FROM canvas_projects cp
+      WHERE cp.deleted_at IS NOT NULL
+        AND EXISTS (SELECT 1 FROM canvas_assets ca WHERE ca.canvas_id = cp.id AND ca.deleted_at IS NULL AND ca.status = 'ready')
+      ORDER BY cp.deleted_at ASC LIMIT ?
+    `).all(limit) as { id: string }[]).map((row) => row.id);
+  }
+
   softDeleteCanvasProject(id: string, ownerId: string) {
     const now = Date.now();
     const result = this.database.prepare("UPDATE canvas_projects SET deleted_at = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").run(now, now, id, ownerId);

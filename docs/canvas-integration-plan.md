@@ -1,7 +1,8 @@
 # Firefly Canvas 功能接入准备文档
 
-> 状态：调研完成，待开发
-> 基线 commit: bb09ad3
+> 状态：**M1–M5 全部交付**（feature/canvas-m1 … feature/canvas-m5，未合并 main）
+> 交付说明：图片迁移采用同步 TOS copyObject（替代原计划的异步媒体队列 job，避免"copying"僵尸节点，失败原子化）；媒体插入提供双入口（工作台内「插入素材」+ 资产页「插入画布」）；UX QA 报告见 docs/canvas-ux-qa.md
+> 基线 commit: bb09ad3；最新：M5 分支头部
 > 参考实现：infinite-canvas-main（MIT, Copyright (c) 2026 basketikun）
 
 ## 0. 结论摘要

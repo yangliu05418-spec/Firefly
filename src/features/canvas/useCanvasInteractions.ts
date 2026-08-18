@@ -400,6 +400,20 @@ export function useCanvasInteractions({ surfaceRef }: { surfaceRef: React.RefObj
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [copySelected, deleteSelection, pasteCopiedNodes, pasteSystemText, redoCanvas, store, undoCanvas]);
 
+  // ---------- 双击空白：创建文本节点并立即编辑 ----------
+  const handleCanvasDoubleClick = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      const state = store.getState();
+      const rect = surfaceRef.current?.getBoundingClientRect();
+      const world = screenToCanvas(event.clientX, event.clientY, state.document.viewport, rect);
+      const node = createCanvasNode("text", world, { content: "", status: "idle" });
+      state.addNode(node);
+      state.setSelection([node.id]);
+      state.requestEdit(node.id);
+    },
+    [store, surfaceRef],
+  );
+
   // ---------- 节点子事件 ----------
   const handleNodeSelectCapture = useCallback(
     (event: React.MouseEvent, nodeId: string) => {
@@ -425,7 +439,7 @@ export function useCanvasInteractions({ surfaceRef }: { surfaceRef: React.RefObj
   const handlers: CanvasInteractionHandlers = {
     onCanvasMouseDown: handleCanvasMouseDown,
     onCanvasDeselect: handleCanvasDeselect,
-    onCanvasDoubleClick: () => {},
+    onCanvasDoubleClick: handleCanvasDoubleClick,
     onNodeMouseDown: handleNodeMouseDown,
     onNodeSelectCapture: handleNodeSelectCapture,
     onNodeHoverStart: (nodeId) => store.getState().setHoveredNodeId(nodeId),
