@@ -174,6 +174,55 @@ describe("enterprise identity and isolation", () => {
     store.close();
   });
 
+  it("allows the owner to delete their own shared tasks (read-only for others)", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-shared-delete-")); directories.push(directory);
+    const store = new UserStore(path.join(directory, "shared.db"));
+    const owner = store.upsertFromFeishu({ openId: "ou_shared_owner", unionId: "on_shared_owner", tenantKey: "tenant-dokuai", email: "shared-owner@dokuai.tv", name: "Owner", avatarUrl: "" });
+    const other = store.upsertFromFeishu({ openId: "ou_shared_other", unionId: "on_shared_other", tenantKey: "tenant-dokuai", email: "shared-other@dokuai.tv", name: "Other", avatarUrl: "" });
+    store.saveTask(task({ id: "shared-task", ownerId: owner.id, visibility: "shared", status: "succeeded", mediaStatus: "ready", mediaRevision: 1 }));
+    expect(store.softDeleteTask("shared-task", other.id)).toBe(false);
+    expect(store.softDeleteTask("shared-task", owner.id)).toBe(true);
+    expect(store.readTask("shared-task")).toBeNull();
+    store.close();
+  });
+
+  it("matches active asset references structurally (no substring false positives)", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-asset-ref-")); directories.push(directory);
+    const store = new UserStore(path.join(directory, "asset-ref.db"));
+    const owner = store.upsertFromFeishu({ openId: "ou_ref_owner", unionId: "on_ref_owner", tenantKey: "tenant-dokuai", email: "ref-owner@dokuai.tv", name: "Owner", avatarUrl: "" });
+    store.saveTask(task({ id: "ref-running", ownerId: owner.id, status: "running", request: { assets: [{ assetId: "asset-abcdef", name: "a.png", type: "image" }] } }));
+    expect(store.isUserAssetInActiveTask("asset-abcdef", owner.id)).toBe(true);
+    // 前缀重叠的 id 不再误判
+    expect(store.isUserAssetInActiveTask("asset-abc", owner.id)).toBe(false);
+    // uploadId 形态（尚未注册）不匹配 assetId
+    expect(store.isUserAssetInActiveTask("upload-xyz", owner.id)).toBe(false);
+    // 非活动任务不阻塞删除
+    store.saveTask(task({ id: "ref-done", ownerId: owner.id, status: "succeeded", request: { assets: [{ assetId: "asset-done" }] } }));
+    expect(store.isUserAssetInActiveTask("asset-done", owner.id)).toBe(false);
+    store.close();
+  });
+
+  it("persists media trace fields and caps recovery attempts", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-trace-")); directories.push(directory);
+    const databasePath = path.join(directory, "trace.db");
+    let store = new UserStore(databasePath);
+    const owner = store.upsertFromFeishu({ openId: "ou_trace", unionId: "on_trace", tenantKey: "tenant-dokuai", email: "trace@dokuai.tv", name: "Trace", avatarUrl: "" });
+    const now = Date.now();
+    store.saveTask(task({ id: "trace-1", ownerId: owner.id, visibility: "private", status: "succeeded", mediaStatus: "failed", sourceVideoUrl: "https://provider.example/v.mp4", sourceVideoExpiresAt: now + 3600_000, fetchTaskId: "fetch-123", mediaAttempts: 1, mediaLastError: JSON.stringify({ phase: "url_fetch", message: "boom" }), updatedAt: now }));
+    store.close();
+    store = new UserStore(databasePath);
+    const loaded = store.readTask("trace-1")!;
+    expect(loaded.fetchTaskId).toBe("fetch-123");
+    expect(loaded.mediaAttempts).toBe(1);
+    expect(JSON.parse(loaded.mediaLastError!).message).toBe("boom");
+    // 达到恢复上限后不再进入可恢复集合
+    const recoverable = store.recoverableMediaTasks(now + 5 * 60_000, now - 60_000, 20);
+    expect(recoverable.map((item) => item.id)).toContain("trace-1");
+    store.saveTask({ ...loaded, mediaAttempts: 3, updatedAt: Date.now() });
+    expect(store.recoverableMediaTasks(now + 5 * 60_000, now - 60_000, 20).map((item) => item.id)).not.toContain("trace-1");
+    store.close();
+  });
+
   it("consumes OAuth state only once and keeps return paths local", async () => {
     const redis = new MemoryRedis();
     const authorization = new URL(await createFeishuAuthorization(redis as never, "//evil.example"));

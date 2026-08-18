@@ -4,6 +4,7 @@ import { config } from "./config.js";
 import { users } from "./db.js";
 import { mediaQueue, previewQueue, readTask, saveTask } from "./redis.js";
 import { createPoster, deleteObject, fetchObjectFromUrl, optimizePlaybackObject, outputObjectKey, posterObjectKey, previewObjectKey, streamObjectFromUrl, verifyProgressiveMp4 } from "./tos.js";
+import { MAX_MEDIA_RECOVERY_ATTEMPTS } from "./db.js";
 import { transcodePreview } from "./preview-transcode.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
@@ -109,7 +110,12 @@ const archiveOutput = async (data: { taskId: string; sourceUrl: string; outputFo
       await streamObjectFromUrl(objectKey, data.sourceUrl, `result.${data.outputFormat}`, data.outputFormat === "mov" ? "video/quicktime" : "video/mp4", (partNumber, bytes) => console.info(JSON.stringify({ type: "tos_stream_part_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, partNumber, bytes })));
     } else {
       await fetchObjectFromUrl(objectKey, data.sourceUrl, {
-        taskCreated: (fetchTaskId) => console.info(JSON.stringify({ type: "tos_fetch_task_created", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, fetchTaskId })),
+        taskCreated: (fetchTaskId) => {
+          console.info(JSON.stringify({ type: "tos_fetch_task_created", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, fetchTaskId }));
+          void readTask(task.id, true).then((current) => {
+            if (current && !current.deletedAt) return saveTask({ ...current, fetchTaskId, updatedAt: Date.now() });
+          }).catch((error) => console.warn(JSON.stringify({ type: "tos_fetch_trace_persist_failed", at: new Date().toISOString(), taskId: task.id, code: (error as { code?: string }).code ?? "unknown" })));
+        },
         stateChanged: (fetchTaskId, state, error) => console.info(JSON.stringify({ type: "tos_fetch_task_state", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, fetchTaskId, state, error: error || undefined }))
       });
     }
@@ -130,12 +136,15 @@ const archiveOutput = async (data: { taskId: string; sourceUrl: string; outputFo
       console.warn(JSON.stringify({ type: "tos_poster_failed", at: new Date().toISOString(), taskId: task.id, code: (error as { code?: string }).code ?? "unknown" }));
       await enqueuePosterRecovery(task.id).catch(() => undefined);
     }
-    await saveTask({ ...current, status: "succeeded", mediaStatus: "ready", mediaRevision: (current.mediaRevision ?? 0) + 1, updatedAt: Date.now() });
+    await saveTask({ ...current, status: "succeeded", mediaStatus: "ready", mediaRevision: (current.mediaRevision ?? 0) + 1, mediaLastError: undefined, updatedAt: Date.now() });
     await enqueuePreviewRecovery(task.id).catch((error) => console.warn(JSON.stringify({ type: "tos_preview_queue_failed", at: new Date().toISOString(), taskId: task.id, code: (error as { code?: string }).code ?? "unknown" })));
     console.info(JSON.stringify({ type: "tos_fetch_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, strategy: finalAttempt ? "stream_multipart" : "url_fetch", size, posterReady, elapsedMs: Date.now() - startedAt, requestId: head.requestId }));
   } catch (error) {
     const current = await readTask(task.id, true);
-    if (current && !current.deletedAt) await saveTask({ ...current, mediaStatus: "archiving", updatedAt: Date.now() });
+    if (current && !current.deletedAt) {
+      const trace = { phase: finalAttempt ? "stream_multipart" : "url_fetch", code: (error as { code?: string }).code ?? "unknown", statusCode: (error as { statusCode?: number }).statusCode ?? null, message: error instanceof Error ? error.message.slice(0, 500) : undefined, elapsedMs: Date.now() - startedAt };
+      await saveTask({ ...current, mediaStatus: "archiving", mediaLastError: JSON.stringify(trace), updatedAt: Date.now() });
+    }
     console.warn(JSON.stringify({ type: "tos_fetch_failed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, strategy: finalAttempt ? "stream_multipart" : "url_fetch", elapsedMs: Date.now() - startedAt, code: (error as { code?: string }).code ?? "unknown", statusCode: (error as { statusCode?: number }).statusCode, message: error instanceof Error ? error.message : undefined }));
     throw error;
   }
@@ -202,8 +211,21 @@ worker.on("failed", async (job) => {
   if (!job || job.name !== "archive-output" || job.attemptsMade < (job.opts.attempts ?? 1)) return;
   const task = await readTask(job.data.taskId, true);
   if (!task || task.deletedAt) return;
-  await saveTask({ ...task, mediaStatus: "failed", updatedAt: Date.now() });
-  await enqueueArchiveRecovery(task, 60_000).catch((error) => console.warn(JSON.stringify({ type: "tos_recovery_queue_failed", at: new Date().toISOString(), taskId: task.id, code: (error as { code?: string }).code ?? "unknown" })));
+  const mediaAttempts = (task.mediaAttempts ?? 0) + 1;
+  // 分层保护：任务保持 succeeded（生成本身成功），归档失败进入 fallback 可恢复态；
+  // 临时源在有效期内仍可预览（task-public 暴露 upstream mediaSource），并限制自动恢复轮次。
+  await saveTask({
+    ...task,
+    mediaStatus: "failed",
+    mediaAttempts,
+    mediaLastError: job.failedReason ? JSON.stringify({ phase: "archive_output", message: job.failedReason.slice(0, 500) }) : undefined,
+    updatedAt: Date.now()
+  });
+  if (mediaAttempts < MAX_MEDIA_RECOVERY_ATTEMPTS) {
+    await enqueueArchiveRecovery(task, 60_000).catch((error) => console.warn(JSON.stringify({ type: "tos_recovery_queue_failed", at: new Date().toISOString(), taskId: task.id, code: (error as { code?: string }).code ?? "unknown" })));
+  } else {
+    console.warn(JSON.stringify({ type: "tos_recovery_exhausted", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempts: mediaAttempts, maxAttempts: MAX_MEDIA_RECOVERY_ATTEMPTS }));
+  }
 });
 
 const reconcile = setInterval(() => void mediaQueue.add("reconcile-deletes", {}, { jobId: `reconcile-${Math.floor(Date.now() / 3600000)}`, removeOnComplete: true, removeOnFail: true }), 3600000);

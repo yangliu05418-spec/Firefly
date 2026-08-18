@@ -2,7 +2,7 @@ import { config } from "./config.js";
 import { callAssetApi } from "./asset-api.js";
 import { users } from "./db.js";
 import { redis } from "./redis.js";
-import { signedObjectUrl } from "./tos.js";
+
 import type { GenerationInput } from "./provider.js";
 
 const GROUP_NAME = "Firefly Auto References";
@@ -10,7 +10,16 @@ const CACHE_TTL_SECONDS = 7 * 24 * 3600;
 const ACTIVE_DEADLINE_MS = 3 * 60 * 1000;
 const POLL_INTERVAL_MS = 5000;
 
-export class AssetRegistrationRejected extends Error {}
+export type AssetRejectionCode = "ASSET_REAL_PERSON" | "ASSET_NOT_OWNED" | "ASSET_PROVIDER_FAILED" | "ASSET_PROCESSING_TIMEOUT";
+
+export class AssetRegistrationRejected extends Error {
+  readonly code: AssetRejectionCode;
+  constructor(message: string, code: AssetRejectionCode) {
+    super(message);
+    this.name = "AssetRegistrationRejected";
+    this.code = code;
+  }
+}
 
 type AssetRecord = { Id: string; Status?: string; Name?: string; AssetType?: "Image" | "Video" | "Audio"; GroupId?: string; URL?: string };
 type GroupRecord = { Id: string; Name?: string };
@@ -20,7 +29,8 @@ type RegistrationDeps = {
   cacheGet: (key: string) => Promise<string | null>;
   cacheSet: (key: string, value: string) => Promise<unknown>;
   callAsset: typeof callAssetApi;
-  sign: typeof signedObjectUrl;
+  /** 统一素材引用解析（TOS 签名 / legacy HMAC 路由），禁止双栈混用 */
+  resolveMediaUrl: (media: { objectKey: string; uploadId?: string; fileName: string }) => Promise<string>;
   sleep: (ms: number) => Promise<unknown>;
   now: () => number;
   readOwnedAsset?: (assetId: string, ownerId: string) => boolean;
@@ -32,7 +42,7 @@ const defaultDeps: RegistrationDeps = {
   cacheGet: (key) => redis.get(key),
   cacheSet: (key, value) => redis.set(key, value, "EX", CACHE_TTL_SECONDS),
   callAsset: callAssetApi,
-  sign: signedObjectUrl,
+  resolveMediaUrl: (media) => import("./media-url.js").then((module) => module.resolveUploadMediaUrl(media)),
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now: Date.now,
   readOwnedAsset: (assetId, ownerId) => users.readUserAsset(assetId)?.ownerId === ownerId,
@@ -66,10 +76,10 @@ const waitForActive = async (assetId: string, name: string, deps: RegistrationDe
   while (deps.now() < deadline) {
     const asset = await deps.callAsset<AssetRecord>("GetAsset", { Id: assetId });
     if (asset.Status === "Active") return asset;
-    if (asset.Status === "Failed") throw new AssetRegistrationRejected(`参考素材「${name}」可信资产处理失败；若包含真人，请先完成真人认证并从真人资产库选择 Active 素材`);
+    if (asset.Status === "Failed") throw new AssetRegistrationRejected(`参考素材「${name}」处理失败，无法用于生成；若素材包含真人面孔，请先完成真人认证并等待资产状态变为 Active`, "ASSET_PROVIDER_FAILED");
     await deps.sleep(POLL_INTERVAL_MS);
   }
-  throw new Error(`参考素材「${name}」仍在可信资产处理中，请稍后重试`);
+  throw new AssetRegistrationRejected(`参考素材「${name}」仍在可信资产处理中（已等待 ${Math.round(ACTIVE_DEADLINE_MS / 1000)} 秒），请稍后重试`, "ASSET_PROCESSING_TIMEOUT");
 };
 
 const registerUpload = async (uploadId: string, ownerId: string, name: string, inputType: "image" | "video" | "audio", deps: RegistrationDeps) => {
@@ -86,13 +96,13 @@ const registerUpload = async (uploadId: string, ownerId: string, name: string, i
     try {
       created = await deps.callAsset<{ Id: string }>("CreateAsset", {
         GroupId: groupId,
-        URL: deps.sign(media.objectKey, { expires: 24 * 3600, fileName: media.fileName }),
+        URL: await deps.resolveMediaUrl(media),
         AssetType: assetType,
         Name: media.fileName
       });
     } catch (error) {
       if (/real[ -]?person|real human|真人|人脸/i.test(error instanceof Error ? error.message : String(error))) {
-        throw new AssetRegistrationRejected(`参考素材「${name}」包含真人面孔，请先完成真人认证并加入真人资产库`);
+        throw new AssetRegistrationRejected(`参考素材「${name}」包含真人面孔，请先完成真人认证并加入真人资产库`, "ASSET_REAL_PERSON");
       }
       throw error;
     }
@@ -117,7 +127,7 @@ export const prepareProviderAssets = async (input: GenerationInput, ownerId: str
       const asset = input.assets[index];
       if (!asset) continue;
       if (asset.assetId) {
-        if (deps.readOwnedAsset && !deps.readOwnedAsset(asset.assetId, ownerId)) throw new AssetRegistrationRejected(`参考素材「${asset.name}」不属于当前用户`);
+        if (deps.readOwnedAsset && !deps.readOwnedAsset(asset.assetId, ownerId)) throw new AssetRegistrationRejected(`参考素材「${asset.name}」不属于当前用户`, "ASSET_NOT_OWNED");
         const active = await waitForActive(asset.assetId, asset.name, deps);
         deps.saveAsset?.({ id: asset.assetId, ownerId, groupId: active.GroupId ?? "", name: active.Name ?? asset.name, assetType: active.AssetType ?? (asset.type === "video" ? "Video" : asset.type === "audio" ? "Audio" : "Image"), status: "Active", url: active.URL, createdAt: deps.now(), updatedAt: deps.now() });
         assets[index] = asset;

@@ -36,11 +36,20 @@ export type StoredTask = {
   request?: unknown;
   sourceVideoUrl?: string;
   sourceVideoExpiresAt?: number;
+  /** TOS 抓取任务 id（可追踪元数据，排障用） */
+  fetchTaskId?: string;
+  /** 归档恢复轮次（每次完整 archive-output 失败 +1，达到上限停止自动恢复） */
+  mediaAttempts?: number;
+  /** 最近一次归档失败的结构化描述（JSON：phase/code/statusCode/message/elapsedMs） */
+  mediaLastError?: string;
   createdAt: number;
   updatedAt: number;
   error?: string;
   deletedAt?: number;
 };
+
+/** 归档自动恢复轮次上限：达到后停止重试，保留临时源可播放（fallback 分层保护） */
+export const MAX_MEDIA_RECOVERY_ATTEMPTS = 3;
 
 export type MediaObject = {
   id: string;
@@ -118,6 +127,7 @@ type TaskRow = {
   status: TaskStatus; media_status: MediaStatus; media_revision: number; prompt: string; model: string; mode: string;
   ratio: string; resolution: string; duration: number; request_json: string; source_video_url: string | null;
   source_video_expires_at: number | null; error: string | null; created_at: number; updated_at: number; deleted_at: number | null;
+  fetch_task_id: string | null; media_attempts: number | null; media_last_error: string | null;
 };
 
 type MediaRow = {
@@ -155,6 +165,8 @@ const mapTask = (row?: TaskRow): StoredTask | null => row ? ({
   mode: row.mode, ratio: row.ratio, resolution: row.resolution, duration: row.duration,
   request: JSON.parse(row.request_json), sourceVideoUrl: row.source_video_url ?? undefined,
   sourceVideoExpiresAt: row.source_video_expires_at ?? undefined, error: row.error ?? undefined,
+  fetchTaskId: row.fetch_task_id ?? undefined, mediaAttempts: row.media_attempts ?? undefined,
+  mediaLastError: row.media_last_error ?? undefined,
   createdAt: row.created_at, updatedAt: row.updated_at, deletedAt: row.deleted_at ?? undefined
 }) : null;
 
@@ -225,6 +237,9 @@ export class UserStore {
         source_video_url TEXT,
         source_video_expires_at INTEGER,
         error TEXT,
+        fetch_task_id TEXT,
+        media_attempts INTEGER NOT NULL DEFAULT 0,
+        media_last_error TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         deleted_at INTEGER,
@@ -301,6 +316,14 @@ export class UserStore {
       CREATE INDEX IF NOT EXISTS canvas_assets_canvas_idx ON canvas_assets(canvas_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS canvas_assets_delete_idx ON canvas_assets(status, updated_at);
     `);
+    const taskColumns = this.database.prepare("PRAGMA table_info(generation_tasks)").all() as { name: string }[];
+    const addTaskColumn = (name: string, definition: string) => {
+      if (taskColumns.some((column) => column.name === name)) return;
+      this.database.exec(`ALTER TABLE generation_tasks ADD COLUMN ${name} ${definition}`);
+    };
+    addTaskColumn("fetch_task_id", "TEXT");
+    addTaskColumn("media_attempts", "INTEGER NOT NULL DEFAULT 0");
+    addTaskColumn("media_last_error", "TEXT");
     const mediaSchema = this.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'media_objects'").get() as { sql?: string } | undefined;
     if (mediaSchema?.sql && !mediaSchema.sql.includes("'preview'")) {
       this.database.transaction(() => {
@@ -343,7 +366,12 @@ export class UserStore {
   upsertFromFeishu(profile: { openId: string; unionId: string; tenantKey: string; email: string; name: string; avatarUrl: string }) {
     const now = Date.now();
     const existingByEmail = this.findByEmail(profile.email);
-    if (existingByEmail && existingByEmail.feishuOpenId !== profile.openId) throw new Error("该企业邮箱已绑定其他飞书身份，请联系管理员");
+    // 安全设计（非缺陷）：企业邮箱是企业 SSO 的身份锚点，禁止新 open_id 冒领已绑定邮箱（防账号接管）；
+    // 账号迁移/重绑由管理员介入（disableByEmail 或人工处理），此处保留强校验并输出审计日志。
+    if (existingByEmail && existingByEmail.feishuOpenId !== profile.openId) {
+      console.warn(JSON.stringify({ type: "auth_binding_conflict", at: new Date().toISOString(), email: profile.email, existingOpenId: existingByEmail.feishuOpenId, attemptedOpenId: profile.openId }));
+      throw new Error("该企业邮箱已绑定其他飞书身份，请联系管理员");
+    }
     const existing = this.database.prepare("SELECT * FROM users WHERE feishu_open_id = ?").get(profile.openId) as UserRow | undefined;
     if (existing) {
       this.database.prepare(`UPDATE users SET feishu_union_id = ?, tenant_key = ?, email = ?, name = ?, avatar_url = ?, last_login_at = ? WHERE id = ?`)
@@ -365,18 +393,20 @@ export class UserStore {
 
   saveTask(task: StoredTask) {
     this.database.prepare(`
-      INSERT INTO generation_tasks (id, owner_id, visibility, provider_id, status, media_status, media_revision, prompt, model, mode, ratio, resolution, duration, request_json, source_video_url, source_video_expires_at, error, created_at, updated_at, deleted_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO generation_tasks (id, owner_id, visibility, provider_id, status, media_status, media_revision, prompt, model, mode, ratio, resolution, duration, request_json, source_video_url, source_video_expires_at, error, fetch_task_id, media_attempts, media_last_error, created_at, updated_at, deleted_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET owner_id=excluded.owner_id, visibility=excluded.visibility, provider_id=excluded.provider_id,
         status=excluded.status, media_status=excluded.media_status, media_revision=excluded.media_revision, prompt=excluded.prompt,
         model=excluded.model, mode=excluded.mode, ratio=excluded.ratio, resolution=excluded.resolution, duration=excluded.duration,
         request_json=excluded.request_json, source_video_url=excluded.source_video_url, source_video_expires_at=excluded.source_video_expires_at,
-        error=excluded.error, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at
+        error=excluded.error, fetch_task_id=excluded.fetch_task_id, media_attempts=excluded.media_attempts, media_last_error=excluded.media_last_error,
+        updated_at=excluded.updated_at, deleted_at=excluded.deleted_at
     `).run(
       task.id, task.ownerId ?? null, task.visibility ?? (task.ownerId ? "private" : "shared"), task.providerId ?? null,
       task.status, task.mediaStatus ?? "none", task.mediaRevision ?? 0, task.prompt, task.model, task.mode, task.ratio,
       task.resolution, task.duration, JSON.stringify(task.request ?? {}), task.sourceVideoUrl ?? null,
-      task.sourceVideoExpiresAt ?? null, task.error ?? null, task.createdAt, task.updatedAt, task.deletedAt ?? null
+      task.sourceVideoExpiresAt ?? null, task.error ?? null, task.fetchTaskId ?? null,
+      task.mediaAttempts ?? 0, task.mediaLastError ?? null, task.createdAt, task.updatedAt, task.deletedAt ?? null
     );
     return task;
   }
@@ -403,13 +433,14 @@ export class UserStore {
       SELECT * FROM generation_tasks
       WHERE deleted_at IS NULL AND status IN ('succeeded', 'failed')
         AND source_video_url IS NOT NULL AND source_video_expires_at > ?
+        AND (media_attempts IS NULL OR media_attempts < ?)
         AND (media_status IN ('failed', 'fallback') OR (media_status = 'archiving' AND updated_at < ?))
         AND NOT EXISTS (
           SELECT 1 FROM media_objects
           WHERE media_objects.task_id = generation_tasks.id AND media_objects.kind = 'output' AND media_objects.status = 'ready'
         )
       ORDER BY updated_at ASC LIMIT ?
-    `).all(minimumSourceExpiry, staleBefore, limit) as TaskRow[];
+    `).all(minimumSourceExpiry, MAX_MEDIA_RECOVERY_ATTEMPTS, staleBefore, limit) as TaskRow[];
     return rows.map((row) => mapTask(row)!);
   }
 
@@ -463,10 +494,14 @@ export class UserStore {
   readUpload(uploadId: string) { return mapMedia(this.database.prepare("SELECT * FROM media_objects WHERE upload_id = ? AND kind = 'input' AND status = 'ready'").get(uploadId) as MediaRow | undefined); }
   readTaskMedia(taskId: string, kind: "output" | "preview" | "poster") { return mapMedia(this.database.prepare("SELECT * FROM media_objects WHERE task_id = ? AND kind = ? AND status = 'ready' ORDER BY created_at DESC LIMIT 1").get(taskId, kind) as MediaRow | undefined); }
 
+  /**
+   * 删除权限矩阵：owner 可删除自己的任务（private 与 shared 一致）；
+   * shared 读者只读不可删。shared 任务被 owner 删除后级联清理媒体。
+   */
   softDeleteTask(taskId: string, ownerId: string) {
     const now = Date.now();
     return this.database.transaction(() => {
-      const result = this.database.prepare("UPDATE generation_tasks SET deleted_at = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND visibility = 'private' AND deleted_at IS NULL").run(now, now, taskId, ownerId);
+      const result = this.database.prepare("UPDATE generation_tasks SET deleted_at = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").run(now, now, taskId, ownerId);
       if (!result.changes) return false;
       this.database.prepare("UPDATE media_objects SET status = 'delete_pending', updated_at = ? WHERE task_id = ? AND kind IN ('output', 'preview', 'poster') AND status != 'deleted'").run(now, taskId);
       return true;
@@ -520,15 +555,18 @@ export class UserStore {
     return result.changes > 0;
   }
 
+  /**
+   * 活动任务是否引用了某资产：对 request_json 的 assets 数组做 JSON 结构化精确匹配
+   * （json_each + json_extract），替代旧版 LIKE 文本模糊匹配（避免 id 前缀误判/漏判）。
+   */
   isUserAssetInActiveTask(id: string, ownerId: string) {
-    const escaped = id.replace(/[\\%_]/g, "\\$&");
     const row = this.database.prepare(`
-      SELECT 1 AS found FROM generation_tasks
-      WHERE owner_id = ? AND deleted_at IS NULL
-        AND status IN ('queued', 'submitting', 'running')
-        AND request_json LIKE ? ESCAPE '\\'
+      SELECT 1 AS found FROM generation_tasks, json_each(generation_tasks.request_json, '$.assets') AS entry
+      WHERE generation_tasks.owner_id = ? AND generation_tasks.deleted_at IS NULL
+        AND generation_tasks.status IN ('queued', 'submitting', 'running')
+        AND json_extract(entry.value, '$.assetId') = ?
       LIMIT 1
-    `).get(ownerId, `%${escaped}%`) as { found: number } | undefined;
+    `).get(ownerId, id) as { found: number } | undefined;
     return Boolean(row?.found);
   }
 

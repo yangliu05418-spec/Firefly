@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { prepareProviderAssets } from "./asset-registration.js";
+import { AssetRegistrationRejected, prepareProviderAssets } from "./asset-registration.js";
 import { buildProviderPayload, type GenerationInput } from "./provider.js";
 
 const input = (): GenerationInput => ({
@@ -20,7 +20,7 @@ describe("trusted asset registration", () => {
     const result = await prepareProviderAssets(input(), "owner-1", {
       readUpload: vi.fn(() => ({ ownerId: "owner-1", status: "ready", contentType: "image/png", objectKey: "inputs/a.png", fileName: "actor.png" }) as never),
       cacheGet: vi.fn(async () => null), cacheSet: vi.fn(async () => undefined), callAsset: callAsset as never,
-      sign: vi.fn(() => "https://tos.example/asset") as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 1)
+      resolveMediaUrl: vi.fn(async () => "https://tos.example/asset") as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 1)
     });
     expect(result.assets[0]).toMatchObject({ uploadId: "upload-12345678901234567890", assetId: "asset-1" });
     expect(callAsset).toHaveBeenCalledWith("CreateAsset", expect.objectContaining({ GroupId: "group-1", AssetType: "Image" }));
@@ -34,7 +34,7 @@ describe("trusted asset registration", () => {
     const callAsset = vi.fn(async (action: string) => action === "GetAsset" ? { Id: "asset-existing", Status: "Active" } : (() => { throw new Error(action); })());
     const result = await prepareProviderAssets(input(), "owner-1", {
       readUpload: vi.fn() as never, cacheGet: vi.fn(async () => "asset-existing"), cacheSet: vi.fn(async () => undefined),
-      callAsset: callAsset as never, sign: vi.fn() as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 1)
+      callAsset: callAsset as never, resolveMediaUrl: vi.fn(async () => "https://tos.example/asset") as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 1)
     });
     expect(result.assets[0]?.assetId).toBe("asset-existing");
     expect(callAsset).toHaveBeenCalledTimes(1);
@@ -49,7 +49,7 @@ describe("trusted asset registration", () => {
     const callAsset = vi.fn(async (_action: string, body: Record<string, unknown>) => ({ Id: body.Id, Status: "Active" }));
     const result = await prepareProviderAssets(selected, "owner-1", {
       readUpload: vi.fn() as never, cacheGet: vi.fn(async () => null), cacheSet: vi.fn(async () => undefined),
-      callAsset: callAsset as never, sign: vi.fn() as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 1)
+      callAsset: callAsset as never, resolveMediaUrl: vi.fn(async () => "https://tos.example/asset") as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 1)
     });
     expect(result.assets.map((asset) => asset.assetId)).toEqual(["asset-2", "asset-1"]);
     expect(callAsset).toHaveBeenCalledTimes(2);
@@ -61,8 +61,8 @@ describe("trusted asset registration", () => {
     await expect(prepareProviderAssets(selected, "owner-1", {
       readUpload: vi.fn() as never, cacheGet: vi.fn(async () => null), cacheSet: vi.fn(async () => undefined),
       callAsset: vi.fn(async () => ({ Id: "asset-failed", Status: "Failed" })) as never,
-      sign: vi.fn() as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 1)
-    })).rejects.toThrow("可信资产处理失败");
+      resolveMediaUrl: vi.fn(async () => "https://tos.example/asset") as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 1)
+    })).rejects.toThrow("处理失败，无法用于生成");
   });
 
   it("rejects a selected asset that is not owned by the current user", async () => {
@@ -70,7 +70,29 @@ describe("trusted asset registration", () => {
     selected.assets[0] = { ...selected.assets[0]!, uploadId: undefined, assetId: "asset-other-user" };
     await expect(prepareProviderAssets(selected, "owner-1", {
       readUpload: vi.fn() as never, readOwnedAsset: vi.fn(() => false), cacheGet: vi.fn(async () => null), cacheSet: vi.fn(async () => undefined),
-      callAsset: vi.fn() as never, sign: vi.fn() as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 1)
+      callAsset: vi.fn() as never, resolveMediaUrl: vi.fn(async () => "https://tos.example/asset") as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 1)
     })).rejects.toThrow("不属于当前用户");
+  });
+
+  it("exposes structured rejection codes for processing timeout and provider failure", async () => {
+    const selected = input();
+    selected.assets[0] = { ...selected.assets[0]!, uploadId: undefined, assetId: "asset-slow" };
+    let tick = 0;
+    const timeout = await prepareProviderAssets(selected, "owner-1", {
+      readUpload: vi.fn() as never, cacheGet: vi.fn(async () => null), cacheSet: vi.fn(async () => undefined),
+      callAsset: vi.fn(async () => ({ Id: "asset-slow", Status: "Processing" })) as never,
+      resolveMediaUrl: vi.fn(async () => "https://tos.example/asset") as never, sleep: vi.fn(async () => undefined),
+      now: vi.fn(() => (tick += 60_000))
+    }).catch((error: unknown) => error as AssetRegistrationRejected);
+    expect(timeout).toBeInstanceOf(AssetRegistrationRejected);
+    expect((timeout as AssetRegistrationRejected).code).toBe("ASSET_PROCESSING_TIMEOUT");
+    expect((timeout as AssetRegistrationRejected).message).toContain("仍在可信资产处理中");
+
+    const failed = await prepareProviderAssets(selected, "owner-1", {
+      readUpload: vi.fn() as never, cacheGet: vi.fn(async () => null), cacheSet: vi.fn(async () => undefined),
+      callAsset: vi.fn(async () => ({ Id: "asset-slow", Status: "Failed" })) as never,
+      resolveMediaUrl: vi.fn(async () => "https://tos.example/asset") as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 1)
+    }).catch((error: unknown) => error as AssetRegistrationRejected);
+    expect((failed as AssetRegistrationRejected).code).toBe("ASSET_PROVIDER_FAILED");
   });
 });

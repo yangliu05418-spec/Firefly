@@ -24,6 +24,7 @@ import { previewRedirectCacheControl } from "./media-cache.js";
 import { stablePreviewUrl } from "./preview-url-cache.js";
 import { abortMultipartUpload, completeMultipartUpload, createMultipartUpload, headObject, inputObjectKey, inspectMediaObject, signUploadPart, signedObjectUrl, tosConfigured, tosEnabled, tosHealth } from "./tos.js";
 import { createCanvasAssetFromUpload } from "./canvas-assets.js";
+import { resolveUploadMediaUrl } from "./media-url.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -49,7 +50,8 @@ app.use((req, res, next) => {
 
 const respondError = (res: express.Response, error: unknown, status = 400) => {
   const message = error instanceof z.ZodError ? error.issues[0]?.message : error instanceof Error ? error.message : "请求失败";
-  res.status(status).json({ error: message, requestId: res.locals.requestId });
+  const code = (error as { code?: string }).code;
+  res.status(status).json({ error: message, ...(code ? { code } : {}), requestId: res.locals.requestId });
 };
 const param = (value: string | string[]) => Array.isArray(value) ? value[0] : value;
 const execFileAsync = promisify(execFile);
@@ -208,9 +210,10 @@ app.post("/api/uploads/:id/complete", requireAuth, async (req, res) => {
     const finalPath = path.join(config.uploadDir, uploadId, meta.name);
     await fs.rename(path.join(config.uploadDir, uploadId, "payload"), finalPath);
     try { await validateMedia(finalPath, meta.type); } catch (error) { await fs.rm(path.join(config.uploadDir, uploadId), { recursive: true, force: true }); await redis.del(`upload:${uploadId}`); throw error; }
-    const expires = meta.mediaExpiresAt;
-    const token = crypto.createHmac("sha256", config.sessionSecret).update(`${uploadId}:${meta.name}:${expires}`).digest("base64url");
-    const publicUrl = `${config.origin}/media/${uploadId}/${encodeURIComponent(meta.name)}?expires=${expires}&token=${token}`;
+    // 统一引用形态：legacy 后端同样登记 media_objects（kind=input），与 TOS 路径一致，避免双栈引用语义分叉
+    const now = Date.now();
+    users.upsertMedia({ id: `input:${uploadId}`, ownerId: meta.ownerId, uploadId, kind: "input", objectKey: `legacy/${uploadId}/${meta.name}`, status: "ready", fileName: meta.name, contentType: meta.mime || "application/octet-stream", size: meta.size, etag: "", createdAt: now, updatedAt: now });
+    const publicUrl = await resolveUploadMediaUrl({ objectKey: `legacy/${uploadId}/${meta.name}`, uploadId, fileName: meta.name });
     res.json({ id: uploadId, name: meta.name, type: meta.type, size: meta.size, url: publicUrl });
   } catch (error) { respondError(res, error); }
 });
