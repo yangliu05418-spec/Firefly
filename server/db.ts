@@ -518,23 +518,25 @@ export class UserStore {
   }
 
   upsertUserAsset(asset: UserAsset) {
-    this.database.prepare(`
-      INSERT INTO user_assets (id, owner_id, group_id, upload_id, name, asset_type, status, url, created_at, updated_at, deleted_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET owner_id=excluded.owner_id, group_id=excluded.group_id,
-        upload_id=COALESCE(excluded.upload_id, user_assets.upload_id), name=excluded.name,
-        asset_type=excluded.asset_type, status=excluded.status, url=COALESCE(excluded.url, user_assets.url),
-        updated_at=excluded.updated_at, deleted_at=excluded.deleted_at
-    `).run(asset.id, asset.ownerId, asset.groupId, asset.uploadId ?? null, asset.name, asset.assetType, asset.status,
-      asset.url ?? null, asset.createdAt, asset.updatedAt, asset.deletedAt ?? null);
-    return asset;
-  } catch (error) {
-    // 同一 (owner_id, upload_id) 已被登记（唯一索引）：按上传 ID 更新既有资产，保持幂等
-    if ((error as { code?: string }).code === "SQLITE_CONSTRAINT_UNIQUE") {
-      this.database.prepare("UPDATE user_assets SET name = ?, asset_type = ?, status = ?, url = COALESCE(?, url), updated_at = ?, deleted_at = COALESCE(?, deleted_at) WHERE owner_id = ? AND upload_id = ? AND deleted_at IS NULL").run(asset.name, asset.assetType, asset.status, asset.url ?? null, asset.updatedAt, asset.deletedAt ?? null, asset.ownerId, asset.uploadId ?? null);
+    try {
+      this.database.prepare(`
+        INSERT INTO user_assets (id, owner_id, group_id, upload_id, name, asset_type, status, url, created_at, updated_at, deleted_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET owner_id=excluded.owner_id, group_id=excluded.group_id,
+          upload_id=COALESCE(excluded.upload_id, user_assets.upload_id), name=excluded.name,
+          asset_type=excluded.asset_type, status=excluded.status, url=COALESCE(excluded.url, user_assets.url),
+          updated_at=excluded.updated_at, deleted_at=excluded.deleted_at
+      `).run(asset.id, asset.ownerId, asset.groupId, asset.uploadId ?? null, asset.name, asset.assetType, asset.status,
+        asset.url ?? null, asset.createdAt, asset.updatedAt, asset.deletedAt ?? null);
       return asset;
+    } catch (error) {
+      // 同一 (owner_id, upload_id) 已被登记（唯一索引）：按上传 ID 更新既有资产，保持幂等
+      if ((error as { code?: string }).code === "SQLITE_CONSTRAINT_UNIQUE") {
+        this.database.prepare("UPDATE user_assets SET name = ?, asset_type = ?, status = ?, url = COALESCE(?, url), updated_at = ?, deleted_at = COALESCE(?, deleted_at) WHERE owner_id = ? AND upload_id = ? AND deleted_at IS NULL").run(asset.name, asset.assetType, asset.status, asset.url ?? null, asset.updatedAt, asset.deletedAt ?? null, asset.ownerId, asset.uploadId ?? null);
+        return asset;
+      }
+      throw error;
     }
-    throw error;
   }
 
   readUserAsset(id: string) {
