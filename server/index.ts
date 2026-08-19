@@ -222,6 +222,7 @@ app.post("/api/uploads/:id/chunks", requireAuth, express.raw({ type: "applicatio
 
 app.post("/api/uploads/:id/complete", requireAuth, async (req, res) => {
   try {
+    const startedAt = Date.now();
     const uploadId = param(req.params.id);
     const raw = await redis.get(`upload:${uploadId}`);
     if (!raw) throw new Error("上传已过期，请重新选择文件");
@@ -231,14 +232,27 @@ app.post("/api/uploads/:id/complete", requireAuth, async (req, res) => {
       const body = z.object({ parts: z.array(z.object({ partNumber: z.number().int().min(1), eTag: z.string().min(1).max(256) })) }).parse(req.body);
       const parts = [...body.parts].sort((a, b) => a.partNumber - b.partNumber);
       if (parts.length !== meta.partCount || parts.some((part, index) => part.partNumber !== index + 1)) throw new Error("上传分片不完整或顺序错误");
+      const stageLog = (stage: string, extra: Record<string, unknown> = {}) => console.info(JSON.stringify({ type: "upload_complete_stage", at: new Date().toISOString(), uploadId, userId: meta.ownerId, stage, elapsedMs: Date.now() - startedAt, ...extra }));
+      stageLog("start");
       try {
         await completeMultipartUpload(meta.objectKey, meta.tosUploadId, parts);
+        stageLog("merged");
         const head = await headObject(meta.objectKey);
         const size = Number(head.headers["content-length"] ?? 0);
         if (size !== meta.size) throw new Error("TOS 合并后的文件大小不一致");
+        stageLog("headed", { size });
         const validationUrl = signedObjectUrl(meta.objectKey, { expires: 900, fileName: meta.name });
         await inspectMediaObject(meta.objectKey, meta.type);
-        await validateMedia(validationUrl, meta.type);
+        stageLog("inspected");
+        // ffprobe 软校验：TOS image/video info 已权威校验格式与尺寸；此处仅额外探测可解码性，
+        // 失败只告警不阻塞（避免跨洋拉取抖动导致上传必然失败）
+        try {
+          await validateMedia(validationUrl, meta.type);
+          stageLog("probed");
+        } catch (probeError) {
+          console.warn(JSON.stringify({ type: "upload_probe_soft_failed", at: new Date().toISOString(), uploadId, userId: meta.ownerId, message: probeError instanceof Error ? probeError.message.slice(0, 300) : undefined }));
+          stageLog("probe_soft_failed");
+        }
         const now = Date.now();
         users.upsertMedia({ id: `input:${uploadId}`, ownerId: meta.ownerId, uploadId, kind: "input", objectKey: meta.objectKey, status: "ready", fileName: meta.name, contentType: String(head.headers["content-type"] ?? meta.mime ?? "application/octet-stream"), size, etag: String(head.headers.etag ?? ""), createdAt: now, updatedAt: now });
         await redis.del(`upload:${uploadId}`);
