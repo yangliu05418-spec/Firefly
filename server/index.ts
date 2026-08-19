@@ -22,7 +22,7 @@ import { callAssetApi } from "./asset-api.js";
 import { ensureAutoReferenceGroup } from "./asset-registration.js";
 import { previewRedirectCacheControl } from "./media-cache.js";
 import { stablePreviewUrl } from "./preview-url-cache.js";
-import { abortMultipartUpload, completeMultipartUpload, createMultipartUpload, headObject, inputObjectKey, inspectMediaObject, signUploadPart, signedObjectUrl, tosConfigured, tosEnabled, tosHealth } from "./tos.js";
+import { abortMultipartUpload, completeMultipartUpload, createMultipartUpload, deleteObject, headObject, inputObjectKey, inspectMediaObject, signUploadPart, signedObjectUrl, tosConfigured, tosEnabled, tosHealth } from "./tos.js";
 import { createCanvasAssetFromUpload } from "./canvas-assets.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
 import { IMAGE_MODELS, IMAGE_RATIOS, imageModelById, computeImageSize, DEFAULT_IMAGE_MODEL } from "./image-models.js";
@@ -93,6 +93,19 @@ const runFfprobe = async (filePath: string) => {
   const reason = detail?.stderr?.trim().slice(0, 300) || detail?.message || "ffprobe 无法读取素材";
   throw new Error("素材校验失败：" + reason + (detail?.killed ? "（读取超时）" : "") + "（耗时 " + (Date.now() - startedAt) + "ms）");
 };
+
+/**
+ * 确定性规格违规（尺寸/时长/FPS/编码不符合官方要求）。
+ * 该结论来自成功解码后的明确数值，不随网络抖动变化，在 complete 阶段直接拒绝，
+ * 避免不合规素材流入素材服务（BytePlus CreateAsset）后产生难以理解的 502。
+ */
+class MediaValidationError extends Error {
+  readonly code = "MEDIA_VALIDATION_FAILED";
+  constructor(message: string) {
+    super(message);
+    this.name = "MediaValidationError";
+  }
+}
 const allowedExtensions = { image: new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".gif", ".heic", ".heif"]), video: new Set([".mp4", ".mov"]), audio: new Set([".mp3", ".wav"]) };
 const validateMedia = async (filePath: string, type: "image" | "video" | "audio") => {
   await ffprobeGate.acquire();
@@ -107,14 +120,14 @@ const validateMedia = async (filePath: string, type: "image" | "video" | "audio"
   if (!stream) throw new Error("无法识别素材内容，请检查文件是否损坏");
   if (type === "image" || type === "video") {
     const { width, height } = stream; const ratio = width / height;
-    if (width < 300 || width > 6000 || height < 300 || height > 6000 || ratio <= .4 || ratio >= 2.5) throw new Error("图片或视频尺寸不符合官方要求（300–6000px，宽高比 0.4–2.5）");
+    if (width < 300 || width > 6000 || height < 300 || height > 6000 || ratio <= .4 || ratio >= 2.5) throw new MediaValidationError("图片或视频尺寸不符合官方要求（300–6000px，宽高比 0.4–2.5）");
     if (type === "video") {
       const pixels = width * height; const duration = Number(probe.format?.duration ?? 0); const [a, b] = String(stream.r_frame_rate ?? "0/1").split("/").map(Number); const fps = b ? a / b : a;
-      if (pixels < 407696 || pixels > 8295044 || duration < 2 || duration > 30 || fps < 24 || fps > 60) throw new Error("视频需为 2–30 秒、24–60 FPS，且分辨率符合官方范围");
-      if (!["h264", "hevc"].includes(stream.codec_name)) throw new Error("视频编码仅支持 H.264 或 H.265");
+      if (pixels < 407696 || pixels > 8295044 || duration < 2 || duration > 30 || fps < 24 || fps > 60) throw new MediaValidationError("视频需为 2–30 秒、24–60 FPS，且分辨率符合官方范围");
+      if (!["h264", "hevc"].includes(stream.codec_name)) throw new MediaValidationError("视频编码仅支持 H.264 或 H.265");
     }
   }
-  if (type === "audio") { const duration = Number(probe.format?.duration ?? 0); if (duration < 2 || duration > 30) throw new Error("音频时长需为 2–30 秒"); }
+  if (type === "audio") { const duration = Number(probe.format?.duration ?? 0); if (duration < 2 || duration > 30) throw new MediaValidationError("音频时长需为 2–30 秒"); }
 };
 
 app.get("/api/auth/session", async (req, res) => {
@@ -250,6 +263,11 @@ app.post("/api/uploads/:id/complete", requireAuth, async (req, res) => {
           await validateMedia(validationUrl, meta.type);
           stageLog("probed");
         } catch (probeError) {
+          if (probeError instanceof MediaValidationError) {
+            // 确定性规格违规（尺寸/时长/FPS/编码）：源头拒绝，避免流入素材服务（CreateAsset）产生难以理解的 502
+            stageLog("probe_rejected");
+            throw probeError;
+          }
           console.warn(JSON.stringify({ type: "upload_probe_soft_failed", at: new Date().toISOString(), uploadId, userId: meta.ownerId, message: probeError instanceof Error ? probeError.message.slice(0, 300) : undefined }));
           stageLog("probe_soft_failed");
         }
@@ -261,6 +279,7 @@ app.post("/api/uploads/:id/complete", requireAuth, async (req, res) => {
       } catch (error) {
         console.warn(JSON.stringify({ type: "tos_upload_failed", at: new Date().toISOString(), userId: meta.ownerId, uploadId, errorCode: (error as { code?: string }).code ?? "validation_failed", message: error instanceof Error ? error.message.slice(0, 400) : undefined }));
         await abortMultipartUpload(meta.objectKey, meta.tosUploadId).catch(() => undefined);
+        await deleteObject(meta.objectKey).catch(() => undefined);
         await redis.del(`upload:${uploadId}`);
         throw error;
       }
@@ -481,7 +500,14 @@ app.post("/api/assets", requireAuth, async (req, res) => {
     users.upsertUserAsset(asset);
     console.info(JSON.stringify({ type: "user_asset_mutation", action: "create_asset", userId: user.id, assetId: asset.id, at: new Date().toISOString() }));
     res.status(201).json(publicUserAsset(asset));
-  } catch (error) { respondError(res, error, 502); }
+  } catch (error) {
+    // 素材服务对尺寸不合规素材返回英文错误，翻译为清晰中文提示（兜底，正常在 complete 阶段已被拦截）
+    const message = error instanceof Error ? error.message : "";
+    if (/between 300px and 6000px|out of range|height.{0,40}(?:300|6000)|width.{0,40}(?:300|6000)/i.test(message)) {
+      return res.status(400).json({ error: "图片尺寸不符合官方要求（300–6000px，宽高比 0.4–2.5），请上传符合要求的图片", requestId: res.locals.requestId });
+    }
+    respondError(res, error, 502);
+  }
 });
 app.post("/api/assets/bulk-delete", requireAuth, async (req, res) => {
   try {

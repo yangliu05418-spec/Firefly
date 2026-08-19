@@ -364,7 +364,7 @@ function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
           const uploaded = await uploadFile(file, type, () => undefined);
           const result = await api.post<{ Id: string }>("/api/assets", { groupId: groups[0].Id, uploadId: uploaded.uploadId ?? uploaded.id, url: "url" in uploaded ? uploaded.url : undefined, type: `${type[0].toUpperCase()}${type.slice(1)}`, name: file.name });
           setAssets((old) => [{ Id: result.Id, Name: file.name, AssetType: `${type[0].toUpperCase()}${type.slice(1)}` as LibraryAsset["AssetType"], Status: "Processing", GroupId: groups[0].Id }, ...old]);
-        } catch { failures.push(file.name); }
+        } catch (uploadError) { failures.push(`${file.name}（${uploadError instanceof Error ? uploadError.message.split(" · ")[0].slice(0, 60) : "上传失败"}）`); }
         finally { setBatchProgress((progress) => progress ? { ...progress, done: progress.done + 1 } : progress); }
       }
     };
@@ -582,7 +582,7 @@ function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: Library
     if (!images.length || !group) return;
     if (images.length > 50) { setError("单次最多上传 50 张图片"); if (fileInput.current) fileInput.current.value = ""; return; }
     setUploading(true); setProgress({ done: 0, total: images.length }); setError(""); setNotice(""); const created: LibraryAsset[] = []; const failures: string[] = []; let cursor = 0;
-    const next = async () => { while (cursor < images.length) { const file = images[cursor++]; if (!file) continue; try { const uploaded = await uploadFile(file, "image", () => undefined); const asset = await api.post<LibraryAsset>("/api/assets", { groupId: group.Id, uploadId: uploaded.uploadId ?? uploaded.id, type: "Image", name: file.name }); created.push(asset); } catch { failures.push(file.name); } finally { setProgress((current) => current ? { ...current, done: current.done + 1 } : current); } } };
+    const next = async () => { while (cursor < images.length) { const file = images[cursor++]; if (!file) continue; try { const uploaded = await uploadFile(file, "image", () => undefined); const asset = await api.post<LibraryAsset>("/api/assets", { groupId: group.Id, uploadId: uploaded.uploadId ?? uploaded.id, type: "Image", name: file.name }); created.push(asset); } catch (uploadError) { failures.push(`${file.name}（${uploadError instanceof Error ? uploadError.message.split(" · ")[0].slice(0, 60) : "上传失败"}）`); } finally { setProgress((current) => current ? { ...current, done: current.done + 1 } : current); } } };
     try {
       await Promise.all(Array.from({ length: Math.min(3, images.length) }, next));
       if (created.length) { setAssets((current) => [...created.reverse(), ...current]); setNotice(`${created.length} 张图片已进入素材处理队列`); }
