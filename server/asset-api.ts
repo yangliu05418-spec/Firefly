@@ -25,9 +25,24 @@ export async function callAssetApi<T>(action: string, body: Record<string, unkno
   const kService = hmac(kRegion, "ark");
   const signature = crypto.createHmac("sha256", hmac(kService, "request")).update(stringToSign).digest("hex");
   const authorization = `HMAC-SHA256 Credential=${config.accessKey}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
-  const response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", "X-Date": xDate, "X-Content-Sha256": payloadHash, Authorization: authorization }, body: payload, signal: AbortSignal.timeout(30_000) });
-  const text = await response.text();
-  const json = text ? JSON.parse(text) : {};
-  if (!response.ok || json.ResponseMetadata?.Error) throw new Error(json.ResponseMetadata?.Error?.Message ?? json.message ?? `资源库请求失败 (${response.status})`);
-  return json.Result ?? json;
+  // 对网络错误/5xx 自动重试一次（素材服务偶发抖动时避免用户上传直接失败）
+  const attempt = async () => {
+    const response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", "X-Date": xDate, "X-Content-Sha256": payloadHash, Authorization: authorization }, body: payload, signal: AbortSignal.timeout(30_000) });
+    const text = await response.text();
+    const json = text ? JSON.parse(text) : {};
+    if (!response.ok || json.ResponseMetadata?.Error) {
+      const message = json.ResponseMetadata?.Error?.Message ?? json.message ?? `资源库请求失败 (${response.status})`;
+      const error = new Error(message);
+      (error as { retryable?: boolean }).retryable = response.status >= 500 || response.status === 429;
+      throw error;
+    }
+    return json.Result ?? json;
+  };
+  try {
+    return await attempt();
+  } catch (error) {
+    if (!(error as { retryable?: boolean }).retryable) throw error;
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    return attempt();
+  }
 }

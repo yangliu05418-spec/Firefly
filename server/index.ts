@@ -508,6 +508,7 @@ app.post("/api/assets", requireAuth, async (req, res) => {
     if (/between 300px and 6000px|out of range|height.{0,40}(?:300|6000)|width.{0,40}(?:300|6000)/i.test(message)) {
       return res.status(400).json({ error: "图片尺寸不符合官方要求（300–6000px，宽高比 0.4–2.5），请上传符合要求的图片", requestId: res.locals.requestId });
     }
+    console.warn(JSON.stringify({ type: "asset_create_failed", at: new Date().toISOString(), userId: user.id, uploadId: body.uploadId ?? null, message: message.slice(0, 300) }));
     respondError(res, error, 502);
   }
 });
