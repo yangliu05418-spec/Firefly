@@ -528,10 +528,22 @@ export class UserStore {
     `).run(asset.id, asset.ownerId, asset.groupId, asset.uploadId ?? null, asset.name, asset.assetType, asset.status,
       asset.url ?? null, asset.createdAt, asset.updatedAt, asset.deletedAt ?? null);
     return asset;
+  } catch (error) {
+    // 同一 (owner_id, upload_id) 已被登记（唯一索引）：按上传 ID 更新既有资产，保持幂等
+    if ((error as { code?: string }).code === "SQLITE_CONSTRAINT_UNIQUE") {
+      this.database.prepare("UPDATE user_assets SET name = ?, asset_type = ?, status = ?, url = COALESCE(?, url), updated_at = ?, deleted_at = COALESCE(?, deleted_at) WHERE owner_id = ? AND upload_id = ? AND deleted_at IS NULL").run(asset.name, asset.assetType, asset.status, asset.url ?? null, asset.updatedAt, asset.deletedAt ?? null, asset.ownerId, asset.uploadId ?? null);
+      return asset;
+    }
+    throw error;
   }
 
   readUserAsset(id: string) {
     return mapUserAsset(this.database.prepare("SELECT * FROM user_assets WHERE id = ? AND deleted_at IS NULL").get(id) as UserAssetRow | undefined);
+  }
+
+  /** 按上传 ID 查已登记的素材（幂等复用：同一 uploadId 重复请求时直接返回既有资产） */
+  readUserAssetByUpload(ownerId: string, uploadId: string) {
+    return mapUserAsset(this.database.prepare("SELECT * FROM user_assets WHERE owner_id = ? AND upload_id = ? AND deleted_at IS NULL").get(ownerId, uploadId) as UserAssetRow | undefined);
   }
 
   listUserAssets(ownerId: string, query = "", limit = 100, assetType?: UserAsset["assetType"], offset = 0) {

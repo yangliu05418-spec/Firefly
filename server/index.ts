@@ -489,6 +489,8 @@ app.post("/api/assets", requireAuth, async (req, res) => {
     const groupId = await ensureAutoReferenceGroup();
     let url = body.url;
     if (body.uploadId) {
+      const existing = users.readUserAssetByUpload(user.id, body.uploadId);
+      if (existing) return res.status(201).json(publicUserAsset(existing));
       const media = users.readUpload(body.uploadId);
       if (!media || media.ownerId !== user.id) return res.status(404).json({ error: "引用素材不存在或已过期" });
       url = signedObjectUrl(media.objectKey, { expires: 24 * 3600, fileName: media.fileName });
