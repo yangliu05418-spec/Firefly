@@ -16,6 +16,8 @@
     "typecheck:frontend": "tsc --noEmit -p tsconfig.frontend.json",
     "typecheck:server": "tsc --noEmit -p tsconfig.server.json",
     "typecheck": "npm run typecheck:frontend && npm run typecheck:server",
+    "db:migrate": "node dist-server/migrate.js",
+    "health:audit": "node dist-server/health-audit.js",
     "user:disable": "node dist-server/user-admin.js disable"
   },
   "dependencies": {

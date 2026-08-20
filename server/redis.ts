@@ -1,7 +1,8 @@
 import { Redis } from "ioredis";
 import { Queue } from "bullmq";
 import { config } from "./config.js";
-import { users, type StoredTask } from "./db.js";
+import type { StoredTask } from "./db.js";
+import { users } from "./store.js";
 
 export const redis = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 export const generationQueue = new Queue("generation", { connection: redis });

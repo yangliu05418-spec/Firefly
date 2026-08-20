@@ -1,0 +1,9 @@
+[Unit]
+Description=Audit Firefly production health
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/firefly-health-audit
+TimeoutStartSec=2min

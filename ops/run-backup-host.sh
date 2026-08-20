@@ -6,13 +6,17 @@ alerts_env=${FIREFLY_ALERTS_ENV:-/etc/firefly/alerts.env}
 app_env=${FIREFLY_APP_ENV:-/opt/firefly/.env}
 feishu_env=${FIREFLY_FEISHU_ENV:-/opt/firefly/.env.feishu}
 
-[ -r "$release_env" ] || { echo "release environment is not readable" >&2; exit 1; }
 [ -r "$app_env" ] || { echo "application environment is not readable" >&2; exit 1; }
 [ -r "$feishu_env" ] || { echo "Feishu environment is not readable" >&2; exit 1; }
 [ -r "$alerts_env" ] || { echo "alerts environment is not readable" >&2; exit 1; }
 
-# shellcheck disable=SC1090
-. "$release_env"
+if [ -n "${1:-}" ]; then
+  FIREFLY_IMAGE=$1
+else
+  [ -r "$release_env" ] || { echo "release environment is not readable" >&2; exit 1; }
+  # shellcheck disable=SC1090
+  . "$release_env"
+fi
 printf '%s\n' "${FIREFLY_IMAGE:-}" | grep -Eq '^ghcr\.io/yangliu05418-spec/firefly@sha256:[0-9a-f]{64}$' || {
   echo "FIREFLY_IMAGE must be an approved immutable GHCR digest" >&2
   exit 1

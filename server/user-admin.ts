@@ -1,5 +1,5 @@
 import { revokeUserSessions } from "./auth.js";
-import { users } from "./db.js";
+import { users } from "./store.js";
 import { Redis } from "ioredis";
 import { config } from "./config.js";
 

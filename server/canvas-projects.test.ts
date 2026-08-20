@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { config } from "./config.js";
 import { UserStore, type CanvasProject } from "./db.js";
+import { migrateDatabase } from "./migrations.js";
 import { countCanvasNodes, DEFAULT_CANVAS_DOCUMENT, parseCanvasDocument, parseCanvasDocumentSafe } from "./canvas-document.js";
 import { publicCanvasProject, publicCanvasProjectDetail } from "./canvas-public.js";
 
@@ -32,7 +33,9 @@ describe("canvas project persistence", () => {
 
   const freshStore = () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-canvas-")); directories.push(directory);
-    return new UserStore(path.join(directory, "canvas.db"));
+    const databasePath = path.join(directory, "canvas.db");
+    migrateDatabase(databasePath);
+    return new UserStore(databasePath);
   };
 
   it("creates, reads, and lists projects ordered by most recent update", () => {

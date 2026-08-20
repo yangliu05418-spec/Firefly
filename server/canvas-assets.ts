@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { config } from "./config.js";
-import { users, type CanvasAsset } from "./db.js";
+import type { CanvasAsset } from "./db.js";
+import { users } from "./store.js";
 import { headObject, tos, tosConfigured } from "./tos.js";
 
 /**

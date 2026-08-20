@@ -2,7 +2,8 @@ import crypto from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
 import type { Redis } from "ioredis";
 import { config } from "./config.js";
-import { users, type User } from "./db.js";
+import type { User } from "./db.js";
+import { users } from "./store.js";
 
 const COOKIE = "firefly_session";
 const sessionKey = (hash: string) => `auth:session:${hash}`;
