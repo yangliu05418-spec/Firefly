@@ -21,6 +21,16 @@ export const tos = new TosClient({
   maxRetryCount: 2
 });
 
+const tosHealthClient = new TosClient({
+  accessKeyId: config.tosAccessKeyId || "not-configured",
+  accessKeySecret: config.tosSecretAccessKey || "not-configured",
+  region: config.tosRegion,
+  endpoint: config.tosEndpoint,
+  requestTimeout: Math.min(config.tosRequestTimeoutMs, 5_000),
+  connectionTimeout: Math.min(config.tosRequestTimeoutMs, 5_000),
+  maxRetryCount: 0
+});
+
 const safeSegment = (value: string) => value.normalize("NFKC").replace(/[^\p{L}\p{N}._-]+/gu, "-").replace(/^-+|-+$/g, "").slice(-120) || "media";
 export const shard = (id: string) => crypto.createHash("sha256").update(id).digest("hex").slice(0, 2);
 
@@ -323,6 +333,6 @@ export const deleteObject = async (key: string) => {
 
 export const tosHealth = async () => {
   if (!tosConfigured()) return { configured: false, reachable: false };
-  try { await tos.headBucket(config.tosBucket); return { configured: true, reachable: true }; }
+  try { await tosHealthClient.headBucket(config.tosBucket); return { configured: true, reachable: true }; }
   catch { return { configured: true, reachable: false }; }
 };

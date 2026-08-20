@@ -24,6 +24,7 @@ import { ensureAutoReferenceGroup } from "./asset-registration.js";
 import { previewRedirectCacheControl } from "./media-cache.js";
 import { stablePreviewUrl } from "./preview-url-cache.js";
 import { abortMultipartUpload, canvasExportObjectKey, completeMultipartUpload, createMultipartUpload, deleteObject, headObject, inputObjectKey, inspectMediaObject, signUploadPart, signedObjectUrl, tosConfigured, tosEnabled, tosHealth, verifyStoredObject } from "./tos.js";
+import { DependencyHealthGate } from "./dependency-health.js";
 import { canonicalUploadContentType, tosMediaInfoViolation, uploadKindFromContentType } from "./upload-policy.js";
 import { acquireUploadCompletionLock, claimUploadSlot, releaseUploadCompletionLock, releaseUploadSlot, renewUploadSlot, UPLOAD_SESSION_TTL_SECONDS } from "./upload-slots.js";
 import { createCanvasAssetFromUpload, prepareCanvasAssetFromUpload } from "./canvas-assets.js";
@@ -1350,36 +1351,50 @@ app.get("/api/canvas-media/:assetId", requireAuth, createCanvasMediaHandler({
   cacheControl: previewRedirectCacheHeader
 }));
 
-let latestTosHealth: { configured: boolean; reachable: boolean; checkedAt?: string } = { configured: tosConfigured(), reachable: false };
-const probeTos = async () => { latestTosHealth = { ...await tosHealth(), checkedAt: new Date().toISOString() }; };
+const tosHealthGate = new DependencyHealthGate({ configured: tosConfigured(), failureThreshold: 3, successGraceMs: 5 * 60_000 });
+let tosProbeInFlight: Promise<void> | undefined;
+const probeTos = () => {
+  if (tosProbeInFlight) return tosProbeInFlight;
+  const run = tosHealth()
+    .then((result) => tosHealthGate.record(result))
+    .catch(() => tosHealthGate.record({ configured: tosConfigured(), reachable: false }))
+    .finally(() => { if (tosProbeInFlight === run) tosProbeInFlight = undefined; });
+  tosProbeInFlight = run;
+  return run;
+};
 
 const runtimeIdentity = { revision: config.revision, imageDigest: config.imageDigest };
 
 app.get("/api/health/live", (_req, res) => res.json({ status: "ok", ...runtimeIdentity }));
 
 app.get("/api/health/ready", async (_req, res) => {
+  let dependency: "redis" | "database" | "queues" | "tos" = "redis";
   try {
     await redis.ping();
+    dependency = "database";
     if (!users.healthCheck()) throw new Error("database unavailable");
+    dependency = "queues";
     await Promise.all([generationQueue.getJobCounts("wait", "active"), mediaQueue.getJobCounts("wait", "active"), assetQueue.getJobCounts("wait", "active"), canvasQueue.getJobCounts("wait", "active")]);
     if (tosEnabled()) {
-      const checkedAt = latestTosHealth.checkedAt ? Date.parse(latestTosHealth.checkedAt) : 0;
-      if (!checkedAt || checkedAt < Date.now() - 30_000) await probeTos();
-      if (!latestTosHealth.configured || !latestTosHealth.reachable) throw new Error("TOS unavailable");
+      dependency = "tos";
+      const health = tosHealthGate.snapshot();
+      if (!health.configured || !health.effectiveReachable) throw new Error("TOS unavailable");
     }
     res.json({ status: "ready", redis: "ok", database: "ok", queues: "ok", tos: tosEnabled() ? "ok" : "disabled", previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, schemaVersion: users.schemaVersion(), ...runtimeIdentity });
   } catch (error) {
-    console.warn(JSON.stringify({ type: "readiness_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }));
-    res.status(503).json({ status: "not_ready", ...runtimeIdentity });
+    const tosHealthSnapshot = tosHealthGate.snapshot();
+    console.warn(JSON.stringify({ type: "readiness_failed", at: new Date().toISOString(), dependency, code: (error as { code?: string }).code ?? "unknown", tosConsecutiveFailures: tosHealthSnapshot.consecutiveFailures, tosLastProbeReachable: tosHealthSnapshot.lastProbeReachable }));
+    res.status(503).json({ status: "not_ready", dependency, tosConsecutiveFailures: tosHealthSnapshot.consecutiveFailures, ...runtimeIdentity });
   }
 });
 
 app.get("/api/health", async (_req, res) => {
+  const tosHealthSnapshot = tosHealthGate.snapshot();
   try {
     await redis.ping();
     if (!users.healthCheck()) throw new Error("database unavailable");
-    res.json({ status: "ok", redis: "ok", database: "ok", schemaVersion: users.schemaVersion(), tosConfigured: latestTosHealth.configured, tosReachable: latestTosHealth.reachable, tosCheckedAt: latestTosHealth.checkedAt, previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, ...runtimeIdentity });
-  } catch { res.status(503).json({ status: "degraded", redis: "unavailable", database: "unavailable", tosConfigured: latestTosHealth.configured, tosReachable: latestTosHealth.reachable, previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, ...runtimeIdentity }); }
+    res.json({ status: "ok", redis: "ok", database: "ok", schemaVersion: users.schemaVersion(), tosConfigured: tosHealthSnapshot.configured, tosReachable: tosHealthSnapshot.effectiveReachable, tosLastProbeReachable: tosHealthSnapshot.lastProbeReachable, tosCheckedAt: tosHealthSnapshot.checkedAt, tosLastSuccessfulAt: tosHealthSnapshot.lastSuccessfulAt, tosConsecutiveFailures: tosHealthSnapshot.consecutiveFailures, previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, ...runtimeIdentity });
+  } catch { res.status(503).json({ status: "degraded", redis: "unavailable", database: "unavailable", tosConfigured: tosHealthSnapshot.configured, tosReachable: tosHealthSnapshot.effectiveReachable, tosLastProbeReachable: tosHealthSnapshot.lastProbeReachable, tosCheckedAt: tosHealthSnapshot.checkedAt, tosLastSuccessfulAt: tosHealthSnapshot.lastSuccessfulAt, tosConsecutiveFailures: tosHealthSnapshot.consecutiveFailures, previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, ...runtimeIdentity }); }
 });
 
 app.use((error: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
