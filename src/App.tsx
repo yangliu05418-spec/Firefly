@@ -219,6 +219,25 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
   const [generateAudio, setGenerateAudio] = useState(true); const [cameraFixed, setCameraFixed] = useState(false); const [watermark, setWatermark] = useState(false); const [seed, setSeed] = useState(-1);
   const [loading, setLoading] = useState(false); const [error, setError] = useState(""); const fileInput = useRef<HTMLInputElement>(null);
   const uploadControllers = useRef(new Map<string, AbortController>());
+  const localPreviewUrls = useRef(new Set<string>());
+
+  const releaseLocalPreview = (url?: string) => {
+    if (url && localPreviewUrls.current.delete(url)) URL.revokeObjectURL(url);
+  };
+  const cancelAssetTransfer = (asset: UploadAsset) => {
+    uploadControllers.current.get(asset.id)?.abort();
+    uploadControllers.current.delete(asset.id);
+    releaseLocalPreview(asset.preview);
+  };
+  const clearAttachedAssets = () => {
+    assets.forEach(cancelAssetTransfer);
+    setAssets([]);
+  };
+  const removeAttachedAsset = (id: string) => {
+    const asset = assets.find((item) => item.id === id);
+    if (asset) cancelAssetTransfer(asset);
+    setAssets((current) => current.filter((item) => item.id !== id));
+  };
 
   const isSeedance25 = model?.id === "dreamina-seedance-2-5-260628";
   const ratioLocked = isSeedance25 && (["first_frame", "first_last", "edit", "extend"] as CreationMode[]).includes(mode);
@@ -240,8 +259,7 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
   }, []);
   useEffect(() => {
     if (!model) return;
-    for (const controller of uploadControllers.current.values()) controller.abort();
-    uploadControllers.current.clear();
+    assets.forEach(cancelAssetTransfer);
     if (!model.modes.includes(mode)) { setMode(model.modes[0]); return; }
     if (!model.resolutions.includes(resolution)) setResolution(model.resolutions.includes("720p") ? "720p" : model.resolutions[0]);
     if (ratioLocked) setRatio("adaptive"); else if (ratio === "adaptive" || !model.ratios.includes(ratio)) setRatio("16:9");
@@ -250,8 +268,20 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
     setAssets([]);
     setError("");
   }, [modelId, mode]);
-  useEffect(() => { if (engine === "image") setAssets((current) => current.filter((asset) => asset.type === "image")); setError(""); }, [engine]);
-  useEffect(() => () => { for (const controller of uploadControllers.current.values()) controller.abort(); uploadControllers.current.clear(); }, []);
+  useEffect(() => {
+    if (engine === "image") {
+      const removed = assets.filter((asset) => asset.type !== "image");
+      removed.forEach(cancelAssetTransfer);
+      if (removed.length) setAssets((current) => current.filter((asset) => asset.type === "image"));
+    }
+    setError("");
+  }, [engine]);
+  useEffect(() => () => {
+    for (const controller of uploadControllers.current.values()) controller.abort();
+    uploadControllers.current.clear();
+    for (const url of localPreviewUrls.current) URL.revokeObjectURL(url);
+    localPreviewUrls.current.clear();
+  }, []);
   useEffect(() => { const close = () => setOpen(null); window.addEventListener("click", close); return () => window.removeEventListener("click", close); }, []);
   if (!model) return null;
 
@@ -270,7 +300,9 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
       if (!allowed || plannedAssets.filter((a) => a.type === type).length >= allowed) { setError(`当前模型最多支持 ${allowed} 个${type === "image" ? "图片" : type === "video" ? "视频" : "音频"}参考`); continue; }
       const tempId = crypto.randomUUID();
       const role: UploadAsset["role"] = mode === "first_frame" ? "first_frame" : mode === "first_last" ? (plannedAssets.some((a) => a.role === "first_frame") ? "last_frame" : "first_frame") : type === "image" ? "reference_image" : type === "video" ? "reference_video" : "reference_audio";
-      const pending = { id: tempId, name: file.name, size: file.size, type, role, progress: 0, preview: type === "image" ? URL.createObjectURL(file) : undefined } satisfies UploadAsset;
+      const preview = type === "image" ? URL.createObjectURL(file) : undefined;
+      if (preview) localPreviewUrls.current.add(preview);
+      const pending = { id: tempId, name: file.name, size: file.size, type, role, progress: 0, preview } satisfies UploadAsset;
       plannedAssets.push(pending);
       const controller = new AbortController();
       uploadControllers.current.set(tempId, controller);
@@ -289,6 +321,7 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
         const uploaded = await uploadFile(file, pending.type, (progress) => setAssets((old) => old.map((a) => a.id === tempId ? { ...a, progress } : a)), { signal: controller.signal });
         setAssets((old) => old.map((a) => a.id === tempId ? { ...a, ...uploaded, uploadId: uploaded.uploadId ?? uploaded.id, role, progress: 100 } : a));
         } catch (e) {
+          releaseLocalPreview(pending.preview);
           setAssets((old) => old.filter((a) => a.id !== tempId));
           if (!(e instanceof DOMException && e.name === "AbortError")) failures.push(`${file.name}：${e instanceof Error ? e.message : "上传失败"}`);
         } finally { uploadControllers.current.delete(tempId); }
@@ -324,11 +357,11 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
         const references = assets.filter((asset) => asset.type === "image" && asset.uploadId).map((asset) => asset.uploadId!);
         const result = await api.post<ImageGenResponse>("/api/image-generation", { model: imageModelId, ratio: imageRatio, resolution: imageResolution, count: imageCount, prompt: prompt.trim(), references });
         onImagesGenerated?.({ id: crypto.randomUUID(), modelName: spec?.name ?? imageModelId, ratio: imageRatio, resolution: imageResolution, prompt: prompt.trim(), items: result.Items ?? [], createdAt: Date.now(), failed: result.Failed });
-        setPrompt(""); setAssets([]);
+        setPrompt(""); clearAttachedAssets();
         return;
       }
       const task = await api.post<Task>("/api/generations", { prompt: materializePromptReferences(prompt, assets), model: model.id, mode, ratio, resolution, duration, generateAudio: model.supportsAudio && generateAudio, seed, cameraFixed, watermark, outputFormat: "mp4", assets: assets.map(({ preview, progress, size, ...asset }) => asset) });
-      onCreated(task); setPrompt(""); setAssets([]);
+      onCreated(task); setPrompt(""); clearAttachedAssets();
     } catch (e) { setError(e instanceof Error ? e.message : "无法创建任务"); } finally { setLoading(false); }
   };
 
@@ -343,7 +376,7 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
   return <div className={`composer ${compact ? "composer--compact" : ""}`} onClick={(e) => e.stopPropagation()}>
     {!compact && <h1>今晚，想创造什么？</h1>}
     <div className="composer-shell">
-      {!!assets.length && <div className="asset-strip">{assets.map((asset, index) => <div className="asset-chip" key={asset.id}>{asset.preview ? <img src={asset.preview} /> : asset.type === "video" ? <Video /> : <AudioLines />}<span><b>{asset.role === "first_frame" ? "首帧" : asset.role === "last_frame" ? "尾帧" : `${asset.type === "image" ? "图片" : asset.type === "video" ? "视频" : "音频"} ${index + 1}`}</b><small>{asset.progress === 100 ? `${asset.name}${asset.normalized ? " · 已自动补白" : ""}` : `上传 ${asset.progress ?? 0}%`}</small></span>{asset.progress !== 100 && <i style={{ width: `${asset.progress ?? 0}%` }} />}<button onClick={() => setAssets((old) => old.filter((a) => a.id !== asset.id))}><X /></button></div>)}</div>}
+      {!!assets.length && <div className="asset-strip">{assets.map((asset, index) => <div className="asset-chip" key={asset.id}>{asset.preview ? <img src={asset.preview} /> : asset.type === "video" ? <Video /> : <AudioLines />}<span><b>{asset.role === "first_frame" ? "首帧" : asset.role === "last_frame" ? "尾帧" : `${asset.type === "image" ? "图片" : asset.type === "video" ? "视频" : "音频"} ${index + 1}`}</b><small>{asset.progress === 100 ? `${asset.name}${asset.normalized ? " · 已自动补白" : ""}` : `上传 ${asset.progress ?? 0}%`}</small></span>{asset.progress !== 100 && <i style={{ width: `${asset.progress ?? 0}%` }} />}<button onClick={() => removeAttachedAsset(asset.id)}><X /></button></div>)}</div>}
       <div className={`prompt-row ${referenceSlots.length > 1 ? "prompt-row--dual" : ""} ${!referenceSlots.length ? "prompt-row--text" : ""}`}>
         {!!referenceSlots.length && <div className="reference-slots">{referenceSlots.map((label, index) => <button className="add-reference" key={label} onClick={() => fileInput.current?.click()} disabled={(mode === "first_frame" && assets.length >= 1) || (mode === "first_last" && assets.length > index)}><Plus /><span>{label}</span></button>)}</div>}
         <PromptEditor value={prompt} change={setPrompt} placeholder={engine === "image" ? "描述你想生成的画面；上传参考图即可进行图生图……" : modePlaceholders[mode]} assets={assets} disabled={mode === "text" && engine === "video"} attach={attachMentionAsset} />
