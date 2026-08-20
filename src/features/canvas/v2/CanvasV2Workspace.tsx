@@ -18,6 +18,7 @@ import { deleteCanvasDraft, readCanvasDraft, writeCanvasDraft } from "./canvas-d
 import { CanvasV2Node, type CanvasFlowData, type CanvasFlowNode } from "./CanvasV2Node";
 import { CanvasMontage } from "./CanvasMontage";
 import { canvasAssetDownloadName } from "./canvas-download";
+import { canvasVideoModeForReferences, canvasVideoModelsForReferences, type CanvasVideoReferenceKind } from "./canvas-video-capability";
 
 type SaveState = "saved" | "draft" | "saving" | "offline" | "conflict" | "error";
 type CreateMenu = { sourceId?: string; side?: "left" | "right"; screen: { x: number; y: number }; position?: { x: number; y: number } };
@@ -45,6 +46,24 @@ const clientId = () => {
 
 const edgeStyle = { stroke: "rgba(186, 204, 201, .48)", strokeWidth: 1.35 };
 const toEdge = (edge: CanvasDocumentV2["connections"][number]): Edge => ({ ...edge, type: "bezier", markerEnd: { type: MarkerType.ArrowClosed, width: 12, height: 12, color: "rgba(186, 204, 201, .5)" }, style: edgeStyle });
+const canvasReferenceKinds = (targetId: string, nodes: readonly CanvasFlowNode[], edges: readonly Edge[]) => {
+  const target = nodes.find((node) => node.id === targetId);
+  const kindFor = (node?: CanvasFlowNode): CanvasVideoReferenceKind | undefined => {
+    if (!node?.data.domain.data.projectAssetId) return undefined;
+    return node.data.domain.type === "video" ? "video" : node.data.domain.type === "legacy-audio" ? "audio" : "image";
+  };
+  const ownKind = kindFor(target);
+  if (ownKind) return [ownKind];
+  const byAsset = new Map<string, CanvasVideoReferenceKind>();
+  for (const edge of edges) {
+    if (edge.target !== targetId) continue;
+    const source = nodes.find((node) => node.id === edge.source);
+    const assetId = source?.data.domain.data.projectAssetId;
+    const kind = kindFor(source);
+    if (assetId && kind) byAsset.set(assetId, kind);
+  }
+  return [...byAsset.values()];
+};
 
 function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; navigate: (path: string) => void; user: SessionUser; logout: () => void }) {
   const flow = useReactFlow<CanvasFlowNode, Edge>();
@@ -117,9 +136,9 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     if (!node || readOnly) return;
     const kind = node.data.domain.type === "text" ? "text" : node.data.domain.type === "video" ? "video" : node.data.domain.type === "character" ? "character_tool" : "image";
     const imageModel = imageModels[0];
-    const videoModel = videoModels[0];
+    const videoModel = canvasVideoModelsForReferences(videoModels, canvasReferenceKinds(id, flow.getNodes(), flow.getEdges()))[0];
     if ((kind === "image" || kind === "character_tool") && !imageModel) return setMessage("图片模型能力尚未载入，请稍后重试");
-    if (kind === "video" && !videoModel) return setMessage("视频模型能力尚未载入，请稍后重试");
+    if (kind === "video" && !videoModel) return setMessage("没有模型支持当前已连接素材的类型或数量");
     const model = kind === "image" || kind === "character_tool" ? imageModel?.id ?? "" : videoModel?.id ?? "";
     const ratio = kind === "video" ? (videoModel?.ratios.includes("adaptive") ? "adaptive" : videoModel?.ratios[0] ?? "16:9") : (imageRatios.includes("16:9") ? "16:9" : imageRatios[0] ?? "1:1");
     const resolution = kind === "video" ? (videoModel?.resolutions.includes("1080p") ? "1080p" : videoModel?.resolutions[0] ?? "720p") : imageModel?.defaultResolution ?? "1024";
@@ -373,7 +392,10 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   const selectedAssets = useMemo(() => nodes.filter((node) => node.selected && node.data.domain.data.projectAssetId).map((node) => assets.find((asset) => asset.id === node.data.domain.data.projectAssetId)).filter((asset): asset is CanvasProjectAsset => Boolean(asset)), [assets, nodes]);
   const selectedNodeCount = useMemo(() => nodes.filter((node) => node.selected).length, [nodes]);
   const selectedGroupCount = useMemo(() => nodes.filter((node) => node.selected && node.data.domain.type === "group").length, [nodes]);
-  const activeVideoModel = composer?.kind === "video" ? videoModels.find((model) => model.id === composer.model) : undefined;
+  const composerNode = composer?.kind === "video" ? nodes.find((node) => node.id === composer.nodeId) : undefined;
+  const composerReferenceKinds = composerNode ? canvasReferenceKinds(composerNode.id, nodes, edges) : [];
+  const compatibleVideoModels = canvasVideoModelsForReferences(videoModels, composerReferenceKinds);
+  const activeVideoModel = composer?.kind === "video" ? compatibleVideoModels.find((model) => model.id === composer.model) : undefined;
   const activeImageModel = composer && (composer.kind === "image" || composer.kind === "character_tool") ? imageModels.find((model) => model.id === composer.model) : undefined;
 
   useEffect(() => {
@@ -504,6 +526,10 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     const sourceNode = flow.getNode(composer.nodeId);
     const domain = sourceNode?.data.domain;
     const hasExistingContent = Boolean(domain && (domain.type === "text" ? domain.data.markdown?.trim() : domain.data.projectAssetId));
+    const videoReferences = canvasReferenceKinds(composer.nodeId, flow.getNodes(), flow.getEdges());
+    const videoMode = canvasVideoModeForReferences(videoReferences);
+    const videoModel = composer.kind === "video" ? videoModels.find((model) => model.id === composer.model) : undefined;
+    if (composer.kind === "video" && (!videoModel || !canvasVideoModelsForReferences([videoModel], videoReferences).length)) { setMessage("当前模型不支持已连接素材的类型或数量，请重新选择模型"); return; }
     if (sourceNode && domain && hasExistingContent && composer.kind !== "text") {
       const next = createCanvasNodeV2(domain.type === "legacy-audio" || domain.type === "group" ? "video" : domain.type, { x: sourceNode.position.x + (sourceNode.measured?.width ?? domain.width) + 140, y: sourceNode.position.y });
       targetId = next.id;
@@ -520,8 +546,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     else if (composer.kind === "image") body = { kind: "image", nodeId: targetId, revision: currentRevision, payload: { prompt: composer.prompt, model: composer.model, ratio: composer.ratio, resolution: composer.resolution, referenceAssetIds: [] } };
     else if (composer.kind === "character_tool") body = { kind: "character_tool", nodeId: targetId, revision: currentRevision, payload: { tool: composer.tool, prompt: `${composer.prompt}\n人像质感：${composer.portraitStyle}；控制强度：${composer.strength}。`, model: composer.model, ratio: composer.ratio, resolution: composer.resolution, referenceAssetIds: [] } };
     else {
-      const incoming = flow.getEdges().filter((edge) => edge.target === targetId).map((edge) => flow.getNode(edge.source)?.data.domain.data.projectAssetId).filter(Boolean);
-      body = { kind: "video", nodeId: targetId, revision: currentRevision, payload: { generation: { prompt: composer.prompt, model: composer.model, mode: incoming.length ? "omni" : "text", ratio: composer.ratio, resolution: composer.resolution, duration: composer.duration, generateAudio: true, seed: -1, cameraFixed: false, watermark: false, outputFormat: "mp4" }, references: [] } };
+      body = { kind: "video", nodeId: targetId, revision: currentRevision, payload: { generation: { prompt: composer.prompt, model: composer.model, mode: videoMode, ratio: composer.ratio, resolution: composer.resolution, duration: composer.duration, generateAudio: videoModel?.supportsAudio ?? false, seed: -1, cameraFixed: false, watermark: false, outputFormat: "mp4" }, references: [] } };
     }
     try { const job = await createCanvasJob(canvasId, body); applyJob(job); setComposer(null); }
     catch (error) { setMessage(error instanceof Error ? error.message : "任务提交失败"); }
@@ -737,12 +762,12 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
               const spec = imageModels.find((item) => item.id === model);
               setComposer({ ...composer, model, resolution: spec?.resolutions.includes(composer.resolution) ? composer.resolution : spec?.defaultResolution ?? composer.resolution });
             }
-          }}>{(composer.kind === "video" ? videoModels : imageModels).map((model) => <option value={model.id} key={model.id}>{model.name}</option>)}</select></label>
+          }}>{(composer.kind === "video" ? compatibleVideoModels : imageModels).map((model) => <option value={model.id} key={model.id}>{model.name}</option>)}</select></label>
           <label>画幅<select value={composer.ratio} onChange={(event) => setComposer({ ...composer, ratio: event.target.value })}>{(composer.kind === "video" ? activeVideoModel?.ratios ?? [] : imageRatios).map((ratio) => <option key={ratio}>{ratio}</option>)}</select></label>
           <label>清晰度<select value={composer.resolution} onChange={(event) => setComposer({ ...composer, resolution: event.target.value })}>{(composer.kind === "video" ? activeVideoModel?.resolutions ?? [] : activeImageModel?.resolutions ?? []).map((resolution) => <option key={resolution}>{resolution}</option>)}</select></label>
           {composer.kind === "video" && <label>时长<select value={composer.duration} onChange={(event) => setComposer({ ...composer, duration: Number(event.target.value) })}>{Array.from({ length: (activeVideoModel?.duration[1] ?? 6) - (activeVideoModel?.duration[0] ?? 4) + 1 }, (_, index) => (activeVideoModel?.duration[0] ?? 4) + index).map((duration) => <option value={duration} key={duration}>{duration} 秒</option>)}</select></label>}
         </div>}
-        <footer>{flow.getEdges().filter((edge) => edge.target === composer.nodeId).length > 0 && <span>{flow.getEdges().filter((edge) => edge.target === composer.nodeId).length} 个引用上下文</span>}<button onClick={() => setComposer(null)}>取消</button><button className="primary" disabled={!composer.prompt.trim()} onClick={() => void submitComposer()}><WandSparkles /> 开始生成</button></footer>
+        <footer>{composer.kind === "video" && !compatibleVideoModels.length ? <span>当前素材组合超出模型能力</span> : flow.getEdges().filter((edge) => edge.target === composer.nodeId).length > 0 && <span>{flow.getEdges().filter((edge) => edge.target === composer.nodeId).length} 个引用上下文</span>}<button onClick={() => setComposer(null)}>取消</button><button className="primary" disabled={!composer.prompt.trim() || (composer.kind === "video" && !compatibleVideoModels.length)} onClick={() => void submitComposer()}><WandSparkles /> 开始生成</button></footer>
       </div>
     </div>}
     {inspectAsset && <div className="canvas-v2-modal" role="dialog" aria-modal="true" onClick={() => setInspectAsset(null)}><div className="canvas-v2-inspect" onClick={(event) => event.stopPropagation()}>{inspectAsset.kind === "video" ? <video src={inspectAsset.mediaUrl} controls autoPlay /> : <img src={inspectAsset.mediaUrl} alt={inspectAsset.title} />}<footer><b>{inspectAsset.title}</b><a href={inspectAsset.downloadUrl}><Download /> 下载</a><button onClick={() => setInspectAsset(null)}><X /></button></footer></div></div>}
