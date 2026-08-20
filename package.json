@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently \"vite\" \"tsx watch server/index.ts\" \"tsx watch server/worker.ts\" \"tsx watch server/image-worker.ts\"",
+    "dev:frontend": "vite --host 127.0.0.1",
     "build": "vite build && tsc -p tsconfig.server.json",
     "start": "node dist-server/index.js",
     "worker": "node dist-server/worker.js",
@@ -14,6 +15,7 @@
     "tos:audit": "node dist-server/tos-audit.js",
     "history:clear": "node dist-server/clear-history.js",
     "test": "vitest run",
+    "test:e2e": "playwright test",
     "typecheck:frontend": "tsc --noEmit -p tsconfig.frontend.json",
     "typecheck:server": "tsc --noEmit -p tsconfig.server.json",
     "typecheck": "npm run typecheck:frontend && npm run typecheck:server",
@@ -45,6 +47,7 @@
     "@types/node": "^22.15.30",
     "@types/react": "^19.1.10",
     "@types/react-dom": "^19.1.7",
+    "@playwright/test": "1.62.1",
     "concurrently": "^9.2.0",
     "jsdom": "^30.0.1",
     "tsx": "^4.20.3",
