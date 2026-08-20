@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { OpenRouterError, OpenRouterKeyPool, parseOpenRouterImages } from "./openrouter.js";
+import { detectImageContentType, isBlockedImageAddress, OpenRouterError, OpenRouterKeyPool, parseOpenRouterImages } from "./openrouter.js";
 import { computeImageSize, IMAGE_MODELS, imageModelById } from "./image-models.js";
 
 describe("OpenRouterKeyPool", () => {
@@ -124,5 +124,22 @@ describe("image model registry", () => {
     expect(IMAGE_MODELS.some((m) => m.id === "google/gemini-3-pro-image")).toBe(true);
     expect(lite.resolutions[0]).toBe("512");
     expect(lite.maxCount).toBe(4);
+  });
+});
+
+describe("generated image download safety", () => {
+  it("blocks loopback, private, link-local and metadata-network addresses", () => {
+    expect(isBlockedImageAddress("127.0.0.1", 4)).toBe(true);
+    expect(isBlockedImageAddress("10.1.2.3", 4)).toBe(true);
+    expect(isBlockedImageAddress("169.254.169.254", 4)).toBe(true);
+    expect(isBlockedImageAddress("::1", 6)).toBe(true);
+    expect(isBlockedImageAddress("8.8.8.8", 4)).toBe(false);
+  });
+
+  it("uses image signatures instead of trusting a URL or response header", () => {
+    expect(detectImageContentType(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))).toBe("image/png");
+    expect(detectImageContentType(Buffer.from([0xff, 0xd8, 0xff, 0x00]))).toBe("image/jpeg");
+    expect(detectImageContentType(Buffer.from("RIFFxxxxWEBP", "ascii"))).toBe("image/webp");
+    expect(() => detectImageContentType(Buffer.from("<html>not an image</html>"))).toThrow("不是受支持的图片");
   });
 });

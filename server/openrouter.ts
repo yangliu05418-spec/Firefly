@@ -1,3 +1,5 @@
+import dns from "node:dns/promises";
+import { BlockList } from "node:net";
 import { config } from "./config.js";
 
 /**
@@ -189,6 +191,46 @@ const extractMarkdownImages = (text: string) => {
 };
 
 const isDataUrl = (url: string) => url.startsWith("data:");
+const maximumImageBytes = 20 * 1024 * 1024;
+const blockedImageAddresses = new BlockList();
+for (const [address, prefix] of [["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.0.2.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15], ["198.51.100.0", 24], ["203.0.113.0", 24], ["224.0.0.0", 4], ["240.0.0.0", 4]] as const) blockedImageAddresses.addSubnet(address, prefix, "ipv4");
+for (const [address, prefix] of [["::", 128], ["::1", 128], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8], ["2001:db8::", 32]] as const) blockedImageAddresses.addSubnet(address, prefix, "ipv6");
+
+export const isBlockedImageAddress = (address: string, family: number) => blockedImageAddresses.check(address, family === 6 ? "ipv6" : "ipv4");
+
+export const detectImageContentType = (buffer: Buffer) => {
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return "image/jpeg";
+  if (buffer.length >= 12 && buffer.subarray(0, 4).toString("ascii") === "RIFF" && buffer.subarray(8, 12).toString("ascii") === "WEBP") return "image/webp";
+  throw new OpenRouterError("OpenRouter 返回的内容不是受支持的图片", 400);
+};
+
+const validatePublicImageUrl = async (value: string) => {
+  if (value.length > 4096) throw new OpenRouterError("OpenRouter 返回的图片地址过长", 400);
+  let url: URL;
+  try { url = new URL(value); } catch { throw new OpenRouterError("OpenRouter 返回了无效的图片地址", 400); }
+  if (url.protocol !== "https:" || url.username || url.password) throw new OpenRouterError("OpenRouter 返回了不安全的图片地址", 400);
+  const addresses = await dns.lookup(url.hostname, { all: true, verbatim: true }).catch(() => []);
+  if (!addresses.length || addresses.some(({ address, family }) => isBlockedImageAddress(address, family))) throw new OpenRouterError("OpenRouter 图片地址不可访问", 400);
+  return url;
+};
+
+const readLimitedImageBody = async (response: Response) => {
+  const declared = Number(response.headers.get("content-length") ?? 0);
+  if (Number.isFinite(declared) && declared > maximumImageBytes) throw new OpenRouterError("生成的图片超过 20MB 限制", 400);
+  if (!response.body) throw new OpenRouterError("下载生成图片失败（响应为空）", 502);
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let size = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maximumImageBytes) { await reader.cancel(); throw new OpenRouterError("生成的图片超过 20MB 限制", 400); }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks, size);
+};
 
 /** 生成单张图片：返回图片 URL（data: 或 https:），由调用方落盘 */
 export const generateSingleImage = async (input: { model: string; prompt: string; references: string[]; size: string }): Promise<string> => {
@@ -212,26 +254,36 @@ export const generateSingleImage = async (input: { model: string; prompt: string
   return images[0];
 };
 
-/** 下载图片字节（data: 解码 / https: 拉取，20MB 上限） */
-export const downloadImageBuffer = async (url: string): Promise<Buffer> => {
+/** 下载图片字节（data: 解码 / public https: 拉取，20MB 上限及 SSRF 防护） */
+export const downloadImageBuffer = async (url: string): Promise<{ buffer: Buffer; contentType: string }> => {
   if (isDataUrl(url)) {
     const comma = url.indexOf(",");
     if (comma < 0) throw new OpenRouterError("OpenRouter 返回了无效的图片数据", 400);
     const meta = url.slice(0, comma);
     const payload = url.slice(comma + 1);
-    const buffer = Buffer.from(payload, meta.includes(";base64") ? "base64" : "utf8");
-    if (buffer.length > 20 * 1024 * 1024) throw new OpenRouterError("生成的图片超过 20MB 限制", 400);
-    return buffer;
+    if (!meta.includes(";base64")) throw new OpenRouterError("OpenRouter 返回了不受支持的图片数据", 400);
+    const buffer = Buffer.from(payload, "base64");
+    if (buffer.length > maximumImageBytes) throw new OpenRouterError("生成的图片超过 20MB 限制", 400);
+    return { buffer, contentType: detectImageContentType(buffer) };
   }
-  if (!url.startsWith("http://") && !url.startsWith("https://")) throw new OpenRouterError("OpenRouter 返回了无法下载的图片地址", 400);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 60_000);
   try {
-    const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) throw new OpenRouterError("下载生成图片失败 (" + response.status + ")", 502);
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.length > 20 * 1024 * 1024) throw new OpenRouterError("生成的图片超过 20MB 限制", 400);
-    return buffer;
+    let current = await validatePublicImageUrl(url);
+    for (let redirects = 0; redirects <= 3; redirects += 1) {
+      const response = await fetch(current, { signal: controller.signal, redirect: "manual" });
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        const location = response.headers.get("location");
+        await response.body?.cancel();
+        if (!location || redirects === 3) throw new OpenRouterError("生成图片地址重定向过多", 502);
+        current = await validatePublicImageUrl(new URL(location, current).toString());
+        continue;
+      }
+      if (!response.ok) throw new OpenRouterError("下载生成图片失败 (" + response.status + ")", 502);
+      const buffer = await readLimitedImageBody(response);
+      return { buffer, contentType: detectImageContentType(buffer) };
+    }
+    throw new OpenRouterError("下载生成图片失败", 502);
   } finally {
     clearTimeout(timer);
   }

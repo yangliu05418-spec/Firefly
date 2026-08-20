@@ -34,9 +34,9 @@ const worker = new Worker<ImageJobData>("image-generation", async (job) => {
     if (task.items.some((item) => item.index === index)) continue;
     try {
       const url = await generateSingleImage({ model: task.model, prompt: task.prompt, references, size });
-      const buffer = await downloadImageBuffer(url);
-      const contentType = url.startsWith("data:image/webp") ? "image/webp" : url.startsWith("data:image/jpeg") ? "image/jpeg" : "image/png";
-      const media = await storeGeneratedImage({ ownerId: task.ownerId, body: buffer, contentType, fileName: `generated-${index + 1}.png`, mediaId: `image-${task.id}-${index}` });
+      const { buffer, contentType } = await downloadImageBuffer(url);
+      const extension = contentType === "image/webp" ? "webp" : contentType === "image/jpeg" ? "jpg" : "png";
+      const media = await storeGeneratedImage({ ownerId: task.ownerId, body: buffer, contentType, fileName: `generated-${index + 1}.${extension}`, mediaId: `image-${task.id}-${index}` });
       task = users.updateImageGenerationTask(task.id, { items: [...task.items, { index, mediaId: media.id }].sort((a, b) => a.index - b.index), updatedAt: Date.now() })!;
       console.info(JSON.stringify({ type: "image_generation_item_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, mediaId: media.id, index, bytes: buffer.length }));
     } catch (error) {
