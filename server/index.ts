@@ -24,6 +24,7 @@ import { previewRedirectCacheControl } from "./media-cache.js";
 import { stablePreviewUrl } from "./preview-url-cache.js";
 import { abortMultipartUpload, completeMultipartUpload, createMultipartUpload, deleteObject, headObject, inputObjectKey, inspectMediaObject, signUploadPart, signedObjectUrl, tosConfigured, tosEnabled, tosHealth } from "./tos.js";
 import { createCanvasAssetFromUpload } from "./canvas-assets.js";
+import { createCanvasMediaHandler } from "./canvas-media-route.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
 import { IMAGE_MODELS, IMAGE_RATIOS, imageModelById, computeImageSize, DEFAULT_IMAGE_MODEL } from "./image-models.js";
 import { acquireImageSlot, downloadImageBuffer, generateSingleImage, openRouterPool, OpenRouterError, releaseImageSlot } from "./openrouter.js";
@@ -483,9 +484,13 @@ app.get("/api/assets", requireAuth, async (req, res) => {
   } catch (error) { respondError(res, error, 502); }
 });
 app.post("/api/assets", requireAuth, async (req, res) => {
+  let auditUserId: string | null = null;
+  let auditUploadId: string | null = null;
   try {
     const body = z.object({ groupId: z.string().startsWith("group-").optional(), url: z.string().url().optional(), uploadId: z.string().min(20).optional(), type: z.enum(["Image", "Video", "Audio"]), name: z.string().min(1).max(80) }).refine((value) => Boolean(value.url || value.uploadId), "素材缺少可用地址").parse(req.body);
     const user = res.locals.user as SessionUser;
+    auditUserId = user.id;
+    auditUploadId = body.uploadId ?? null;
     const groupId = await ensureAutoReferenceGroup();
     let url = body.url;
     if (body.uploadId) {
@@ -508,7 +513,7 @@ app.post("/api/assets", requireAuth, async (req, res) => {
     if (/between 300px and 6000px|out of range|height.{0,40}(?:300|6000)|width.{0,40}(?:300|6000)/i.test(message)) {
       return res.status(400).json({ error: "图片尺寸不符合官方要求（300–6000px，宽高比 0.4–2.5），请上传符合要求的图片", requestId: res.locals.requestId });
     }
-    console.warn(JSON.stringify({ type: "asset_create_failed", at: new Date().toISOString(), userId: user.id, uploadId: body.uploadId ?? null, message: message.slice(0, 300) }));
+    console.warn(JSON.stringify({ type: "asset_create_failed", at: new Date().toISOString(), userId: auditUserId, uploadId: auditUploadId, message: message.slice(0, 300) }));
     respondError(res, error, 502);
   }
 });
@@ -749,18 +754,11 @@ app.post("/api/canvases/:id/media", requireAuth, async (req, res) => {
   } catch (error) { respondError(res, error, 502); }
 });
 
-app.get("/api/canvas-media/:assetId", requireAuth, async (req, res) => {
-  try {
-    const user = res.locals.user as SessionUser;
-    const asset = users.readCanvasAsset(param(req.params.id));
-    if (!asset || asset.ownerId !== user.id) return res.status(404).json({ error: "画布素材不存在" });
-    if (asset.status === "copying") return res.status(425).json({ error: "素材正在迁移到长期存储，请稍后重试" });
-    if (asset.status === "failed") return res.status(425).json({ error: "素材迁移失败，请删除节点后重新插入" });
-    res.setHeader("Cache-Control", previewRedirectCacheHeader);
-    res.setHeader("Vary", "Cookie");
-    res.redirect(302, signedObjectUrl(asset.objectKey, { fileName: asset.fileName }));
-  } catch (error) { respondError(res, error, 502); }
-});
+app.get("/api/canvas-media/:assetId", requireAuth, createCanvasMediaHandler({
+  readCanvasAsset: (assetId) => users.readCanvasAsset(assetId),
+  signedObjectUrl: (objectKey, options) => signedObjectUrl(objectKey, options),
+  cacheControl: previewRedirectCacheHeader
+}));
 
 let latestTosHealth: { configured: boolean; reachable: boolean; checkedAt?: string } = { configured: tosConfigured(), reachable: false };
 const probeTos = async () => { latestTosHealth = { ...await tosHealth(), checkedAt: new Date().toISOString() }; };

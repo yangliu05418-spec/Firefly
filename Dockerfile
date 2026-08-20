@@ -11,6 +11,10 @@ COPY server ./server
 RUN npm run build
 
 FROM node:22-bookworm-slim AS runtime
+ARG OCI_REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/yangliu05418-spec/Firefly" \
+      org.opencontainers.image.revision=$OCI_REVISION \
+      org.opencontainers.image.title="Firefly"
 ENV NODE_ENV=production
 WORKDIR /app
 COPY package.json package-lock.json ./

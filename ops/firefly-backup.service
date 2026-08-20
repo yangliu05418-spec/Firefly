@@ -5,6 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/firefly
-ExecStart=/usr/bin/docker compose exec -T web sh /app/ops/run-backup.sh
+ExecStart=/usr/local/sbin/firefly-backup
+TimeoutStartSec=30min
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
 

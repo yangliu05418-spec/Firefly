@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [release/candidate-3]
+  push:
+    branches: [release/candidate-3]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-gates:
+    name: Source safety gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reject tracked credentials and release archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          forbidden=("APIKEY+MODEL.txt" "参考文档.txt" "密钥.txt" "TOS Information.txt")
+          for file in "${forbidden[@]}"; do
+            if git ls-files --error-unmatch "$file" >/dev/null 2>&1; then
+              echo "Forbidden file is tracked: $file" >&2
+              exit 1
+            fi
+            git check-ignore -q "$file" || { echo "Forbidden file is not ignored: $file" >&2; exit 1; }
+          done
+          if git ls-files | grep -E '\.(tar\.gz|tgz)$' >/dev/null; then
+            echo "Release archives must not be committed" >&2
+            exit 1
+          fi
+
+      - name: Reject CRLF runtime files
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed=0
+          while IFS= read -r file; do
+            if LC_ALL=C grep -q $'\r' "$file"; then
+              echo "CRLF is forbidden in runtime file: $file" >&2
+              failed=1
+            fi
+          done < <(git ls-files '*.sh' 'Dockerfile' '*.service' '*.timer' '*.conf' '*.yml' '*.yaml')
+          exit "$failed"
+
+      - name: Reject oversized tracked files
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed=0
+          while IFS= read -r -d '' file; do
+            size=$(wc -c < "$file")
+            if (( size > 20971520 )); then
+              echo "Tracked file exceeds 20 MiB: $file ($size bytes)" >&2
+              failed=1
+            fi
+          done < <(git ls-files -z)
+          exit "$failed"
+
+      - name: Scan repository for secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test-build:
+    name: Node 22 test and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - name: Pin npm 10 and install
+        run: |
+          npm install --global npm@10
+          npm config set registry https://registry.npmjs.org
+          npm ci
+      - run: npm run typecheck
+      - run: npm test -- --maxWorkers=1
+      - run: npm run build
+      - name: Exercise SQLite backup and restore drill
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_dir=$(mktemp -d)
+          trap 'rm -rf "$test_dir"' EXIT
+          TEST_DB_PATH="$test_dir/source.db" node -e "const Database=require('better-sqlite3');const db=new Database(process.env.TEST_DB_PATH);db.exec(\"CREATE TABLE smoke(id INTEGER PRIMARY KEY, value TEXT);INSERT INTO smoke(value) VALUES ('ok')\");db.close()"
+          DATABASE_PATH="$test_dir/source.db" BACKUP_PATH="$test_dir/backup.db" node ops/backup-db.mjs
+          BACKUP_PATH="$test_dir/backup.db" node -e "const Database=require('better-sqlite3');const db=new Database(process.env.BACKUP_PATH,{readonly:true});if(db.pragma('integrity_check',{simple:true})!=='ok'||db.prepare('SELECT value FROM smoke').pluck().get()!=='ok')process.exit(1);db.close()"
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
+
+  container:
+    name: Container build, smoke test and scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build production image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: firefly-ci:${{ github.sha }}
+          build-args: OCI_REVISION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke-test container health
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker network create firefly-ci
+          docker run -d --name firefly-ci-redis --network firefly-ci redis:7.4-alpine redis-server --appendonly no
+          docker run -d --name firefly-ci-web --network firefly-ci -p 127.0.0.1:18090:8090 \
+            -e PUBLIC_ORIGIN=http://127.0.0.1:18090 \
+            -e REDIS_URL=redis://firefly-ci-redis:6379 \
+            -e SESSION_SECRET=ci-only-session-secret-at-least-32-bytes \
+            -e DATABASE_PATH=/data/firefly.db \
+            -e UPLOAD_DIR=/data/uploads \
+            -e MEDIA_STORAGE_BACKEND=legacy \
+            firefly-ci:${{ github.sha }}
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18090/api/health >/dev/null; then exit 0; fi
+            sleep 2
+          done
+          docker logs firefly-ci-web
+          exit 1
+      - name: Scan image for critical vulnerabilities
+        uses: aquasecurity/trivy-action@0.32.0
+        with:
+          image-ref: firefly-ci:${{ github.sha }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+      - name: Upload vulnerability report
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
