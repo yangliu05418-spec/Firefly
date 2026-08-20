@@ -3,6 +3,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 
 export const CURRENT_SCHEMA_VERSION = 2;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 3;
 
 const baseSchema = `
   CREATE TABLE IF NOT EXISTS users (
@@ -134,7 +135,7 @@ export const schemaVersion = (database: Database.Database) => {
 
 export const assertSchemaVersion = (database: Database.Database) => {
   const version = schemaVersion(database);
-  if (version !== CURRENT_SCHEMA_VERSION) throw new Error(`Database schema version ${version} is not supported; expected ${CURRENT_SCHEMA_VERSION}. Run npm run db:migrate.`);
+  if (version < CURRENT_SCHEMA_VERSION || version > MAX_SUPPORTED_SCHEMA_VERSION) throw new Error(`Database schema version ${version} is not supported; expected ${CURRENT_SCHEMA_VERSION}-${MAX_SUPPORTED_SCHEMA_VERSION}. Run npm run db:migrate.`);
   return version;
 };
 
@@ -170,7 +171,7 @@ export const migrateDatabase = (databasePath: string) => {
     database.transaction(() => {
       database.exec(migrationTable);
       const version = schemaVersion(database);
-      if (version > CURRENT_SCHEMA_VERSION) throw new Error(`Database schema ${version} is newer than this release (${CURRENT_SCHEMA_VERSION})`);
+      if (version > MAX_SUPPORTED_SCHEMA_VERSION) throw new Error(`Database schema ${version} is newer than this release (${MAX_SUPPORTED_SCHEMA_VERSION})`);
       if (version < 1) {
         applyBaseline(database);
         database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(1, "baseline-current-schema", Date.now());
