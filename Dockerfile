@@ -22,6 +22,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates python3 make g++ \
     && npm ci --omit=dev \
     && npm cache clean --force \
+    && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+    && rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/local/bin/pnpm /usr/local/bin/pnpx /usr/local/bin/yarn /usr/local/bin/yarnpkg \
     && apt-get purge -y --auto-remove python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/dist-web ./dist-web
