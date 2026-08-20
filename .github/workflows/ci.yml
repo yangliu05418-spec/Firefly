@@ -280,13 +280,21 @@ jobs:
           GHCR_USER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
+          SSH_OPTIONS=(
+            -o BatchMode=yes
+            -o StrictHostKeyChecking=yes
+            -o ConnectTimeout=15
+            -o ServerAliveInterval=20
+            -o ServerAliveCountMax=30
+            -o TCPKeepAlive=yes
+          )
           printf '%s\n' "$GHCR_PULL_TOKEN" | \
-            ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$PROD_USER@$PROD_HOST" \
+            ssh "${SSH_OPTIONS[@]}" "$PROD_USER@$PROD_HOST" \
               "sudo /usr/local/sbin/firefly-ghcr-login '$GHCR_USER'"
           if [ -n "$FEISHU_WEBHOOK_URL" ]; then
             printf '%s\n' "$FEISHU_WEBHOOK_URL" | \
-              ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$PROD_USER@$PROD_HOST" \
+              ssh "${SSH_OPTIONS[@]}" "$PROD_USER@$PROD_HOST" \
                 "sudo /usr/local/sbin/firefly-alerts-configure"
           fi
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$PROD_USER@$PROD_HOST" \
+          ssh "${SSH_OPTIONS[@]}" "$PROD_USER@$PROD_HOST" \
             "sudo /usr/local/sbin/firefly-deploy '$IMAGE' '${{ github.sha }}'"
