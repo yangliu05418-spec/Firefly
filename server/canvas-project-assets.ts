@@ -1,4 +1,5 @@
 import type { CanvasProjectAsset } from "./db.js";
+import type { RequestHandler } from "express";
 import { users } from "./store.js";
 import { signedObjectUrl } from "./tos.js";
 
@@ -68,3 +69,21 @@ export const publicCanvasProjectAsset = (asset: CanvasProjectAsset) => ({
   mediaUrl: `/api/canvas-project-assets/${encodeURIComponent(asset.id)}/media`,
   downloadUrl: `/api/canvas-project-assets/${encodeURIComponent(asset.id)}/media?download=1`,
 });
+
+export const createCanvasProjectMediaHandler = (deps: {
+  readAsset: (id: string) => CanvasProjectAsset | null;
+  canAccessCanvas: (canvasId: string, userId: string) => boolean;
+  signedUrl: (asset: CanvasProjectAsset, download: boolean) => string;
+  cacheControl: string;
+}): RequestHandler => (req, res) => {
+  try {
+    const user = res.locals.user as { id?: string } | undefined;
+    const assetId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const asset = user?.id && assetId ? deps.readAsset(assetId) : null;
+    if (!asset || asset.ownerId !== user?.id || !deps.canAccessCanvas(asset.canvasId, user.id)) return res.status(404).json({ error: "画布素材不存在" });
+    if (asset.status !== "ready") return res.status(asset.status === "copying" ? 425 : 409).json({ error: asset.status === "copying" ? "画布素材正在归档" : "画布素材归档失败" });
+    res.setHeader("Cache-Control", deps.cacheControl);
+    res.setHeader("Vary", "Cookie");
+    res.redirect(302, deps.signedUrl(asset, req.query.download === "1"));
+  } catch { res.status(502).json({ error: "画布素材暂时无法读取" }); }
+};

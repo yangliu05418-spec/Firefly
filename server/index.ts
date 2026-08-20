@@ -34,7 +34,7 @@ import { acquireImageSlot, downloadImageBuffer, generateSingleImage, openRouterP
 import { storeGeneratedImage } from "./generated-media.js";
 import { providerAssetName } from "./asset-name.js";
 import { acquireCanvasLease, releaseCanvasLease, renewCanvasLease, validateCanvasLease } from "./canvas-lease.js";
-import { canvasProjectAssetProviderUrl, canvasProjectAssetSignedUrl, publicCanvasProjectAsset } from "./canvas-project-assets.js";
+import { canvasProjectAssetProviderUrl, canvasProjectAssetSignedUrl, createCanvasProjectMediaHandler, publicCanvasProjectAsset } from "./canvas-project-assets.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -1005,16 +1005,12 @@ app.post("/api/canvases/:id/assets/import", requireAuth, (req, res) => {
   res.redirect(307, `/api/canvases/${encodeURIComponent(param(req.params.id))}/media`);
 });
 
-app.get("/api/canvas-project-assets/:id/media", requireAuth, async (req, res) => {
-  try {
-    const user = res.locals.user as SessionUser;
-    const asset = users.readCanvasProjectAsset(param(req.params.id));
-    if (!asset || asset.ownerId !== user.id || !accessibleCanvas(asset.canvasId, user.id) || asset.status !== "ready") return res.status(404).json({ error: "画布素材不存在或尚未就绪" });
-    res.setHeader("Cache-Control", previewRedirectCacheHeader);
-    res.setHeader("Vary", "Cookie");
-    res.redirect(302, canvasProjectAssetSignedUrl(asset, req.query.download === "1"));
-  } catch (error) { respondError(res, error, 502); }
-});
+app.get("/api/canvas-project-assets/:id/media", requireAuth, createCanvasProjectMediaHandler({
+  readAsset: (id) => users.readCanvasProjectAsset(id),
+  canAccessCanvas: (canvasId, userId) => Boolean(accessibleCanvas(canvasId, userId)),
+  signedUrl: canvasProjectAssetSignedUrl,
+  cacheControl: previewRedirectCacheHeader,
+}));
 
 const canvasJobBaseSchema = z.object({ nodeId: z.string().min(1).max(120), revision: z.number().int().min(0) });
 const canvasJobCreateSchema = z.discriminatedUnion("kind", [
