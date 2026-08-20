@@ -61,7 +61,7 @@ describe("versioned database migrations", () => {
     const target = databasePath();
     migrateDatabase(target);
     const database = new Database(target);
-    database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (4, 'future-expand-only', ?)").run(Date.now());
+    database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (5, 'future-expand-only', ?)").run(Date.now());
     database.close();
     expect(() => migrateDatabase(target)).toThrow("newer than this release");
     const incompatible = new Database(target, { readonly: true });
