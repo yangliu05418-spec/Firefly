@@ -5,6 +5,8 @@ import { abortIncompleteUploadsForKey, deleteObject, headObject, signedObjectUrl
 const serverTranscodeCooldownMs = 15 * 60 * 1000;
 let serverTranscodeDisabledUntil = 0;
 
+export const isPermanentTosTranscodeFailure = (message: string) => /assume role access denied/i.test(message);
+
 export const transcodePreview = async (sourceKey: string, targetKey: string, onPart?: (partNumber: number, bytes: number, requestId?: string) => void, observer: VideoTranscodeObserver = {}) => {
   let existing: Awaited<ReturnType<typeof headObject>> | null = null;
   try { existing = await headObject(targetKey); }
@@ -25,7 +27,11 @@ export const transcodePreview = async (sourceKey: string, targetKey: string, onP
       return head;
     } catch (error) {
       const message = error instanceof Error ? error.message : "TOS 服务端转码失败";
-      if (/assume role access denied/i.test(message)) serverTranscodeDisabledUntil = Date.now() + serverTranscodeCooldownMs;
+      // A missing TOS processing role cannot recover by retrying every job. Skip
+      // the known-broken control-plane path until the worker is restarted after
+      // its IAM configuration has been corrected.
+      if (isPermanentTosTranscodeFailure(message)) serverTranscodeDisabledUntil = Number.POSITIVE_INFINITY;
+      else serverTranscodeDisabledUntil = Date.now() + serverTranscodeCooldownMs;
       observer.stateChanged?.("fallback", "worker_multipart", -1, message);
       await deleteObject(targetKey).catch(() => undefined);
     }

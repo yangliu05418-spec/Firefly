@@ -77,6 +77,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [leaseToken, setLeaseToken] = useState("");
   const leaseTokenRef = useRef("");
+  const leaseRefresh = useRef<Promise<boolean> | null>(null);
   const [readOnly, setReadOnly] = useState(false);
   const [draftCandidate, setDraftCandidate] = useState<Awaited<ReturnType<typeof readCanvasDraft>> | null>(null);
   const [createMenu, setCreateMenu] = useState<CreateMenu | null>(null);
@@ -122,6 +123,46 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   const deriveImageRef = useRef<(id: string, operation: { cropRatio?: number; rotation?: 90 | 180 | 270 }) => void>(() => undefined);
   const textSelections = useRef(new Map<string, string>());
   const cid = useMemo(clientId, []);
+
+  const adoptLease = useCallback((token: string) => {
+    leaseTokenRef.current = token;
+    setLeaseToken(token);
+    setReadOnly(false);
+  }, []);
+
+  const recoverLease = useCallback(async () => {
+    if (leaseRefresh.current) return leaseRefresh.current;
+    const run = async () => {
+      try {
+        const currentToken = leaseTokenRef.current;
+        if (currentToken) {
+          const response = await renewCanvasLease(canvasId, cid, currentToken);
+          if (response.ok) return true;
+          if (response.status !== 409) throw new Error(response.status === 401 ? "登录已过期，请重新登录" : `编辑状态确认失败 (${response.status})`);
+        }
+        const lease = await acquireCanvasLease(canvasId, cid);
+        if (lease.acquired) {
+          adoptLease(lease.token);
+          setSaveState((state) => state === "saved" ? state : "draft");
+          setMessage("编辑连接已恢复，正在同步本地改动");
+          return true;
+        }
+        leaseTokenRef.current = "";
+        setLeaseToken("");
+        setReadOnly(true);
+        setSaveState("conflict");
+        setMessage("另一个窗口正在编辑，本地草稿仍安全保留");
+        return false;
+      } catch {
+        setSaveState(navigator.onLine ? "error" : "offline");
+        setMessage(navigator.onLine ? "编辑连接暂时不稳定，改动已保存在本地，将自动重试" : "网络已断开，改动已保存在本地");
+        return false;
+      }
+    };
+    const pending = run().finally(() => { if (leaseRefresh.current === pending) leaseRefresh.current = null; });
+    leaseRefresh.current = pending;
+    return pending;
+  }, [adoptLease, canvasId, cid]);
 
   useEffect(() => () => {
     for (const controller of uploadBatchControllers.current) controller.abort();
@@ -203,20 +244,23 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
       if (!project.document) throw new Error("画布文档无法解析");
       const document = toCanvasDocumentV2(project.document);
       setProjectTitle(project.title); setRevision(project.revision); revisionRef.current = project.revision;
-      if (lease.acquired) { setLeaseToken(lease.token); leaseTokenRef.current = lease.token; setReadOnly(false); }
-      else setReadOnly(true);
+      if (lease.acquired) adoptLease(lease.token);
+      else {
+        leaseTokenRef.current = ""; setLeaseToken(""); setReadOnly(true); setSaveState("conflict");
+        setMessage("另一个窗口正在编辑；当前已安全打开为只读模式");
+      }
       hydrate(document);
       history.current = [structuredClone(document)]; historyCursor.current = 0;
       if (localDraft && localDraft.savedAt > project.updatedAt && localDraft.revision >= project.revision) setDraftCandidate(localDraft);
       initialized.current = true; setLoadState("ready");
     } catch (error) { setMessage(error instanceof Error ? error.message : "画布暂时无法载入"); setLoadState("error"); }
-  }, [canvasId, cid, hydrate]);
+  }, [adoptLease, canvasId, cid, hydrate]);
 
   const takeoverLease = async () => {
     try {
       const lease = await acquireCanvasLease(canvasId, cid, true);
       if (!lease.acquired) throw new Error("暂时无法接管编辑权");
-      setLeaseToken(lease.token); leaseTokenRef.current = lease.token; setReadOnly(false); setSaveState("draft"); setMessage("已接管编辑，本地草稿仍保留");
+      adoptLease(lease.token); setSaveState("draft"); setMessage("已接管编辑，本地草稿仍保留");
     } catch (error) { setMessage(error instanceof Error ? error.message : "接管失败"); }
   };
 
@@ -282,20 +326,28 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
       const document = documentFromFlow(); latestDocument.current = document;
       await writeCanvasDraft({ canvasId, revision: revisionRef.current, document, savedAt: Date.now() }).catch(() => undefined);
       if (!navigator.onLine) return;
-      try {
+      const persist = async () => {
         const saved = await saveCanvasV2(canvasId, revisionRef.current, document, leaseTokenRef.current);
         revisionRef.current = saved.revision; setRevision(saved.revision); setSaveState("saved");
         await deleteCanvasDraft(canvasId).catch(() => undefined);
+      };
+      try {
+        await persist();
       } catch (error) {
-        const typed = error as Error & { status?: number; code?: string };
+        let typed = error as Error & { status?: number; code?: string };
+        if (typed.code === "CANVAS_LEASE_LOST") {
+          if (!await recoverLease()) return;
+          try { await persist(); return; }
+          catch (retryError) { typed = retryError as Error & { status?: number; code?: string }; }
+        }
         if (typed.status === 409) { setSaveState("conflict"); setMessage(typed.message); }
-        else { setSaveState("error"); setMessage(typed.message); }
+        else { setSaveState(navigator.onLine ? "error" : "offline"); setMessage(typed.message); }
       }
     };
     saving.current = run().finally(() => { saving.current = null; });
     await saving.current;
     if (saveAgain.current) { saveAgain.current = false; await flushSave(); }
-  }, [canvasId, documentFromFlow, readOnly]);
+  }, [canvasId, documentFromFlow, readOnly, recoverLease]);
   useEffect(() => { flushSaveRef.current = flushSave; }, [flushSave]);
 
   const scheduleSave = useCallback(() => {
@@ -309,19 +361,14 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   useEffect(() => { if (initialized.current) scheduleSave(); }, [nodes, edges, edgesHidden, minimapOpen, panMode, scheduleSave, snapToGrid]);
   useEffect(() => {
     if (!leaseToken) return;
-    const renew = async () => {
-      const response = await renewCanvasLease(canvasId, cid, leaseToken);
-      if (!response.ok) {
-        leaseTokenRef.current = ""; setLeaseToken(""); setReadOnly(true); setSaveState("conflict");
-        setMessage("另一个窗口已接管编辑，本地草稿仍安全保留");
-      }
-    };
-    const timer = window.setInterval(() => void renew(), 10_000);
-    const onVisibility = () => { if (document.visibilityState === "visible") void renew(); else void flushSaveRef.current(); };
-    const onOnline = () => void flushSaveRef.current();
+    const renew = () => void recoverLease();
+    const recoverAndFlush = () => void recoverLease().then((available) => { if (available) return flushSaveRef.current(); });
+    const timer = window.setInterval(renew, 10_000);
+    const onVisibility = () => { if (document.visibilityState === "visible") recoverAndFlush(); else void flushSaveRef.current(); };
+    const onOnline = recoverAndFlush;
     document.addEventListener("visibilitychange", onVisibility); window.addEventListener("online", onOnline);
     return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", onVisibility); window.removeEventListener("online", onOnline); void releaseCanvasLease(canvasId, cid, leaseToken); };
-  }, [canvasId, cid, leaseToken]);
+  }, [canvasId, cid, leaseToken, recoverLease]);
 
   const refreshAssets = useCallback(async () => {
     const result = await listCanvasAssets(canvasId); setAssets(result.Items);
