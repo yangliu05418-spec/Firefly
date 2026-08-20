@@ -24,3 +24,28 @@ describe("Canvas V2 rollout configuration", () => {
     expect(config.canvasV2Enabled).toBe(false);
   });
 });
+
+describe("TOS preview configuration", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it("enables progressive previews by default for direct container deployments", async () => {
+    delete process.env.TOS_PREVIEW_TRANSCODE_ENABLED;
+    vi.resetModules();
+
+    const { config } = await import("./config.js");
+
+    expect(config.tosPreviewTranscodeEnabled).toBe(true);
+  });
+
+  it("keeps an explicit emergency rollback switch", async () => {
+    vi.stubEnv("TOS_PREVIEW_TRANSCODE_ENABLED", "false");
+    vi.resetModules();
+
+    const { config } = await import("./config.js");
+
+    expect(config.tosPreviewTranscodeEnabled).toBe(false);
+  });
+});

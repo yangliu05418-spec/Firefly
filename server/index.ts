@@ -1351,7 +1351,7 @@ app.get("/api/health/ready", async (_req, res) => {
       if (!checkedAt || checkedAt < Date.now() - 30_000) await probeTos();
       if (!latestTosHealth.configured || !latestTosHealth.reachable) throw new Error("TOS unavailable");
     }
-    res.json({ status: "ready", redis: "ok", database: "ok", queues: "ok", tos: tosEnabled() ? "ok" : "disabled", schemaVersion: users.schemaVersion(), ...runtimeIdentity });
+    res.json({ status: "ready", redis: "ok", database: "ok", queues: "ok", tos: tosEnabled() ? "ok" : "disabled", previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, schemaVersion: users.schemaVersion(), ...runtimeIdentity });
   } catch (error) {
     console.warn(JSON.stringify({ type: "readiness_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }));
     res.status(503).json({ status: "not_ready", ...runtimeIdentity });
@@ -1362,8 +1362,8 @@ app.get("/api/health", async (_req, res) => {
   try {
     await redis.ping();
     if (!users.healthCheck()) throw new Error("database unavailable");
-    res.json({ status: "ok", redis: "ok", database: "ok", schemaVersion: users.schemaVersion(), tosConfigured: latestTosHealth.configured, tosReachable: latestTosHealth.reachable, tosCheckedAt: latestTosHealth.checkedAt, ...runtimeIdentity });
-  } catch { res.status(503).json({ status: "degraded", redis: "unavailable", database: "unavailable", tosConfigured: latestTosHealth.configured, tosReachable: latestTosHealth.reachable, ...runtimeIdentity }); }
+    res.json({ status: "ok", redis: "ok", database: "ok", schemaVersion: users.schemaVersion(), tosConfigured: latestTosHealth.configured, tosReachable: latestTosHealth.reachable, tosCheckedAt: latestTosHealth.checkedAt, previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, ...runtimeIdentity });
+  } catch { res.status(503).json({ status: "degraded", redis: "unavailable", database: "unavailable", tosConfigured: latestTosHealth.configured, tosReachable: latestTosHealth.reachable, previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, ...runtimeIdentity }); }
 });
 
 app.use((error: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
