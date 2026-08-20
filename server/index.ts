@@ -24,6 +24,8 @@ import { ensureAutoReferenceGroup } from "./asset-registration.js";
 import { previewRedirectCacheControl } from "./media-cache.js";
 import { stablePreviewUrl } from "./preview-url-cache.js";
 import { abortMultipartUpload, completeMultipartUpload, createMultipartUpload, deleteObject, headObject, inputObjectKey, inspectMediaObject, signUploadPart, signedObjectUrl, tosConfigured, tosEnabled, tosHealth } from "./tos.js";
+import { canonicalUploadContentType, tosMediaInfoViolation, uploadKindFromContentType } from "./upload-policy.js";
+import { acquireAssetCreationLock, acquireUploadCompletionLock, claimUploadSlot, releaseAssetCreationLock, releaseUploadCompletionLock, releaseUploadSlot, UPLOAD_SESSION_TTL_SECONDS } from "./upload-slots.js";
 import { createCanvasAssetFromUpload } from "./canvas-assets.js";
 import { createCanvasMediaHandler } from "./canvas-media-route.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
@@ -78,12 +80,11 @@ class Semaphore {
 }
 const ffprobeGate = new Semaphore(3);
 
-/** 执行 ffprobe：60s 超时 + 瞬时失败重试一次；失败信息携带 stderr/超时标记/耗时（可观测） */
+/** 执行 ffprobe：仅用于 TOS 当前没有 info API 的音频；60s 硬超时。 */
 const runFfprobe = async (filePath: string) => {
   const startedAt = Date.now();
   let lastError: unknown;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    if (attempt) await new Promise((resolve) => setTimeout(resolve, 1000));
+  for (let attempt = 0; attempt < 1; attempt++) {
     try {
       const { stdout } = await execFileAsync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,codec_name,width,height,r_frame_rate", "-show_entries", "format=duration", "-of", "json", filePath], { timeout: 60000, maxBuffer: 8 * 1024 * 1024 });
       return { stdout, elapsedMs: Date.now() - startedAt };
@@ -93,7 +94,8 @@ const runFfprobe = async (filePath: string) => {
   }
   const detail = lastError as { stderr?: string; killed?: boolean; signal?: string; message?: string } | undefined;
   const reason = detail?.stderr?.trim().slice(0, 300) || detail?.message || "ffprobe 无法读取素材";
-  throw new Error("素材校验失败：" + reason + (detail?.killed ? "（读取超时）" : "") + "（耗时 " + (Date.now() - startedAt) + "ms）");
+  if (detail?.killed || /http error|server returned|connection|timed? ?out|input\/output error/i.test(reason)) throw new Error("素材校验暂时不可用：" + reason + "（耗时 " + (Date.now() - startedAt) + "ms）");
+  throw new MediaValidationError("无法识别素材内容，请检查文件是否损坏或编码是否受支持");
 };
 
 /**
@@ -106,6 +108,20 @@ class MediaValidationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "MediaValidationError";
+  }
+}
+class UploadIntegrityError extends Error {
+  readonly code = "UPLOAD_INTEGRITY_FAILED";
+  constructor(message: string) {
+    super(message);
+    this.name = "UploadIntegrityError";
+  }
+}
+class RetryableUploadError extends Error {
+  readonly code = "UPLOAD_TEMPORARY_FAILURE";
+  constructor() {
+    super("素材暂时无法完成校验，系统已保留上传进度，请稍后重试");
+    this.name = "RetryableUploadError";
   }
 }
 const allowedExtensions = { image: new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".gif", ".heic", ".heif"]), video: new Set([".mp4", ".mov"]), audio: new Set([".mp3", ".wav"]) };
@@ -183,23 +199,38 @@ app.post("/api/uploads", requireAuth, async (req, res) => {
     const id = crypto.randomBytes(24).toString("hex");
     const owner = res.locals.user as SessionUser;
     const name = safeName(meta.name);
-    if (tosEnabled()) {
-      if (!tosConfigured()) throw new Error("TOS 存储尚未配置完成");
-      const objectKey = inputObjectKey(owner.id, id, name);
-      const tosUploadId = await createMultipartUpload(objectKey, meta.mime || "application/octet-stream", name);
-      const partSize = config.tosUploadPartSize;
-      const partCount = Math.ceil(meta.size / partSize);
-      const stored = { ...meta, name, ownerId: owner.id, objectKey, tosUploadId, partSize, partCount, direct: true, createdAt: Date.now() };
-      await redis.set(`upload:${id}`, JSON.stringify(stored), "EX", 24 * 3600);
-      const parts = Array.from({ length: partCount }, (_, index) => ({ partNumber: index + 1, url: signUploadPart(objectKey, tosUploadId, index + 1) }));
-      console.info(JSON.stringify({ type: "tos_upload_started", at: new Date().toISOString(), userId: owner.id, uploadId: id, size: meta.size, parts: partCount }));
-      return res.status(201).json({ id, direct: true, chunkSize: partSize, concurrency: config.tosUploadConcurrency, parts });
+    const mime = canonicalUploadContentType(name, meta.type);
+    if (!(await claimUploadSlot(redis, owner.id, id, config.maxActiveUploadsPerUser))) {
+      return res.status(429).json({ error: `同时最多处理 ${config.maxActiveUploadsPerUser} 个素材上传，请等待当前上传完成`, code: "UPLOAD_LIMIT_REACHED", requestId: res.locals.requestId });
     }
-    const dir = path.join(config.uploadDir, id);
-    await fs.mkdir(dir, { recursive: true, mode: 0o750 });
-    const stored = { ...meta, name, received: 0, createdAt: Date.now(), ownerId: owner.id, mediaExpiresAt: Date.now() + 24 * 3600 * 1000, direct: false };
-    await redis.set(`upload:${id}`, JSON.stringify(stored), "EX", 24 * 3600);
-    res.status(201).json({ id, chunkSize: 16 * 1024 * 1024 });
+    let pendingMultipart: { objectKey: string; tosUploadId: string } | undefined;
+    try {
+      if (tosEnabled()) {
+        if (!tosConfigured()) throw new Error("TOS 存储尚未配置完成");
+        const objectKey = inputObjectKey(owner.id, id, name);
+        const tosUploadId = await createMultipartUpload(objectKey, mime, name);
+        pendingMultipart = { objectKey, tosUploadId };
+        const partSize = config.tosUploadPartSize;
+        const partCount = Math.ceil(meta.size / partSize);
+        const stored = { ...meta, mime, name, ownerId: owner.id, objectKey, tosUploadId, partSize, partCount, direct: true, createdAt: Date.now() };
+        await redis.set(`upload:${id}`, JSON.stringify(stored), "EX", UPLOAD_SESSION_TTL_SECONDS);
+        const parts = Array.from({ length: partCount }, (_, index) => ({ partNumber: index + 1, url: signUploadPart(objectKey, tosUploadId, index + 1) }));
+        pendingMultipart = undefined;
+        console.info(JSON.stringify({ type: "tos_upload_started", at: new Date().toISOString(), userId: owner.id, uploadId: id, size: meta.size, parts: partCount }));
+        return res.status(201).json({ id, direct: true, chunkSize: partSize, concurrency: config.tosUploadConcurrency, parts });
+      }
+      const dir = path.join(config.uploadDir, id);
+      await fs.mkdir(dir, { recursive: true, mode: 0o750 });
+      const stored = { ...meta, mime, name, received: 0, createdAt: Date.now(), ownerId: owner.id, mediaExpiresAt: Date.now() + UPLOAD_SESSION_TTL_SECONDS * 1000, direct: false };
+      await redis.set(`upload:${id}`, JSON.stringify(stored), "EX", UPLOAD_SESSION_TTL_SECONDS);
+      return res.status(201).json({ id, chunkSize: 16 * 1024 * 1024 });
+    } catch (error) {
+      if (pendingMultipart) await abortMultipartUpload(pendingMultipart.objectKey, pendingMultipart.tosUploadId).catch(() => undefined);
+      await redis.del(`upload:${id}`).catch(() => undefined);
+      if (!tosEnabled()) await fs.rm(path.join(config.uploadDir, id), { recursive: true, force: true }).catch(() => undefined);
+      await releaseUploadSlot(redis, owner.id, id).catch(() => undefined);
+      throw error;
+    }
   } catch (error) { respondError(res, error); }
 });
 
@@ -224,14 +255,21 @@ app.post("/api/uploads/:id/chunks", requireAuth, express.raw({ type: "applicatio
     const meta = JSON.parse(raw);
     if (meta.ownerId !== (res.locals.user as SessionUser).id) return res.status(404).json({ error: "上传不存在或已过期" });
     if (meta.direct) return res.status(409).json({ error: "当前上传使用 TOS 直传" });
+    const lock = await acquireUploadCompletionLock(redis, uploadId, 60);
+    if (!lock) return res.status(409).json({ error: "上一分片仍在写入，请稍后重试", expectedOffset: meta.received });
+    try {
+    const currentRaw = await redis.get(`upload:${uploadId}`);
+    if (!currentRaw) throw new Error("上传已过期，请重新选择文件");
+    const current = JSON.parse(currentRaw);
     const offset = Number(req.header("x-upload-offset") ?? -1);
-    if (offset !== meta.received) return res.status(409).json({ error: "分片顺序不正确", expectedOffset: meta.received });
+    if (offset !== current.received) return res.status(409).json({ error: "分片顺序不正确", expectedOffset: current.received });
     const body = req.body as Buffer;
-    if (!Buffer.isBuffer(body) || !body.length || meta.received + body.length > meta.size) throw new Error("无效的上传分片");
+    if (!Buffer.isBuffer(body) || !body.length || current.received + body.length > current.size) throw new Error("无效的上传分片");
     await fs.appendFile(path.join(config.uploadDir, uploadId, "payload"), body);
-    meta.received += body.length;
-    await redis.set(`upload:${uploadId}`, JSON.stringify(meta), "EX", 24 * 3600);
-    res.json({ received: meta.received });
+    current.received += body.length;
+    await redis.set(`upload:${uploadId}`, JSON.stringify(current), "EX", UPLOAD_SESSION_TTL_SECONDS);
+    return res.json({ received: current.received });
+    } finally { await releaseUploadCompletionLock(redis, uploadId, lock).catch(() => undefined); }
   } catch (error) { respondError(res, error); }
 });
 
@@ -239,62 +277,121 @@ app.post("/api/uploads/:id/complete", requireAuth, async (req, res) => {
   try {
     const startedAt = Date.now();
     const uploadId = param(req.params.id);
+    const owner = res.locals.user as SessionUser;
+    const completed = users.readUpload(uploadId);
+    if (completed) {
+      if (completed.ownerId !== owner.id) return res.status(404).json({ error: "上传不存在或已过期" });
+      return res.json({ id: uploadId, uploadId, name: completed.fileName, type: uploadKindFromContentType(completed.contentType), size: completed.size });
+    }
     const raw = await redis.get(`upload:${uploadId}`);
-    if (!raw) throw new Error("上传已过期，请重新选择文件");
+    if (!raw) return res.status(404).json({ error: "上传不存在或已过期", requestId: res.locals.requestId });
     const meta = JSON.parse(raw);
-    if (meta.ownerId !== (res.locals.user as SessionUser).id) return res.status(404).json({ error: "上传不存在或已过期" });
-    if (meta.direct) {
-      const body = z.object({ parts: z.array(z.object({ partNumber: z.number().int().min(1), eTag: z.string().min(1).max(256) })) }).parse(req.body);
-      const parts = [...body.parts].sort((a, b) => a.partNumber - b.partNumber);
-      if (parts.length !== meta.partCount || parts.some((part, index) => part.partNumber !== index + 1)) throw new Error("上传分片不完整或顺序错误");
-      const stageLog = (stage: string, extra: Record<string, unknown> = {}) => console.info(JSON.stringify({ type: "upload_complete_stage", at: new Date().toISOString(), uploadId, userId: meta.ownerId, stage, elapsedMs: Date.now() - startedAt, ...extra }));
-      stageLog("start");
-      try {
-        await completeMultipartUpload(meta.objectKey, meta.tosUploadId, parts);
-        stageLog("merged");
-        const head = await headObject(meta.objectKey);
-        const size = Number(head.headers["content-length"] ?? 0);
-        if (size !== meta.size) throw new Error("TOS 合并后的文件大小不一致");
-        stageLog("headed", { size });
-        const validationUrl = signedObjectUrl(meta.objectKey, { expires: 900, fileName: meta.name });
-        await inspectMediaObject(meta.objectKey, meta.type);
-        stageLog("inspected");
-        // ffprobe 软校验：TOS image/video info 已权威校验格式与尺寸；此处仅额外探测可解码性，
-        // 失败只告警不阻塞（避免跨洋拉取抖动导致上传必然失败）
+    if (meta.ownerId !== owner.id) return res.status(404).json({ error: "上传不存在或已过期" });
+    const lock = await acquireUploadCompletionLock(redis, uploadId);
+    if (!lock) return res.status(409).json({ error: "素材正在完成校验，请稍后重试", code: "UPLOAD_FINALIZING", requestId: res.locals.requestId });
+    try {
+      const reconciled = users.readUpload(uploadId);
+      if (reconciled) return res.json({ id: uploadId, uploadId, name: reconciled.fileName, type: uploadKindFromContentType(reconciled.contentType), size: reconciled.size });
+      if (meta.direct) {
+        const body = z.object({ parts: z.array(z.object({ partNumber: z.number().int().min(1), eTag: z.string().min(1).max(256) })) }).parse(req.body);
+        const parts = [...body.parts].sort((a, b) => a.partNumber - b.partNumber);
+        if (parts.length !== meta.partCount || parts.some((part, index) => part.partNumber !== index + 1)) throw new UploadIntegrityError("上传分片不完整或顺序错误");
+        const stageLog = (stage: string, extra: Record<string, unknown> = {}) => console.info(JSON.stringify({ type: "upload_complete_stage", at: new Date().toISOString(), uploadId, userId: meta.ownerId, stage, elapsedMs: Date.now() - startedAt, ...extra }));
+        stageLog("start");
         try {
-          await validateMedia(validationUrl, meta.type);
-          stageLog("probed");
-        } catch (probeError) {
-          if (probeError instanceof MediaValidationError) {
-            // 确定性规格违规（尺寸/时长/FPS/编码）：源头拒绝，避免流入素材服务（CreateAsset）产生难以理解的 502
-            stageLog("probe_rejected");
-            throw probeError;
+          try {
+            await completeMultipartUpload(meta.objectKey, meta.tosUploadId, parts);
+            stageLog("merged");
+          } catch (mergeError) {
+            // CompleteMultipartUpload may have committed even when its response was lost.
+            // Reconcile by the deterministic object key before deciding whether a retry is needed.
+            await headObject(meta.objectKey);
+            stageLog("merge_reconciled", { errorCode: (mergeError as { code?: string }).code });
           }
-          console.warn(JSON.stringify({ type: "upload_probe_soft_failed", at: new Date().toISOString(), uploadId, userId: meta.ownerId, message: probeError instanceof Error ? probeError.message.slice(0, 300) : undefined }));
-          stageLog("probe_soft_failed");
+          const head = await headObject(meta.objectKey);
+          const size = Number(head.headers["content-length"] ?? 0);
+          if (size !== meta.size) throw new UploadIntegrityError("TOS 合并后的文件大小不一致");
+          stageLog("headed", { size });
+          const validationUrl = signedObjectUrl(meta.objectKey, { expires: 900, fileName: meta.name });
+          const info = await inspectMediaObject(meta.objectKey, meta.type);
+          if (meta.type !== "audio") {
+            const violation = tosMediaInfoViolation(info, meta.type);
+            if (violation) throw new MediaValidationError(violation);
+          }
+          stageLog("inspected");
+          if (meta.type === "audio") try {
+            await validateMedia(validationUrl, meta.type);
+            stageLog("probed");
+          } catch (probeError) {
+            if (probeError instanceof MediaValidationError) {
+              stageLog("probe_rejected");
+              throw probeError;
+            }
+            console.warn(JSON.stringify({ type: "upload_probe_soft_failed", at: new Date().toISOString(), uploadId, userId: meta.ownerId, message: probeError instanceof Error ? probeError.message.slice(0, 300) : undefined }));
+            stageLog("probe_soft_failed");
+          }
+          const now = Date.now();
+          users.upsertMedia({ id: `input:${uploadId}`, ownerId: meta.ownerId, uploadId, kind: "input", objectKey: meta.objectKey, status: "ready", fileName: meta.name, contentType: meta.mime, size, etag: String(head.headers.etag ?? "").replace(/^"|"$/g, ""), createdAt: now, updatedAt: now });
+          await redis.del(`upload:${uploadId}`);
+          await releaseUploadSlot(redis, owner.id, uploadId);
+          console.info(JSON.stringify({ type: "tos_upload_completed", at: new Date().toISOString(), userId: meta.ownerId, uploadId, size, requestId: head.requestId }));
+          return res.json({ id: uploadId, uploadId, name: meta.name, type: meta.type, size });
+        } catch (error) {
+          const destructive = error instanceof MediaValidationError || error instanceof UploadIntegrityError;
+          console.warn(JSON.stringify({ type: "tos_upload_failed", at: new Date().toISOString(), userId: meta.ownerId, uploadId, retryable: !destructive, errorCode: (error as { code?: string }).code ?? (destructive ? "validation_failed" : "transient_failure"), message: error instanceof Error ? error.message.slice(0, 400) : undefined }));
+          if (destructive) {
+            await abortMultipartUpload(meta.objectKey, meta.tosUploadId).catch(() => undefined);
+            await deleteObject(meta.objectKey).catch(() => undefined);
+            await redis.del(`upload:${uploadId}`);
+            await releaseUploadSlot(redis, owner.id, uploadId);
+          }
+          if (!destructive) throw new RetryableUploadError();
+          throw error;
         }
-        const now = Date.now();
-        users.upsertMedia({ id: `input:${uploadId}`, ownerId: meta.ownerId, uploadId, kind: "input", objectKey: meta.objectKey, status: "ready", fileName: meta.name, contentType: String(head.headers["content-type"] ?? meta.mime ?? "application/octet-stream"), size, etag: String(head.headers.etag ?? ""), createdAt: now, updatedAt: now });
-        await redis.del(`upload:${uploadId}`);
-        console.info(JSON.stringify({ type: "tos_upload_completed", at: new Date().toISOString(), userId: meta.ownerId, uploadId, size, requestId: head.requestId }));
-        return res.json({ id: uploadId, uploadId, name: meta.name, type: meta.type, size });
-      } catch (error) {
-        console.warn(JSON.stringify({ type: "tos_upload_failed", at: new Date().toISOString(), userId: meta.ownerId, uploadId, errorCode: (error as { code?: string }).code ?? "validation_failed", message: error instanceof Error ? error.message.slice(0, 400) : undefined }));
+      }
+      if (meta.received !== meta.size) throw new UploadIntegrityError("文件上传尚未完成");
+      const finalPath = path.join(config.uploadDir, uploadId, meta.name);
+      await fs.rename(path.join(config.uploadDir, uploadId, "payload"), finalPath);
+      try { await validateMedia(finalPath, meta.type); } catch (error) { await fs.rm(path.join(config.uploadDir, uploadId), { recursive: true, force: true }); await redis.del(`upload:${uploadId}`); await releaseUploadSlot(redis, owner.id, uploadId); throw error; }
+      const now = Date.now();
+      users.upsertMedia({ id: `input:${uploadId}`, ownerId: meta.ownerId, uploadId, kind: "input", objectKey: `legacy/${uploadId}/${meta.name}`, status: "ready", fileName: meta.name, contentType: meta.mime, size: meta.size, etag: "", createdAt: now, updatedAt: now });
+      await releaseUploadSlot(redis, owner.id, uploadId);
+      const publicUrl = await resolveUploadMediaUrl({ objectKey: `legacy/${uploadId}/${meta.name}`, uploadId, fileName: meta.name });
+      return res.json({ id: uploadId, uploadId, name: meta.name, type: meta.type, size: meta.size, url: publicUrl });
+    } finally {
+      await releaseUploadCompletionLock(redis, uploadId, lock).catch(() => undefined);
+    }
+  } catch (error) { respondError(res, error, error instanceof RetryableUploadError ? 503 : 400); }
+});
+
+app.delete("/api/uploads/:id", requireAuth, async (req, res) => {
+  try {
+    const uploadId = param(req.params.id);
+    const owner = res.locals.user as SessionUser;
+    const completed = users.readUpload(uploadId);
+    if (completed) return completed.ownerId === owner.id ? res.status(409).json({ error: "素材已完成上传，不能取消" }) : res.status(404).json({ error: "上传不存在或已过期" });
+    const raw = await redis.get(`upload:${uploadId}`);
+    if (!raw) return res.status(204).end();
+    const meta = JSON.parse(raw);
+    if (meta.ownerId !== owner.id) return res.status(404).json({ error: "上传不存在或已过期" });
+    const lock = await acquireUploadCompletionLock(redis, uploadId, 60);
+    if (!lock) return res.status(409).json({ error: "素材正在完成校验，暂时不能取消", code: "UPLOAD_FINALIZING", requestId: res.locals.requestId });
+    try {
+      const reconciled = users.readUpload(uploadId);
+      if (reconciled) return res.status(409).json({ error: "素材已完成上传，不能取消" });
+      if (meta.direct) {
         await abortMultipartUpload(meta.objectKey, meta.tosUploadId).catch(() => undefined);
         await deleteObject(meta.objectKey).catch(() => undefined);
-        await redis.del(`upload:${uploadId}`);
-        throw error;
+      } else {
+        await fs.rm(path.join(config.uploadDir, uploadId), { recursive: true, force: true });
       }
+      await redis.del(`upload:${uploadId}`);
+      await releaseUploadSlot(redis, owner.id, uploadId);
+      console.info(JSON.stringify({ type: "upload_cancelled", at: new Date().toISOString(), userId: owner.id, uploadId }));
+      return res.status(204).end();
+    } finally {
+      await releaseUploadCompletionLock(redis, uploadId, lock).catch(() => undefined);
     }
-    if (meta.received !== meta.size) throw new Error("文件上传尚未完成");
-    const finalPath = path.join(config.uploadDir, uploadId, meta.name);
-    await fs.rename(path.join(config.uploadDir, uploadId, "payload"), finalPath);
-    try { await validateMedia(finalPath, meta.type); } catch (error) { await fs.rm(path.join(config.uploadDir, uploadId), { recursive: true, force: true }); await redis.del(`upload:${uploadId}`); throw error; }
-    // 统一引用形态：legacy 后端同样登记 media_objects（kind=input），与 TOS 路径一致，避免双栈引用语义分叉
-    const now = Date.now();
-    users.upsertMedia({ id: `input:${uploadId}`, ownerId: meta.ownerId, uploadId, kind: "input", objectKey: `legacy/${uploadId}/${meta.name}`, status: "ready", fileName: meta.name, contentType: meta.mime || "application/octet-stream", size: meta.size, etag: "", createdAt: now, updatedAt: now });
-    const publicUrl = await resolveUploadMediaUrl({ objectKey: `legacy/${uploadId}/${meta.name}`, uploadId, fileName: meta.name });
-    res.json({ id: uploadId, name: meta.name, type: meta.type, size: meta.size, url: publicUrl });
   } catch (error) { respondError(res, error); }
 });
 
@@ -317,7 +414,6 @@ app.post("/api/generations", requireAuth, async (req, res) => {
   try {
     const requestedInput = validateGeneration(req.body);
     const owner = res.locals.user as SessionUser;
-    if (users.countActiveTasksForUser(owner.id) >= config.maxActiveGenerationsPerUser) return res.status(429).json({ error: `你已有 ${config.maxActiveGenerationsPerUser} 个任务正在生成，请等待其中一个完成`, requestId: res.locals.requestId });
     const assets = [];
     for (const asset of requestedInput.assets) {
       if (asset.uploadId) {
@@ -346,6 +442,7 @@ app.post("/api/generations", requireAuth, async (req, res) => {
     const id = crypto.randomUUID();
     const now = Date.now();
     const task: StoredTask = { id, ownerId: owner.id, visibility: "private", status: "queued", mediaStatus: "none", mediaRevision: 0, prompt: input.prompt, model: input.model, mode: input.mode, ratio: input.ratio, resolution: input.resolution, duration: input.duration, request: requestedInput, createdAt: now, updatedAt: now };
+    if (!users.createTaskWithinLimit(task, config.maxActiveGenerationsPerUser)) return res.status(429).json({ error: `你已有 ${config.maxActiveGenerationsPerUser} 个任务正在生成，请等待其中一个完成`, requestId: res.locals.requestId });
     await saveTask(task);
     try {
       await generationQueue.add("generate", { input }, { jobId: id, attempts: 4, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: { age: 7 * 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } });
@@ -487,24 +584,31 @@ app.get("/api/assets", requireAuth, async (req, res) => {
 app.post("/api/assets", requireAuth, async (req, res) => {
   let auditUserId: string | null = null;
   let auditUploadId: string | null = null;
+  let creationLock: { key: string; token: string } | null = null;
   try {
-    const body = z.object({ groupId: z.string().startsWith("group-").optional(), url: z.string().url().optional(), uploadId: z.string().min(20).optional(), type: z.enum(["Image", "Video", "Audio"]), name: z.string().min(1).max(80) }).refine((value) => Boolean(value.url || value.uploadId), "素材缺少可用地址").parse(req.body);
+    const body = z.object({ groupId: z.string().startsWith("group-").optional(), url: z.string().url().optional(), uploadId: z.string().min(20).optional(), type: z.enum(["Image", "Video", "Audio"]), name: z.string().min(1).max(180) }).refine((value) => Boolean(value.url || value.uploadId), "素材缺少可用地址").parse(req.body);
     const user = res.locals.user as SessionUser;
     auditUserId = user.id;
     auditUploadId = body.uploadId ?? null;
     const groupId = await ensureAutoReferenceGroup();
     let url = body.url;
+    let assetType = body.type;
+    let providerName = body.name.slice(0, 80);
     if (body.uploadId) {
+      creationLock = await acquireAssetCreationLock(redis, user.id, body.uploadId);
+      if (!creationLock) return res.status(409).json({ error: "该素材正在注册，请稍后刷新素材库", code: "ASSET_REGISTRATION_IN_PROGRESS", requestId: res.locals.requestId });
       const existing = users.readUserAssetByUpload(user.id, body.uploadId);
       if (existing) return res.status(201).json(publicUserAsset(existing));
       const media = users.readUpload(body.uploadId);
       if (!media || media.ownerId !== user.id) return res.status(404).json({ error: "引用素材不存在或已过期" });
-      url = signedObjectUrl(media.objectKey, { expires: 24 * 3600, fileName: media.fileName });
+      url = await resolveUploadMediaUrl(media);
+      assetType = media.contentType.startsWith("video/") ? "Video" : media.contentType.startsWith("audio/") ? "Audio" : "Image";
+      providerName = media.fileName.slice(0, 80);
     }
-    const created = await callAssetApi<ProviderAssetRecord>("CreateAsset", { GroupId: groupId, URL: url, AssetType: body.type, Name: body.name });
+    const created = await callAssetApi<ProviderAssetRecord>("CreateAsset", { GroupId: groupId, URL: url, AssetType: assetType, Name: providerName });
     if (!created.Id?.startsWith("asset-")) throw new Error("素材服务未返回有效资产 ID");
     const now = Date.now();
-    const asset: UserAsset = { id: created.Id, ownerId: user.id, groupId, uploadId: body.uploadId, name: created.Name ?? body.name, assetType: created.AssetType ?? body.type, status: created.Status ?? "Processing", url: created.URL, createdAt: now, updatedAt: now };
+    const asset: UserAsset = { id: created.Id, ownerId: user.id, groupId, uploadId: body.uploadId, name: created.Name ?? providerName, assetType: created.AssetType ?? assetType, status: created.Status ?? "Processing", url: created.URL, createdAt: now, updatedAt: now };
     users.upsertUserAsset(asset);
     console.info(JSON.stringify({ type: "user_asset_mutation", action: "create_asset", userId: user.id, assetId: asset.id, at: new Date().toISOString() }));
     res.status(201).json(publicUserAsset(asset));
@@ -516,7 +620,7 @@ app.post("/api/assets", requireAuth, async (req, res) => {
     }
     console.warn(JSON.stringify({ type: "asset_create_failed", at: new Date().toISOString(), userId: auditUserId, uploadId: auditUploadId, message: message.slice(0, 300) }));
     respondError(res, error, 502);
-  }
+  } finally { if (creationLock) await releaseAssetCreationLock(redis, creationLock).catch(() => undefined); }
 });
 app.post("/api/assets/bulk-delete", requireAuth, async (req, res) => {
   try {

@@ -11,6 +11,11 @@ const positiveInt = (name: string, fallback: number) => {
   if (!Number.isInteger(value) || value <= 0) throw new Error(`Invalid environment variable: ${name}`);
   return value;
 };
+const boundedInt = (name: string, fallback: number, minimum: number, maximum: number) => {
+  const value = positiveInt(name, fallback);
+  if (value < minimum || value > maximum) throw new Error(`Invalid environment variable: ${name} must be between ${minimum} and ${maximum}`);
+  return value;
+};
 
 export const config = {
   port: Number(process.env.PORT ?? 8090),
@@ -36,6 +41,7 @@ export const config = {
   authRequestTimeoutMs: positiveInt("AUTH_REQUEST_TIMEOUT_MS", 15000),
   generationConcurrency: positiveInt("GENERATION_CONCURRENCY", 4),
   maxActiveGenerationsPerUser: positiveInt("MAX_ACTIVE_GENERATIONS_PER_USER", 4),
+  maxActiveUploadsPerUser: boundedInt("MAX_ACTIVE_UPLOADS_PER_USER", 6, 1, 20),
   assetRegistrationConcurrency: positiveInt("ASSET_REGISTRATION_CONCURRENCY", 4),
   mediaStorageBackend: process.env.MEDIA_STORAGE_BACKEND ?? "legacy",
   tosAccessKeyId: process.env.TOS_ACCESS_KEY_ID ?? "",
@@ -46,8 +52,8 @@ export const config = {
   tosPreviewTtlSeconds: positiveInt("TOS_PREVIEW_TTL_SECONDS", 7200),
   tosDownloadTtlSeconds: positiveInt("TOS_DOWNLOAD_TTL_SECONDS", 43200),
   tosInputRetentionDays: positiveInt("TOS_INPUT_RETENTION_DAYS", 7),
-  tosUploadPartSize: positiveInt("TOS_UPLOAD_PART_SIZE", 16 * 1024 * 1024),
-  tosUploadConcurrency: positiveInt("TOS_UPLOAD_CONCURRENCY", 3),
+  tosUploadPartSize: boundedInt("TOS_UPLOAD_PART_SIZE", 16 * 1024 * 1024, 5 * 1024 * 1024, 64 * 1024 * 1024),
+  tosUploadConcurrency: boundedInt("TOS_UPLOAD_CONCURRENCY", 3, 1, 6),
   tosRequestTimeoutMs: positiveInt("TOS_REQUEST_TIMEOUT_MS", 60000),
   tosUploadRequestTimeoutMs: positiveInt("TOS_UPLOAD_REQUEST_TIMEOUT_MS", 180000),
   tosTranscodeDeadlineMs: positiveInt("TOS_TRANSCODE_DEADLINE_MS", 10 * 60 * 1000),

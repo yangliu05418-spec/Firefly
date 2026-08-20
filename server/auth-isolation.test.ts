@@ -79,6 +79,16 @@ describe("enterprise identity and isolation", () => {
     store.close();
   });
 
+  it("atomically enforces the per-user active generation limit", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-generation-limit-")); directories.push(directory);
+    const store = openStore(path.join(directory, "firefly.db"));
+    const owner = store.upsertFromFeishu({ openId: "ou_limit", unionId: "on_limit", tenantKey: "tenant-dokuai", email: "limit@dokuai.tv", name: "Limit", avatarUrl: "" });
+    expect(store.createTaskWithinLimit(task({ id: "task-limit-1", ownerId: owner.id }), 1)).toBe(true);
+    expect(store.createTaskWithinLimit(task({ id: "task-limit-2", ownerId: owner.id }), 1)).toBe(false);
+    expect(store.readTask("task-limit-2")).toBeNull();
+    store.close();
+  });
+
   it("refuses a legacy media-table rebuild during an online migration", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-preview-migration-")); directories.push(directory);
     const databasePath = path.join(directory, "legacy.db");
@@ -109,7 +119,7 @@ describe("enterprise identity and isolation", () => {
     archive("ignore-expired", { sourceVideoExpiresAt: now - 1 });
     archive("ignore-ready");
     store.upsertMedia({ id: "ready-output", ownerId: owner.id, taskId: "ignore-ready", kind: "output", objectKey: "outputs/ready.mp4", status: "ready", fileName: "result.mp4", contentType: "video/mp4", size: 10, etag: "etag", createdAt: now, updatedAt: now });
-    expect(store.recoverableMediaTasks(now + 5 * 60_000, now - 30 * 60_000).map((item) => item.id).sort()).toEqual(["recover-failed", "recover-handoff-failed", "recover-legacy-fallback", "recover-stale"]);
+    expect(store.recoverableMediaTasks(now + 5 * 60_000, now - 30 * 60_000).map((item) => item.id).sort()).toEqual(["ignore-ready", "recover-failed", "recover-handoff-failed", "recover-legacy-fallback", "recover-stale"]);
     store.close();
   });
 
