@@ -5,10 +5,12 @@ dist-server
 .env
 .env.*
 密钥.txt
+APIKEY+MODEL.txt
 TOS Information.txt
 参考文档.txt
 firefly-release.tgz
 *.tgz
+*.tar.gz
 *.png
 output
 data

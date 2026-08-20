@@ -8,10 +8,13 @@ uploads/
 data/
 密钥.txt
 TOS Information.txt
+APIKEY+MODEL.txt
+参考文档.txt
 *.log
 
 # 发布产物与截图（体积大且可从构建恢复）
 *.tgz
+*.tar.gz
 *.png
 
 # 本地工具与测试产物
