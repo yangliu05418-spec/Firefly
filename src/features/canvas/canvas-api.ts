@@ -1,5 +1,6 @@
 import { api, notifySignedOut } from "../../api";
 import type { CanvasDocument, CanvasListResult, CanvasMediaRef, CanvasProjectDetail } from "./canvas-types";
+import type { AnyCanvasDocument, CanvasDocumentV2 } from "./canvas-v2-types";
 
 const encode = (id: string) => encodeURIComponent(id);
 
@@ -59,3 +60,50 @@ export const saveCanvas = async (id: string, revision: number, document: CanvasD
   }
   return response.json();
 };
+
+export type CanvasV2ProjectDetail = Omit<CanvasProjectDetail, "document"> & { document: AnyCanvasDocument | null };
+export type CanvasLease = { acquired: true; token: string; ttlMs: number } | { acquired: false; holder?: { clientId: string; acquiredAt: number }; ttlMs: number };
+export type CanvasProjectAsset = {
+  id: string; canvasId: string; kind: "image" | "video" | "audio"; title: string; contentType: string; size: number;
+  width?: number; height?: number; durationMs?: number; status: "copying" | "ready" | "failed"; createdAt: number; updatedAt: number;
+  mediaUrl: string; downloadUrl: string;
+};
+export type CanvasJob = {
+  id: string; canvasId: string; nodeId: string; kind: "text" | "image" | "video" | "character_tool";
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; resultAssetId?: string; providerTaskId?: string;
+  partialText: string; error?: string; createdAt: number; updatedAt: number;
+};
+
+export const canvasV2Config = () => api.get<{ enabled: boolean }>("/api/canvas/config");
+export const getCanvasV2 = (id: string) => api.get<CanvasV2ProjectDetail>(`/api/canvases/${encode(id)}`);
+export const acquireCanvasLease = (id: string, clientId: string, takeover = false) => api.post<CanvasLease>(`/api/canvases/${encode(id)}/lease`, { clientId, takeover });
+export const renewCanvasLease = (id: string, clientId: string, token: string) => fetch(`/api/canvases/${encode(id)}/lease`, { method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clientId, token }) });
+export const releaseCanvasLease = (id: string, clientId: string, token: string) => fetch(`/api/canvases/${encode(id)}/lease`, { method: "DELETE", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clientId, token }), keepalive: true });
+
+export const saveCanvasV2 = async (id: string, revision: number, document: CanvasDocumentV2, leaseToken: string): Promise<CanvasV2ProjectDetail> => {
+  const response = await fetch(`/api/canvases/${encode(id)}`, { method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-Canvas-Lease": leaseToken }, body: JSON.stringify({ revision, document }) });
+  if (response.status === 401) { notifySignedOut(); throw new Error("登录已过期，请重新登录"); }
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({})) as { error?: string; currentRevision?: number; code?: string };
+    const error = new Error(body.error ?? `保存失败 (${response.status})`) as CanvasSaveError & { code?: string };
+    error.status = response.status; error.currentRevision = body.currentRevision; error.code = body.code;
+    throw error;
+  }
+  return response.json();
+};
+
+export const listCanvasAssets = (canvasId: string) => api.get<{ Items: CanvasProjectAsset[]; HasMore: boolean }>(`/api/canvases/${encode(canvasId)}/assets?limit=100`);
+export const importCanvasProjectAsset = (canvasId: string, body: { kind: "generation"; taskId: string } | { kind: "upload"; uploadId: string } | { kind: "generated"; mediaId: string } | { kind: "user_asset"; assetId: string }) => api.post<CanvasMediaImportResult & { projectAsset: CanvasProjectAsset }>(`/api/canvases/${encode(canvasId)}/media`, body);
+export const listCanvasJobs = (canvasId: string, updatedAfter = 0) => api.get<{ Items: CanvasJob[] }>(`/api/canvases/${encode(canvasId)}/jobs?updatedAfter=${updatedAfter}`);
+export const createCanvasJob = (canvasId: string, body: unknown) => api.post<CanvasJob>(`/api/canvases/${encode(canvasId)}/jobs`, body);
+export const cancelCanvasJob = (canvasId: string, jobId: string) => api.post<CanvasJob>(`/api/canvases/${encode(canvasId)}/jobs/${encode(jobId)}/cancel`, {});
+
+export type MontageClip = { id: string; projectAssetId: string; startMs: number; durationMs: number; trimStartMs: number; trimEndMs: number; muted?: boolean };
+export type MontageTimeline = { video: MontageClip[]; audio: Omit<MontageClip, "muted">[]; settings: { width: number; height: number; fps: number } };
+export type CanvasMontage = { id: string; canvasId: string; revision: number; timeline: MontageTimeline; createdAt: number; updatedAt: number };
+export const createCanvasMontage = (canvasId: string, timeline: MontageTimeline) => api.post<CanvasMontage>(`/api/canvases/${encode(canvasId)}/montages`, { timeline });
+export const updateCanvasMontage = (canvasId: string, montageId: string, revision: number, timeline: MontageTimeline) => fetch(`/api/canvases/${encode(canvasId)}/montages/${encode(montageId)}`, { method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ revision, timeline }) }).then(async (response) => { if (!response.ok) throw new Error((await response.json().catch(() => ({})) as { error?: string }).error ?? "Montage 保存失败"); return response.json() as Promise<CanvasMontage>; });
+export const createCanvasExport = (canvasId: string, montageId: string, fileSize = 1) => api.post<{ id: string; partSize: number; parts: { partNumber: number; url: string }[] }>(`/api/canvases/${encode(canvasId)}/montages/${encode(montageId)}/exports`, { fileSize });
+export const signCanvasExportParts = (canvasId: string, exportId: string, partNumbers: number[]) => api.post<{ parts: { partNumber: number; url: string }[] }>(`/api/canvases/${encode(canvasId)}/exports/${encode(exportId)}/parts/sign`, { partNumbers });
+export const completeCanvasExport = (canvasId: string, exportId: string, parts: { partNumber: number; etag: string }[]) => api.post<{ id: string; status: string; projectAsset: CanvasProjectAsset }>(`/api/canvases/${encode(canvasId)}/exports/${encode(exportId)}/complete`, { parts });
+export const cancelCanvasExport = (canvasId: string, exportId: string) => api.delete<void>(`/api/canvases/${encode(canvasId)}/exports/${encode(exportId)}`);

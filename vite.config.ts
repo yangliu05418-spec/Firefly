@@ -7,5 +7,6 @@ export default defineConfig({
     port: 5173,
     proxy: { "/api": "http://localhost:8090", "/media": "http://localhost:8090" }
   },
+  worker: { format: "es" },
   build: { outDir: "dist-web" }
 });

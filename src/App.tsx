@@ -6,7 +6,7 @@ import type { AssetCategory, CreationMode, ImageGenResponse, ImageModel, ImageRe
 import { materializePromptReferences, promptAssetLabel, promptAssetMarker } from "./prompt-references";
 import { clearEditorSelection } from "./prompt-selection";
 import { CanvasProjectList } from "./features/canvas/CanvasProjectList";
-import { CanvasWorkspace } from "./features/canvas/CanvasWorkspace";
+import { CanvasWorkspaceGate as CanvasWorkspace } from "./features/canvas/CanvasWorkspaceGate";
 import { CanvasInsertPicker } from "./features/canvas/CanvasInsertPicker";
 
 const modeLabels: Record<CreationMode, string> = { omni: "全能参考", first_frame: "首帧生成", first_last: "首尾帧", edit: "视频编辑", extend: "视频续写", text: "文本生成" };

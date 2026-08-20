@@ -1,0 +1,600 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  addEdge, Background, BackgroundVariant, MarkerType, MiniMap, ReactFlow, ReactFlowProvider, useEdgesState, useNodesState, useReactFlow,
+  type Connection, type Edge, type NodeChange,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import dagre from "@dagrejs/dagre";
+import { Archive, Check, ChevronDown, CircleHelp, Copy, Download, Focus, Grid2X2, Group as GroupIcon, ImageIcon, LayoutDashboard, Library, LoaderCircle, LockKeyhole, Map as MapIcon, MousePointer2, Move, Plus, Redo2, RefreshCw, ScanFace, Scissors, Search, Sparkles, TextCursorInput, Undo2, Ungroup, Upload, Users, Video, WandSparkles, X, ZoomIn, ZoomOut } from "lucide-react";
+import { api, inferUploadType, uploadFile } from "../../../api";
+import type { ImageModel, LibraryAsset, ModelCapability } from "../../../types";
+import {
+  acquireCanvasLease, cancelCanvasJob, createCanvasJob, getCanvasV2, importCanvasProjectAsset, listCanvasAssets, listCanvasJobs,
+  releaseCanvasLease, renewCanvasLease, saveCanvasV2, type CanvasJob, type CanvasProjectAsset,
+} from "../canvas-api";
+import { canCreateFromNode, createCanvasNodeV2, defaultCanvasDocumentV2, NODE_CONNECTION_MATRIX, toCanvasDocumentV2, type CanvasDocumentV2, type CanvasNodeTypeV2, type CanvasNodeV2 } from "../canvas-v2-types";
+import { deleteCanvasDraft, readCanvasDraft, writeCanvasDraft } from "./canvas-draft";
+import { CanvasV2Node, type CanvasFlowData, type CanvasFlowNode } from "./CanvasV2Node";
+import { CanvasMontage } from "./CanvasMontage";
+
+type SaveState = "saved" | "draft" | "saving" | "offline" | "conflict" | "error";
+type CreateMenu = { sourceId?: string; side?: "left" | "right"; screen: { x: number; y: number }; position?: { x: number; y: number } };
+type ComposerState = { nodeId: string; prompt: string; kind: "text" | "image" | "video" | "character_tool"; model: string; ratio: string; resolution: string; duration: number; tool: "turnaround" | "closeup" | "expressions" | "portrait"; portraitStyle: string; strength: "轻" | "标准" | "强"; textAction: "replace_selection" | "append" | "overwrite"; selectionText: string };
+const nodeTypes = { character: CanvasV2Node, scene: CanvasV2Node, text: CanvasV2Node, image: CanvasV2Node, video: CanvasV2Node, group: CanvasV2Node, "legacy-audio": CanvasV2Node };
+const creatableTypes = ["character", "scene", "video", "image", "text"] as const;
+const typeLabels: Record<CanvasNodeTypeV2, string> = { character: "角色", scene: "场景", video: "视频", image: "图片", text: "文本", group: "分组", "legacy-audio": "旧音频" };
+const typeIcons: Record<string, typeof ImageIcon> = { character: ScanFace, scene: LayoutDashboard, video: Video, image: ImageIcon, text: TextCursorInput, group: Users };
+
+const clientId = () => {
+  const key = "firefly-canvas-client-id";
+  const current = sessionStorage.getItem(key);
+  if (current) return current;
+  const created = `canvas-client-${crypto.randomUUID()}`;
+  sessionStorage.setItem(key, created);
+  return created;
+};
+
+const edgeStyle = { stroke: "rgba(186, 204, 201, .48)", strokeWidth: 1.35 };
+const toEdge = (edge: CanvasDocumentV2["connections"][number]): Edge => ({ ...edge, type: "bezier", markerEnd: { type: MarkerType.ArrowClosed, width: 12, height: 12, color: "rgba(186, 204, 201, .5)" }, style: edgeStyle });
+
+function Workspace({ canvasId, navigate }: { canvasId: string; navigate: (path: string) => void }) {
+  const flow = useReactFlow<CanvasFlowNode, Edge>();
+  const [nodes, setNodes, onNodesChangeBase] = useNodesState<CanvasFlowNode>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const [projectTitle, setProjectTitle] = useState("未命名画布");
+  const [revision, setRevision] = useState(0);
+  const revisionRef = useRef(0);
+  const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
+  const [message, setMessage] = useState("");
+  const [saveState, setSaveState] = useState<SaveState>("saved");
+  const [leaseToken, setLeaseToken] = useState("");
+  const leaseTokenRef = useRef("");
+  const [readOnly, setReadOnly] = useState(false);
+  const [draftCandidate, setDraftCandidate] = useState<Awaited<ReturnType<typeof readCanvasDraft>> | null>(null);
+  const [createMenu, setCreateMenu] = useState<CreateMenu | null>(null);
+  const [assetPanel, setAssetPanel] = useState(false);
+  const [assets, setAssets] = useState<CanvasProjectAsset[]>([]);
+  const [assetTab, setAssetTab] = useState<"project" | "global">("project");
+  const [globalAssets, setGlobalAssets] = useState<LibraryAsset[]>([]);
+  const [videoModels, setVideoModels] = useState<ModelCapability[]>([]);
+  const [imageModels, setImageModels] = useState<ImageModel[]>([]);
+  const [imageRatios, setImageRatios] = useState<string[]>([]);
+  const [assetSearch, setAssetSearch] = useState("");
+  const [uploading, setUploading] = useState<{ name: string; progress: number; error?: string }[]>([]);
+  const [composer, setComposer] = useState<ComposerState | null>(null);
+  const [inspectAsset, setInspectAsset] = useState<CanvasProjectAsset | null>(null);
+  const [montageOpen, setMontageOpen] = useState(false);
+  const [edgesHidden, setEdgesHidden] = useState(false);
+  const [snapToGrid, setSnapToGrid] = useState(true);
+  const [minimapOpen, setMinimapOpen] = useState(true);
+  const [panMode, setPanMode] = useState(false);
+  const [mobile, setMobile] = useState(matchMedia("(max-width: 820px)").matches);
+  const initialized = useRef(false);
+  const localDraftTimer = useRef<number | undefined>(undefined);
+  const serverSaveTimer = useRef<number | undefined>(undefined);
+  const saving = useRef<Promise<void> | null>(null);
+  const saveAgain = useRef(false);
+  const latestDocument = useRef<CanvasDocumentV2>(defaultCanvasDocumentV2());
+  const history = useRef<CanvasDocumentV2[]>([]);
+  const historyCursor = useRef(-1);
+  const historyTimer = useRef<number | undefined>(undefined);
+  const restoringHistory = useRef(false);
+  const copiedSelection = useRef<{ nodes: CanvasNodeV2[]; edges: Array<{ source: string; target: string }> } | null>(null);
+  const extractFrameRef = useRef<(id: string) => void>(() => undefined);
+  const textSelections = useRef(new Map<string, string>());
+  const cid = useMemo(clientId, []);
+
+  const patchNode = useCallback((id: string, patch: Partial<CanvasNodeV2["data"]>) => {
+    setNodes((current) => current.map((node) => node.id === id ? { ...node, data: { ...node.data, domain: { ...node.data.domain, data: { ...node.data.domain.data, ...patch } } } } : node));
+  }, [setNodes]);
+
+  const openComposer = useCallback((id: string) => {
+    const node = flow.getNode(id);
+    if (!node || readOnly) return;
+    const kind = node.data.domain.type === "text" ? "text" : node.data.domain.type === "video" ? "video" : node.data.domain.type === "character" ? "character_tool" : "image";
+    const imageModel = imageModels[0];
+    const videoModel = videoModels[0];
+    if ((kind === "image" || kind === "character_tool") && !imageModel) return setMessage("图片模型能力尚未载入，请稍后重试");
+    if (kind === "video" && !videoModel) return setMessage("视频模型能力尚未载入，请稍后重试");
+    const model = kind === "image" || kind === "character_tool" ? imageModel?.id ?? "" : videoModel?.id ?? "";
+    const ratio = kind === "video" ? (videoModel?.ratios.includes("adaptive") ? "adaptive" : videoModel?.ratios[0] ?? "16:9") : (imageRatios.includes("16:9") ? "16:9" : imageRatios[0] ?? "1:1");
+    const resolution = kind === "video" ? (videoModel?.resolutions.includes("1080p") ? "1080p" : videoModel?.resolutions[0] ?? "720p") : imageModel?.defaultResolution ?? "1024";
+    const duration = kind === "video" ? Math.max(videoModel?.duration[0] ?? 4, Math.min(6, videoModel?.duration[1] ?? 6)) : 6;
+    const selectionText = textSelections.current.get(id) ?? "";
+    setComposer({ nodeId: id, kind, prompt: node.data.domain.data.prompt ?? "", model, ratio, resolution, duration, tool: "turnaround", portraitStyle: "电影写实", strength: "标准", textAction: selectionText ? "replace_selection" : "overwrite", selectionText });
+  }, [flow, imageModels, imageRatios, readOnly, videoModels]);
+
+  const inspectNode = useCallback((id: string) => {
+    const assetId = flow.getNode(id)?.data.domain.data.projectAssetId;
+    setInspectAsset(assets.find((asset) => asset.id === assetId) ?? null);
+  }, [assets, flow]);
+
+  const cancelNodeJob = useCallback(async (id: string) => {
+    const jobId = flow.getNode(id)?.data.domain.data.jobId;
+    if (!jobId) return;
+    try {
+      await cancelCanvasJob(canvasId, jobId);
+      const node = flow.getNode(id)?.data.domain.data;
+      patchNode(id, { status: "idle", jobId: undefined, error: undefined, markdown: typeof node?.polarisBaseMarkdown === "string" ? node.polarisBaseMarkdown : node?.markdown });
+    }
+    catch (error) { setMessage(error instanceof Error ? error.message : "取消任务失败"); }
+  }, [canvasId, flow, patchNode]);
+
+  const openCreateFrom = useCallback((id: string, side: "left" | "right") => {
+    const node = flow.getNode(id);
+    if (!node) return;
+    const position = { x: node.position.x + (side === "right" ? (node.measured?.width ?? node.data.domain.width) + 130 : -430), y: node.position.y };
+    setCreateMenu({ sourceId: id, side, position, screen: { x: side === "right" ? innerWidth - 310 : 110, y: 150 } });
+  }, [flow]);
+
+  const attachCallbacks = useCallback((domain: CanvasNodeV2): CanvasFlowData => ({ domain, readOnly: readOnly || mobile, onChange: patchNode, onCreateFrom: openCreateFrom, onGenerate: openComposer, onInspect: inspectNode, onCancel: cancelNodeJob, onExtractFrame: (id) => extractFrameRef.current(id), onSelection: (id, text) => { if (text) textSelections.current.set(id, text); else textSelections.current.delete(id); } }), [cancelNodeJob, inspectNode, mobile, openComposer, openCreateFrom, patchNode, readOnly]);
+  const makeFlowNode = useCallback((domain: CanvasNodeV2): CanvasFlowNode => ({ id: domain.id, type: domain.type, position: domain.position, parentId: domain.parentId, extent: domain.parentId ? "parent" : undefined, width: domain.width, height: domain.height, data: attachCallbacks(domain) }), [attachCallbacks]);
+
+  useEffect(() => {
+    setNodes((current) => current.map((node) => ({ ...node, data: attachCallbacks(node.data.domain), draggable: !(readOnly || mobile) })));
+  }, [attachCallbacks, mobile, readOnly, setNodes]);
+
+  const documentFromFlow = useCallback((): CanvasDocumentV2 => ({
+    version: 2,
+    viewport: (() => { const viewport = flow.getViewport(); return { x: viewport.x, y: viewport.y, k: viewport.zoom }; })(),
+    background: "dots",
+    preferences: { edgesHidden, snapToGrid, minimapOpen, panMode },
+    nodes: flow.getNodes().map((node) => ({ ...node.data.domain, position: node.position, width: node.measured?.width ?? node.width ?? node.data.domain.width, height: node.measured?.height ?? node.height ?? node.data.domain.height, parentId: node.parentId })),
+    connections: flow.getEdges().map((edge) => ({ id: edge.id, source: edge.source, target: edge.target, sourceHandle: "right", targetHandle: "left", relation: "context" })),
+  }), [edgesHidden, flow, minimapOpen, panMode, snapToGrid]);
+
+  const hydrate = useCallback((document: CanvasDocumentV2) => {
+    setEdgesHidden(document.preferences.edgesHidden); setSnapToGrid(document.preferences.snapToGrid); setMinimapOpen(document.preferences.minimapOpen); setPanMode(document.preferences.panMode);
+    setNodes([...document.nodes].sort((left, right) => Number(right.type === "group") - Number(left.type === "group")).map(makeFlowNode)); setEdges(document.connections.map(toEdge));
+    requestAnimationFrame(() => flow.setViewport({ x: document.viewport.x, y: document.viewport.y, zoom: document.viewport.k }));
+    latestDocument.current = document;
+  }, [flow, makeFlowNode, setEdges, setNodes]);
+
+  const load = useCallback(async () => {
+    setLoadState("loading"); setMessage("");
+    try {
+      const mobileViewer = matchMedia("(max-width: 820px)").matches;
+      const [project, lease, localDraft] = await Promise.all([getCanvasV2(canvasId), mobileViewer ? Promise.resolve({ acquired: false as const, ttlMs: 30_000 }) : acquireCanvasLease(canvasId, cid), readCanvasDraft(canvasId).catch(() => undefined)]);
+      if (!project.document) throw new Error("画布文档无法解析");
+      const document = toCanvasDocumentV2(project.document);
+      setProjectTitle(project.title); setRevision(project.revision); revisionRef.current = project.revision;
+      if (lease.acquired) { setLeaseToken(lease.token); leaseTokenRef.current = lease.token; setReadOnly(false); }
+      else setReadOnly(true);
+      hydrate(document);
+      history.current = [structuredClone(document)]; historyCursor.current = 0;
+      if (localDraft && localDraft.savedAt > project.updatedAt && localDraft.revision >= project.revision) setDraftCandidate(localDraft);
+      initialized.current = true; setLoadState("ready");
+    } catch (error) { setMessage(error instanceof Error ? error.message : "画布暂时无法载入"); setLoadState("error"); }
+  }, [canvasId, cid, hydrate]);
+
+  const takeoverLease = async () => {
+    try {
+      const lease = await acquireCanvasLease(canvasId, cid, true);
+      if (!lease.acquired) throw new Error("暂时无法接管编辑权");
+      setLeaseToken(lease.token); leaseTokenRef.current = lease.token; setReadOnly(false); setSaveState("draft"); setMessage("已接管编辑，本地草稿仍保留");
+    } catch (error) { setMessage(error instanceof Error ? error.message : "接管失败"); }
+  };
+
+  useEffect(() => { void load(); return () => { initialized.current = false; }; }, [load]);
+  useEffect(() => {
+    let active = true;
+    Promise.all([
+      api.get<ModelCapability[]>("/api/models"),
+      api.get<{ Items: ImageModel[]; Ratios: string[] }>("/api/image-models"),
+    ]).then(([videos, images]) => {
+      if (!active) return;
+      setVideoModels(videos); setImageModels(images.Items); setImageRatios(images.Ratios);
+    }).catch(() => { if (active) setMessage("模型能力暂时无法载入，画布编辑不受影响"); });
+    return () => { active = false; };
+  }, []);
+  useEffect(() => { const media = matchMedia("(max-width: 820px)"); const update = () => setMobile(media.matches); media.addEventListener("change", update); return () => media.removeEventListener("change", update); }, []);
+  useEffect(() => {
+    if (!mobile || !leaseToken) return;
+    void releaseCanvasLease(canvasId, cid, leaseToken);
+    leaseTokenRef.current = ""; setLeaseToken(""); setReadOnly(true);
+  }, [canvasId, cid, leaseToken, mobile]);
+
+  const flushSave = useCallback(async () => {
+    if (!initialized.current || readOnly || !leaseTokenRef.current) return;
+    if (saving.current) { saveAgain.current = true; await saving.current; return; }
+    const run = async () => {
+      setSaveState(navigator.onLine ? "saving" : "offline");
+      const document = documentFromFlow(); latestDocument.current = document;
+      await writeCanvasDraft({ canvasId, revision: revisionRef.current, document, savedAt: Date.now() }).catch(() => undefined);
+      if (!navigator.onLine) return;
+      try {
+        const saved = await saveCanvasV2(canvasId, revisionRef.current, document, leaseTokenRef.current);
+        revisionRef.current = saved.revision; setRevision(saved.revision); setSaveState("saved");
+        await deleteCanvasDraft(canvasId).catch(() => undefined);
+      } catch (error) {
+        const typed = error as Error & { status?: number; code?: string };
+        if (typed.status === 409) { setSaveState("conflict"); setMessage(typed.message); }
+        else { setSaveState("error"); setMessage(typed.message); }
+      }
+    };
+    saving.current = run().finally(() => { saving.current = null; });
+    await saving.current;
+    if (saveAgain.current) { saveAgain.current = false; await flushSave(); }
+  }, [canvasId, documentFromFlow, readOnly]);
+
+  const scheduleSave = useCallback(() => {
+    if (!initialized.current || readOnly) return;
+    setSaveState("draft");
+    window.clearTimeout(localDraftTimer.current); window.clearTimeout(serverSaveTimer.current);
+    localDraftTimer.current = window.setTimeout(() => { const document = documentFromFlow(); latestDocument.current = document; void writeCanvasDraft({ canvasId, revision: revisionRef.current, document, savedAt: Date.now() }); }, 250);
+    serverSaveTimer.current = window.setTimeout(() => void flushSave(), 800);
+  }, [canvasId, documentFromFlow, flushSave, readOnly]);
+
+  useEffect(() => { if (initialized.current) scheduleSave(); }, [nodes, edges, edgesHidden, minimapOpen, panMode, scheduleSave, snapToGrid]);
+  useEffect(() => {
+    if (!leaseToken) return;
+    const renew = async () => {
+      const response = await renewCanvasLease(canvasId, cid, leaseToken);
+      if (!response.ok) { setReadOnly(true); setSaveState("conflict"); setMessage("另一个窗口已接管编辑，本地草稿仍安全保留"); }
+    };
+    const timer = window.setInterval(() => void renew(), 10_000);
+    const onVisibility = () => { if (document.visibilityState === "visible") void renew(); else void flushSave(); };
+    const onOnline = () => void flushSave();
+    document.addEventListener("visibilitychange", onVisibility); window.addEventListener("online", onOnline);
+    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", onVisibility); window.removeEventListener("online", onOnline); void releaseCanvasLease(canvasId, cid, leaseToken); };
+  }, [canvasId, cid, flushSave, leaseToken]);
+
+  const refreshAssets = useCallback(async () => {
+    const result = await listCanvasAssets(canvasId); setAssets(result.Items);
+    const byId = new Map(result.Items.map((asset) => [asset.id, asset]));
+    setNodes((current) => current.map((node) => {
+      const asset = node.data.domain.data.projectAssetId ? byId.get(node.data.domain.data.projectAssetId) : undefined;
+      if (!asset) return node;
+      const status = asset.status === "ready" ? "succeeded" : asset.status === "failed" ? "failed" : "running";
+      return { ...node, data: { ...node.data, domain: { ...node.data.domain, data: { ...node.data.domain.data, status, error: asset.status === "failed" ? "素材归档失败，可从资产面板重试上传" : undefined } } } };
+    }));
+  }, [canvasId, setNodes]);
+  useEffect(() => { if (loadState === "ready") void Promise.all([refreshAssets(), listCanvasJobs(canvasId).then(({ Items }) => Items.forEach((job) => applyJob(job)))]); }, [canvasId, loadState, refreshAssets]);
+  useEffect(() => {
+    if (!assets.some((asset) => asset.status === "copying")) return;
+    const timer = window.setTimeout(() => void refreshAssets(), document.hidden ? 10_000 : 1500);
+    return () => window.clearTimeout(timer);
+  }, [assets, refreshAssets]);
+
+  const applyJob = useCallback((job: CanvasJob) => {
+    setNodes((current) => {
+      const target = current.find((node) => node.id === job.nodeId);
+      if (!target) return current;
+      const status: CanvasNodeV2["data"]["status"] = job.status === "cancelled" ? "idle" : job.status;
+      const data = target.data.domain.data;
+      const base = typeof data.polarisBaseMarkdown === "string" ? data.polarisBaseMarkdown : data.markdown ?? "";
+      const selection = typeof data.polarisSelectionText === "string" ? data.polarisSelectionText : "";
+      const action = data.polarisAction;
+      const polarisMarkdown = action === "append" ? [base, job.partialText].filter(Boolean).join("\n\n") : action === "replace_selection" && selection && base.includes(selection) ? base.replace(selection, job.partialText) : job.partialText;
+      const patch = job.kind === "text" ? { status, jobId: job.id, markdown: job.partialText ? polarisMarkdown : data.markdown, error: job.error } : { status, jobId: job.id, projectAssetId: job.resultAssetId ?? data.projectAssetId, error: job.error };
+      return current.map((node) => node.id === job.nodeId ? { ...node, data: { ...node.data, domain: { ...node.data.domain, data: { ...node.data.domain.data, ...patch } } } } : node);
+    });
+    if (job.status === "succeeded" && job.resultAssetId) void refreshAssets();
+  }, [refreshAssets, setNodes]);
+
+  useEffect(() => {
+    if (loadState !== "ready") return;
+    const events = new EventSource(`/api/canvases/${encodeURIComponent(canvasId)}/events`);
+    events.addEventListener("canvas_job", (event) => { try { applyJob(JSON.parse((event as MessageEvent).data) as CanvasJob); } catch { /* ignore */ } });
+    return () => events.close();
+  }, [applyJob, canvasId, loadState]);
+
+  const onNodesChange = useCallback((changes: NodeChange<CanvasFlowNode>[]) => onNodesChangeBase(changes), [onNodesChangeBase]);
+  const onConnect = useCallback((connection: Connection) => {
+    if (readOnly || !connection.source || !connection.target || connection.source === connection.target) return;
+    const source = flow.getNode(connection.source)?.data.domain.type;
+    const target = flow.getNode(connection.target)?.data.domain.type;
+    if (!source || !target || !canCreateFromNode(source, target)) { setMessage("这两类节点不能建立上下文关系"); return; }
+    setEdges((current) => addEdge({ ...connection, id: `edge-${crypto.randomUUID()}`, sourceHandle: "right", targetHandle: "left", type: "bezier", markerEnd: { type: MarkerType.ArrowClosed, width: 12, height: 12 }, style: edgeStyle }, current));
+  }, [flow, readOnly, setEdges]);
+
+  const createNode = useCallback((type: (typeof creatableTypes)[number] | "group") => {
+    if (readOnly) return;
+    const menu = createMenu;
+    const source = menu?.sourceId ? flow.getNode(menu.sourceId) : undefined;
+    if (source && menu?.side === "right" && !canCreateFromNode(source.data.domain.type, type)) return;
+    if (source && menu?.side === "left" && !canCreateFromNode(type, source.data.domain.type)) return;
+    const position = menu?.position ?? flow.screenToFlowPosition({ x: innerWidth / 2, y: innerHeight / 2 });
+    const domain = createCanvasNodeV2(type, position);
+    setNodes((current) => [...current, makeFlowNode(domain)]);
+    if (source && menu?.side) setEdges((current) => [...current, toEdge({ id: `edge-${crypto.randomUUID()}`, source: menu.side === "right" ? source.id : domain.id, target: menu.side === "right" ? domain.id : source.id, sourceHandle: "right", targetHandle: "left", relation: "context" })]);
+    setCreateMenu(null);
+    requestAnimationFrame(() => flow.setNodes((current) => current.map((node) => ({ ...node, selected: node.id === domain.id }))));
+  }, [createMenu, flow, makeFlowNode, readOnly, setEdges, setNodes]);
+
+  const allowedCreateTypes = useMemo(() => {
+    if (!createMenu?.sourceId || !createMenu.side) return [...creatableTypes, "group" as const];
+    const sourceType = flow.getNode(createMenu.sourceId)?.data.domain.type;
+    if (!sourceType || sourceType === "group" || sourceType === "legacy-audio") return [];
+    return createMenu.side === "right" ? NODE_CONNECTION_MATRIX[sourceType] : creatableTypes.filter((type) => canCreateFromNode(type, sourceType));
+  }, [createMenu, flow]);
+
+  const selectedVideoAssets = useMemo(() => nodes.filter((node) => node.selected && node.data.domain.type === "video" && node.data.domain.data.projectAssetId).map((node) => assets.find((asset) => asset.id === node.data.domain.data.projectAssetId)).filter((asset): asset is CanvasProjectAsset => Boolean(asset)), [assets, nodes]);
+  const selectedAssets = useMemo(() => nodes.filter((node) => node.selected && node.data.domain.data.projectAssetId).map((node) => assets.find((asset) => asset.id === node.data.domain.data.projectAssetId)).filter((asset): asset is CanvasProjectAsset => Boolean(asset)), [assets, nodes]);
+  const selectedNodeCount = useMemo(() => nodes.filter((node) => node.selected).length, [nodes]);
+  const selectedGroupCount = useMemo(() => nodes.filter((node) => node.selected && node.data.domain.type === "group").length, [nodes]);
+  const activeVideoModel = composer?.kind === "video" ? videoModels.find((model) => model.id === composer.model) : undefined;
+  const activeImageModel = composer && (composer.kind === "image" || composer.kind === "character_tool") ? imageModels.find((model) => model.id === composer.model) : undefined;
+
+  useEffect(() => {
+    if (!initialized.current || restoringHistory.current) return;
+    window.clearTimeout(historyTimer.current);
+    historyTimer.current = window.setTimeout(() => {
+      const document = documentFromFlow();
+      const current = history.current[historyCursor.current];
+      if (current && JSON.stringify(current) === JSON.stringify(document)) return;
+      history.current = [...history.current.slice(0, historyCursor.current + 1), structuredClone(document)].slice(-50);
+      historyCursor.current = history.current.length - 1;
+    }, 420);
+    return () => window.clearTimeout(historyTimer.current);
+  }, [documentFromFlow, edges, edgesHidden, minimapOpen, nodes, panMode, snapToGrid]);
+
+  const restoreHistoryAt = (index: number) => {
+    const snapshot = history.current[index];
+    if (!snapshot) return;
+    restoringHistory.current = true; historyCursor.current = index; hydrate(structuredClone(snapshot));
+    window.setTimeout(() => { restoringHistory.current = false; }, 500);
+  };
+
+  const groupSelected = () => {
+    const selected = nodes.filter((node) => node.selected && !node.parentId && node.data.domain.type !== "group");
+    if (selected.length < 2) return setMessage("请至少选择两个未分组节点");
+    const left = Math.min(...selected.map((node) => node.position.x)) - 36;
+    const top = Math.min(...selected.map((node) => node.position.y)) - 54;
+    const right = Math.max(...selected.map((node) => node.position.x + (node.measured?.width ?? node.data.domain.width))) + 36;
+    const bottom = Math.max(...selected.map((node) => node.position.y + (node.measured?.height ?? node.data.domain.height))) + 36;
+    const domain = createCanvasNodeV2("group", { x: left, y: top }, { width: right - left, height: bottom - top, title: "镜头组" });
+    setNodes((current) => [
+      { ...makeFlowNode(domain), selected: true },
+      ...current.map((node) => selected.some((item) => item.id === node.id) ? { ...node, parentId: domain.id, extent: "parent" as const, selected: false, position: { x: node.position.x - left, y: node.position.y - top }, data: { ...node.data, domain: { ...node.data.domain, parentId: domain.id, position: { x: node.position.x - left, y: node.position.y - top } } } } : { ...node, selected: false }),
+    ]);
+  };
+
+  const ungroupSelected = () => {
+    const groups = nodes.filter((node) => node.selected && node.data.domain.type === "group");
+    if (!groups.length) return setMessage("请先选择一个分组");
+    const byId = new Map(groups.map((group) => [group.id, group]));
+    setNodes((current) => current.filter((node) => !byId.has(node.id)).map((node) => {
+      const parent = node.parentId ? byId.get(node.parentId) : undefined;
+      if (!parent) return node;
+      const position = { x: parent.position.x + node.position.x, y: parent.position.y + node.position.y };
+      return { ...node, parentId: undefined, extent: undefined, selected: true, position, data: { ...node.data, domain: { ...node.data.domain, parentId: undefined, position } } };
+    }));
+  };
+
+  const duplicateSelection = (source = copiedSelection.current) => {
+    const selectedFlow = source ? [] : nodes.filter((node) => node.selected);
+    const selected = source?.nodes ?? selectedFlow.map((node) => ({ ...structuredClone(node.data.domain), position: node.position, parentId: node.parentId }));
+    if (!selected.length) return;
+    const sourceEdges = source?.edges ?? edges.filter((edge) => selected.some((node) => node.id === edge.source) && selected.some((node) => node.id === edge.target)).map((edge) => ({ source: edge.source, target: edge.target }));
+    const ids = new Map(selected.map((node) => [node.id, `node-${crypto.randomUUID()}`]));
+    const copies = selected.map((node) => {
+      const id = ids.get(node.id)!; const parentId = node.parentId ? ids.get(node.parentId) : undefined;
+      const position = { x: node.position.x + 32, y: node.position.y + 32 };
+      const domain = { ...structuredClone(node), id, parentId, position };
+      return { ...makeFlowNode(domain), parentId, extent: parentId ? "parent" as const : undefined, selected: true };
+    });
+    setNodes((current) => [...current.map((node) => ({ ...node, selected: false })), ...copies]);
+    setEdges((current) => [...current, ...sourceEdges.map((edge) => ({ ...edge, id: `edge-${crypto.randomUUID()}`, source: ids.get(edge.source)!, target: ids.get(edge.target)! }))]);
+  };
+
+  const copySelection = () => {
+    const selected = nodes.filter((node) => node.selected);
+    if (!selected.length) return;
+    copiedSelection.current = {
+      nodes: selected.map((node) => ({ ...structuredClone(node.data.domain), position: node.position, parentId: node.parentId })),
+      edges: edges.filter((edge) => selected.some((node) => node.id === edge.source) && selected.some((node) => node.id === edge.target)).map((edge) => ({ source: edge.source, target: edge.target })),
+    };
+    setMessage(`已复制 ${selected.length} 个节点`);
+  };
+
+  const downloadSelected = () => {
+    for (const asset of selectedAssets) {
+      const anchor = document.createElement("a"); anchor.href = asset.downloadUrl; anchor.target = "_blank"; anchor.rel = "noopener"; anchor.click();
+    }
+    setMessage(`已将 ${selectedAssets.length} 个文件交给浏览器下载器`);
+  };
+
+  const submitComposer = async () => {
+    if (!composer) return;
+    let targetId = composer.nodeId;
+    const sourceNode = flow.getNode(composer.nodeId);
+    const domain = sourceNode?.data.domain;
+    const hasExistingContent = Boolean(domain && (domain.type === "text" ? domain.data.markdown?.trim() : domain.data.projectAssetId));
+    if (sourceNode && domain && hasExistingContent && composer.kind !== "text") {
+      const next = createCanvasNodeV2(domain.type === "legacy-audio" || domain.type === "group" ? "video" : domain.type, { x: sourceNode.position.x + (sourceNode.measured?.width ?? domain.width) + 140, y: sourceNode.position.y });
+      targetId = next.id;
+      setNodes((current) => [...current.map((node) => ({ ...node, selected: false })), { ...makeFlowNode(next), selected: true }]);
+      setEdges((current) => [...current, toEdge({ id: `edge-${crypto.randomUUID()}`, source: sourceNode.id, target: next.id, sourceHandle: "right", targetHandle: "left", relation: "context" })]);
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    }
+    if (composer.kind === "text" && sourceNode) patchNode(targetId, { polarisAction: composer.textAction, polarisBaseMarkdown: sourceNode.data.domain.data.markdown ?? "", polarisSelectionText: composer.selectionText });
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    await flushSave();
+    const currentRevision = revisionRef.current;
+    let body: unknown;
+    if (composer.kind === "text") body = { kind: "text", nodeId: targetId, revision: currentRevision, payload: { instruction: composer.prompt } };
+    else if (composer.kind === "image") body = { kind: "image", nodeId: targetId, revision: currentRevision, payload: { prompt: composer.prompt, model: composer.model, ratio: composer.ratio, resolution: composer.resolution, referenceAssetIds: [] } };
+    else if (composer.kind === "character_tool") body = { kind: "character_tool", nodeId: targetId, revision: currentRevision, payload: { tool: composer.tool, prompt: `${composer.prompt}\n人像质感：${composer.portraitStyle}；控制强度：${composer.strength}。`, model: composer.model, ratio: composer.ratio, resolution: composer.resolution, referenceAssetIds: [] } };
+    else {
+      const incoming = flow.getEdges().filter((edge) => edge.target === targetId).map((edge) => flow.getNode(edge.source)?.data.domain.data.projectAssetId).filter(Boolean);
+      body = { kind: "video", nodeId: targetId, revision: currentRevision, payload: { generation: { prompt: composer.prompt, model: composer.model, mode: incoming.length ? "omni" : "text", ratio: composer.ratio, resolution: composer.resolution, duration: composer.duration, generateAudio: true, seed: -1, cameraFixed: false, watermark: false, outputFormat: "mp4" }, references: [] } };
+    }
+    try { const job = await createCanvasJob(canvasId, body); applyJob(job); setComposer(null); }
+    catch (error) { setMessage(error instanceof Error ? error.message : "任务提交失败"); }
+  };
+
+  const insertAsset = useCallback((asset: CanvasProjectAsset) => {
+    const type = asset.kind === "video" ? "video" : asset.kind === "audio" ? "legacy-audio" : "image";
+    const position = flow.screenToFlowPosition({ x: innerWidth / 2, y: innerHeight / 2 });
+    const domain = createCanvasNodeV2(type === "legacy-audio" ? "video" : type, position, { title: asset.title, data: { projectAssetId: asset.id, mimeType: asset.contentType, durationMs: asset.durationMs, status: asset.status === "ready" ? "succeeded" : asset.status === "failed" ? "failed" : "running" } });
+    if (type === "legacy-audio") domain.type = "legacy-audio";
+    setNodes((current) => [...current, makeFlowNode(domain)]); setAssetPanel(false);
+  }, [flow, makeFlowNode, setNodes]);
+
+  const extractFrame = useCallback((nodeId: string) => {
+    const sourceNode = flow.getNode(nodeId);
+    const assetId = sourceNode?.data.domain.data.projectAssetId;
+    const sourceAsset = assets.find((asset) => asset.id === assetId && asset.kind === "video");
+    if (!sourceNode || !sourceAsset) return setMessage("视频素材尚未准备完成");
+    patchNode(nodeId, { status: "running", error: undefined });
+    const worker = new Worker(new URL("./frame-extract.worker.ts", import.meta.url), { type: "module" });
+    worker.onmessage = (event: MessageEvent<{ type: "complete"; buffer: ArrayBuffer; width: number; height: number } | { type: "error"; message: string }>) => {
+      if (event.data.type === "error") { patchNode(nodeId, { status: "succeeded", error: event.data.message }); setMessage(event.data.message); worker.terminate(); return; }
+      const extracted = event.data;
+      void (async () => {
+        const file = new File([extracted.buffer], `${sourceAsset.title.slice(0, 60) || "video"}-frame.webp`, { type: "image/webp" });
+        const uploaded = await uploadFile(file, "image", () => undefined);
+        const imported = await importCanvasProjectAsset(canvasId, { kind: "upload", uploadId: uploaded.uploadId ?? uploaded.id });
+        setAssets((current) => [imported.projectAsset, ...current.filter((asset) => asset.id !== imported.projectAsset.id)]);
+        const position = { x: sourceNode.position.x + (sourceNode.measured?.width ?? sourceNode.data.domain.width) + 140, y: sourceNode.position.y };
+        const domain = createCanvasNodeV2("image", position, { title: `${sourceAsset.title} · 抽帧`, data: { projectAssetId: imported.projectAsset.id, mimeType: imported.projectAsset.contentType, status: "succeeded" } });
+        setNodes((current) => [...current.map((node) => ({ ...node, selected: false })), { ...makeFlowNode(domain), selected: true }]);
+        setEdges((current) => [...current, toEdge({ id: `edge-${crypto.randomUUID()}`, source: nodeId, target: domain.id, sourceHandle: "right", targetHandle: "left", relation: "context" })]);
+        patchNode(nodeId, { status: "succeeded", error: undefined });
+      })().catch((error) => { patchNode(nodeId, { status: "succeeded", error: error instanceof Error ? error.message : "视频抽帧失败" }); setMessage(error instanceof Error ? error.message : "视频抽帧失败"); }).finally(() => worker.terminate());
+    };
+    worker.onerror = () => { patchNode(nodeId, { status: "succeeded", error: "视频抽帧线程异常" }); setMessage("视频抽帧线程异常"); worker.terminate(); };
+    worker.postMessage({ url: sourceAsset.mediaUrl, timestamp: Math.max(0, (sourceAsset.durationMs ?? 0) / 2000) });
+  }, [assets, canvasId, flow, makeFlowNode, patchNode, setEdges, setNodes]);
+  extractFrameRef.current = extractFrame;
+
+  const uploadAssets = async (files: FileList | null) => {
+    if (!files?.length) return;
+    const pending = Array.from(files).map((file) => ({ name: file.name, progress: 0 })); setUploading((old) => [...old, ...pending]);
+    await Promise.all(Array.from(files).map(async (file) => {
+      const kind = inferUploadType(file);
+      if (!kind) return setUploading((old) => old.map((item) => item.name === file.name ? { ...item, error: "不支持的文件类型" } : item));
+      try {
+        const uploaded = await uploadFile(file, kind, (progress) => setUploading((old) => old.map((item) => item.name === file.name ? { ...item, progress } : item)));
+        const imported = await importCanvasProjectAsset(canvasId, { kind: "upload", uploadId: uploaded.uploadId ?? uploaded.id });
+        setAssets((old) => [imported.projectAsset, ...old.filter((item) => item.id !== imported.projectAsset.id)]);
+        setUploading((old) => old.filter((item) => item.name !== file.name));
+      } catch (error) { setUploading((old) => old.map((item) => item.name === file.name ? { ...item, error: error instanceof Error ? error.message : "上传失败" } : item)); }
+    }));
+  };
+
+  const loadGlobalAssets = useCallback(async () => {
+    const result = await api.get<{ Items: LibraryAsset[] }>(`/api/assets?q=${encodeURIComponent(assetSearch)}&pageSize=100`);
+    setGlobalAssets(result.Items);
+  }, [assetSearch]);
+  useEffect(() => { if (assetPanel && assetTab === "global") void loadGlobalAssets(); }, [assetPanel, assetTab, loadGlobalAssets]);
+
+  const importGlobal = async (asset: LibraryAsset) => {
+    const result = await importCanvasProjectAsset(canvasId, { kind: "user_asset", assetId: asset.Id });
+    setAssets((old) => [result.projectAsset, ...old.filter((item) => item.id !== result.projectAsset.id)]); insertAsset(result.projectAsset);
+  };
+
+  const layout = () => {
+    const graph = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({})); graph.setGraph({ rankdir: "LR", nodesep: 60, ranksep: 120 });
+    for (const node of nodes) graph.setNode(node.id, { width: node.measured?.width ?? 300, height: node.measured?.height ?? 240 });
+    for (const edge of edges) graph.setEdge(edge.source, edge.target);
+    try { dagre.layout(graph); setNodes((current) => current.map((node) => { const point = graph.node(node.id); return point ? { ...node, position: { x: point.x - (node.measured?.width ?? 300) / 2, y: point.y - (node.measured?.height ?? 240) / 2 } } : node; })); requestAnimationFrame(() => void flow.fitView({ padding: .18, duration: 500 })); }
+    catch { /* cyclic/invalid graph remains untouched */ }
+  };
+
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input,textarea,[contenteditable=true],[role=dialog]") || readOnly) return;
+      const mod = event.metaKey || event.ctrlKey;
+      if (mod && event.key.toLowerCase() === "a") { event.preventDefault(); setNodes((current) => current.map((node) => ({ ...node, selected: true }))); }
+      if (mod && event.key.toLowerCase() === "z") { event.preventDefault(); restoreHistoryAt(Math.max(0, historyCursor.current + (event.shiftKey ? 1 : -1))); }
+      if (mod && event.key.toLowerCase() === "y") { event.preventDefault(); restoreHistoryAt(Math.min(history.current.length - 1, historyCursor.current + 1)); }
+      if (mod && event.key.toLowerCase() === "c") { event.preventDefault(); copySelection(); }
+      if (mod && event.key.toLowerCase() === "v") { event.preventDefault(); duplicateSelection(); }
+      if (mod && event.key.toLowerCase() === "d") { event.preventDefault(); duplicateSelection(null); }
+      if (mod && event.key.toLowerCase() === "g") { event.preventDefault(); event.shiftKey ? ungroupSelected() : groupSelected(); }
+      if (event.key === "Delete" || event.key === "Backspace") {
+        const selectedIds = new Set(nodes.filter((node) => node.selected).map((node) => node.id));
+        if (selectedIds.size) { setNodes((current) => current.filter((node) => !selectedIds.has(node.id) && (!node.parentId || !selectedIds.has(node.parentId)))); setEdges((current) => current.filter((edge) => !edge.selected && !selectedIds.has(edge.source) && !selectedIds.has(edge.target))); }
+      }
+      if (event.key === "Tab") { event.preventDefault(); setCreateMenu({ screen: { x: innerWidth / 2 - 120, y: innerHeight / 2 - 120 }, position: flow.screenToFlowPosition({ x: innerWidth / 2, y: innerHeight / 2 }) }); }
+      if (event.key === "Escape") { setCreateMenu(null); setComposer(null); setAssetPanel(false); }
+      if (mod && event.key === "0") { event.preventDefault(); void flow.fitView({ padding: .18, duration: 300 }); }
+      if ((event.altKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "f") { event.preventDefault(); layout(); }
+    };
+    window.addEventListener("keydown", keydown); return () => window.removeEventListener("keydown", keydown);
+  }, [edges, flow, nodes, readOnly, setEdges, setNodes]);
+
+  if (loadState === "loading") return <div className="canvas-v2-boot"><LoaderCircle className="spin" /> 正在唤醒画布</div>;
+  if (loadState === "error") return <div className="canvas-v2-boot canvas-v2-boot--error"><Archive /><b>画布暂时无法载入</b><span>{message}</span><button onClick={() => void load()}><RefreshCw /> 重试</button></div>;
+
+  return <main className="canvas-v2-workspace">
+    <header className="canvas-v2-header">
+      <button className="canvas-v2-brand" onClick={() => navigate("/studio/canvas")} title="回到全部项目"><span className="canvas-v2-brand__fly"><img src="/firefly-mark.svg" alt="" /></span><b>Firefly</b></button><i />
+      <input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} onBlur={() => { if (projectTitle.trim()) void api.patch(`/api/canvases/${encodeURIComponent(canvasId)}`, { title: projectTitle.trim() }); }} readOnly={readOnly || mobile} aria-label="项目名称" />
+      <span className={`canvas-v2-save canvas-v2-save--${saveState}`}>{readOnly || mobile ? <><LockKeyhole /> {mobile ? "移动端只读" : "只读模式"}</> : saveState === "saving" ? <><LoaderCircle className="spin" /> 保存中</> : saveState === "saved" ? <><Check /> 已保存</> : saveState === "offline" ? "离线草稿" : saveState === "conflict" ? "存在编辑冲突" : saveState === "error" ? "保存失败" : "本地草稿"}</span>{readOnly && !mobile && <button className="canvas-v2-takeover" onClick={() => void takeoverLease()}>接管编辑</button>}
+    </header>
+    <section className="canvas-v2-stage">
+      <ReactFlow<CanvasFlowNode, Edge>
+        nodes={nodes} edges={edgesHidden ? [] : edges} nodeTypes={nodeTypes} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect}
+        onPaneContextMenu={(event) => { event.preventDefault(); if (!readOnly) setCreateMenu({ screen: { x: event.clientX, y: event.clientY }, position: flow.screenToFlowPosition({ x: event.clientX, y: event.clientY }) }); }}
+        onPaneClick={() => setCreateMenu(null)} snapToGrid={snapToGrid} snapGrid={[20, 20]} panOnDrag={panMode ? true : [1, 2]} selectionOnDrag={!panMode} nodesDraggable={!readOnly && !mobile}
+        minZoom={.08} maxZoom={3} onlyRenderVisibleElements fitView deleteKeyCode={null} proOptions={{ hideAttribution: true }}>
+        <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="rgba(214,224,220,.14)" />
+        {minimapOpen && <MiniMap className="canvas-v2-minimap" pannable zoomable nodeColor={(node) => node.selected ? "#d9e5df" : "#4b5554"} maskColor="rgba(6,8,9,.68)" />}
+      </ReactFlow>
+      {!nodes.length && <div className="canvas-v2-empty"><span>点击快速新建</span><h1>让片段彼此照亮</h1><div>{creatableTypes.map((type) => { const Icon = typeIcons[type]; return <button key={type} onClick={() => createNode(type)}><Icon /><span>{typeLabels[type]}</span></button>; })}</div></div>}
+      <nav className="canvas-v2-pill" aria-label="画布工具">
+        <button className="canvas-v2-pill__add" onClick={(event) => setCreateMenu({ screen: { x: event.clientX + 16, y: event.clientY - 10 }, position: flow.screenToFlowPosition({ x: 150, y: innerHeight / 2 }) })} disabled={readOnly}><Plus /></button>
+        <button onClick={() => setAssetPanel(true)}><Library /><span>项目资产</span></button>
+        <button onClick={() => navigate("/studio/canvas/tutorial")}><CircleHelp /><span>帮助</span></button>
+      </nav>
+      <div className="canvas-v2-toolbar">
+        <button onClick={() => restoreHistoryAt(historyCursor.current - 1)} disabled={historyCursor.current <= 0} title="撤销"><Undo2 /></button><button onClick={() => restoreHistoryAt(historyCursor.current + 1)} disabled={historyCursor.current >= history.current.length - 1} title="重做"><Redo2 /></button><i /><button onClick={() => void flow.fitView({ padding: .18, duration: 350 })} title="适应画布"><Focus /></button><button onClick={() => setEdgesHidden((value) => !value)} className={edgesHidden ? "active" : ""} title="隐藏连线"><Sparkles /></button><button onClick={layout} title="整理画布"><LayoutDashboard /></button><button onClick={() => setMinimapOpen((value) => !value)} className={minimapOpen ? "active" : ""} title="小地图"><MapIcon /></button><button onClick={() => setSnapToGrid((value) => !value)} className={snapToGrid ? "active" : ""} title="网格吸附"><Grid2X2 /></button><button onClick={() => setPanMode((value) => !value)} className={panMode ? "active" : ""} title="移动画布">{panMode ? <Move /> : <MousePointer2 />}</button><i /><button onClick={() => flow.zoomOut({ duration: 180 })}><ZoomOut /></button><span>{Math.round(flow.getZoom() * 100)}%</span><button onClick={() => flow.zoomIn({ duration: 180 })}><ZoomIn /></button>
+      </div>
+      {selectedNodeCount > 0 && <div className="canvas-v2-selection-tools"><span>{selectedNodeCount} 个节点</span>{selectedNodeCount > 1 && !selectedGroupCount && <button onClick={groupSelected}><GroupIcon /> 成组</button>}{selectedGroupCount > 0 && <button onClick={ungroupSelected}><Ungroup /> 解组</button>}<button onClick={copySelection}><Copy /> 复制</button>{selectedAssets.length > 0 && <button onClick={downloadSelected}><Download /> 下载</button>}{selectedVideoAssets.length > 0 && <button onClick={() => setMontageOpen(true)}><Scissors /> Montage</button>}</div>}
+    </section>
+
+    {draftCandidate && <div className="canvas-v2-notice"><b>发现未同步的本地草稿</b><span>上次编辑可能在刷新或断网前尚未写入服务器。</span><button onClick={() => { hydrate(draftCandidate.document); setRevision(draftCandidate.revision); revisionRef.current = draftCandidate.revision; setDraftCandidate(null); setSaveState("draft"); }}>恢复草稿</button><button onClick={() => { void deleteCanvasDraft(canvasId); setDraftCandidate(null); }}>忽略</button></div>}
+    {message && saveState !== "saved" && <div className="canvas-v2-toast" role="status">{message}<button onClick={() => setMessage("")}><X /></button></div>}
+    {createMenu && <div className="canvas-v2-create-menu" style={{ left: Math.min(createMenu.screen.x, innerWidth - 250), top: Math.min(createMenu.screen.y, innerHeight - 360) }} role="menu"><header>{createMenu.side === "left" ? "添加上下文" : createMenu.side === "right" ? "引用该节点生成" : "添加节点"}</header>{allowedCreateTypes.map((type) => { const Icon = typeIcons[type]; return <button key={type} onClick={() => createNode(type)}><Icon /><span>{typeLabels[type]}</span><ChevronDown /></button>; })}</div>}
+
+    {assetPanel && <aside className="canvas-v2-assets" role="dialog" aria-label="画布资产"><header><div><b>资产</b><span>属于这个画布的素材不会随节点删除</span></div><button onClick={() => setAssetPanel(false)}><X /></button></header><nav><button className={assetTab === "project" ? "active" : ""} onClick={() => setAssetTab("project")}>项目资产</button><button className={assetTab === "global" ? "active" : ""} onClick={() => setAssetTab("global")}>全局资产库</button></nav><label className="canvas-v2-assets__search"><Search /><input value={assetSearch} onChange={(event) => setAssetSearch(event.target.value)} placeholder="搜索素材" /></label>{assetTab === "project" && <label className="canvas-v2-assets__upload"><Upload /><b>上传到项目</b><span>支持多选，上传完成后可立即插入</span><input type="file" multiple accept="image/*,video/mp4,video/quicktime,audio/mpeg,audio/wav" onChange={(event) => void uploadAssets(event.target.files)} /></label>}<div className="canvas-v2-assets__list">{uploading.map((item) => <div className="canvas-v2-assets__progress" key={item.name}><span>{item.name}</span><i><em style={{ width: `${item.progress}%` }} /></i><small>{item.error ?? `${item.progress}%`}</small></div>)}{assetTab === "project" ? assets.filter((asset) => asset.title.toLowerCase().includes(assetSearch.toLowerCase())).map((asset) => <button key={asset.id} onClick={() => insertAsset(asset)}><span className="canvas-v2-assets__thumb">{asset.kind === "video" ? <Video /> : asset.kind === "audio" ? <Sparkles /> : <img src={asset.mediaUrl} loading="lazy" alt="" />}</span><div><b>{asset.title}</b><small>{asset.kind === "video" ? "视频" : asset.kind === "audio" ? "音频" : "图片"}</small></div><Plus /></button>) : globalAssets.map((asset) => <button key={asset.Id} onClick={() => void importGlobal(asset)} disabled={asset.Status !== "Active"}><span className="canvas-v2-assets__thumb">{asset.URL ? <img src={asset.URL} loading="lazy" alt="" /> : <ImageIcon />}</span><div><b>{asset.Name}</b><small>{asset.Status === "Active" ? "可用" : "处理中"}</small></div><Plus /></button>)}</div></aside>}
+
+    {composer && <div className="canvas-v2-modal" role="dialog" aria-modal="true" aria-label="节点生成">
+      <div className="canvas-v2-composer">
+        <header><span><WandSparkles /></span><div><b>{composer.kind === "text" ? "Polaris 文本助手" : composer.kind === "video" ? "生成视频" : composer.kind === "character_tool" ? "角色专用工具" : "生成图片"}</b><small>已连接的左侧节点会自动成为上下文</small></div><button onClick={() => setComposer(null)} aria-label="关闭"><X /></button></header>
+        {composer.kind === "character_tool" && <div className="canvas-v2-character-tools">
+          <label>工具<select value={composer.tool} onChange={(event) => setComposer({ ...composer, tool: event.target.value as ComposerState["tool"] })}><option value="turnaround">角色三视图</option><option value="closeup">角色特写</option><option value="expressions">表情九宫格</option><option value="portrait">质感人像</option></select></label>
+          <label>质感<select value={composer.portraitStyle} onChange={(event) => setComposer({ ...composer, portraitStyle: event.target.value })}>{["电影写实", "自然纪实", "柔光胶片", "时尚棚拍", "古典油画", "低饱和叙事"].map((item) => <option key={item}>{item}</option>)}</select></label>
+          <label>强度<select value={composer.strength} onChange={(event) => setComposer({ ...composer, strength: event.target.value as ComposerState["strength"] })}><option>轻</option><option>标准</option><option>强</option></select></label>
+        </div>}
+        <textarea autoFocus value={composer.prompt} onChange={(event) => setComposer({ ...composer, prompt: event.target.value })} placeholder={composer.kind === "text" ? "说明希望如何改写或扩写…" : "描述希望生成的画面…"} />
+        {composer.kind === "text" && <div className="canvas-v2-text-actions" role="radiogroup" aria-label="Polaris 应用方式"><button className={composer.textAction === "replace_selection" ? "active" : ""} disabled={!composer.selectionText} onClick={() => setComposer({ ...composer, textAction: "replace_selection" })}>替换选区</button><button className={composer.textAction === "append" ? "active" : ""} onClick={() => setComposer({ ...composer, textAction: "append" })}>追加</button><button className={composer.textAction === "overwrite" ? "active" : ""} onClick={() => setComposer({ ...composer, textAction: "overwrite" })}>覆盖节点</button></div>}
+        {composer.kind !== "text" && <div className="canvas-v2-composer__params">
+          <label>模型<select value={composer.model} onChange={(event) => {
+            const model = event.target.value;
+            if (composer.kind === "video") {
+              const spec = videoModels.find((item) => item.id === model);
+              setComposer({ ...composer, model, ratio: spec?.ratios.includes(composer.ratio) ? composer.ratio : spec?.ratios[0] ?? composer.ratio, resolution: spec?.resolutions.includes(composer.resolution) ? composer.resolution : spec?.resolutions[0] ?? composer.resolution, duration: Math.max(spec?.duration[0] ?? 4, Math.min(composer.duration, spec?.duration[1] ?? composer.duration)) });
+            } else {
+              const spec = imageModels.find((item) => item.id === model);
+              setComposer({ ...composer, model, resolution: spec?.resolutions.includes(composer.resolution) ? composer.resolution : spec?.defaultResolution ?? composer.resolution });
+            }
+          }}>{(composer.kind === "video" ? videoModels : imageModels).map((model) => <option value={model.id} key={model.id}>{model.name}</option>)}</select></label>
+          <label>画幅<select value={composer.ratio} onChange={(event) => setComposer({ ...composer, ratio: event.target.value })}>{(composer.kind === "video" ? activeVideoModel?.ratios ?? [] : imageRatios).map((ratio) => <option key={ratio}>{ratio}</option>)}</select></label>
+          <label>清晰度<select value={composer.resolution} onChange={(event) => setComposer({ ...composer, resolution: event.target.value })}>{(composer.kind === "video" ? activeVideoModel?.resolutions ?? [] : activeImageModel?.resolutions ?? []).map((resolution) => <option key={resolution}>{resolution}</option>)}</select></label>
+          {composer.kind === "video" && <label>时长<select value={composer.duration} onChange={(event) => setComposer({ ...composer, duration: Number(event.target.value) })}>{Array.from({ length: (activeVideoModel?.duration[1] ?? 6) - (activeVideoModel?.duration[0] ?? 4) + 1 }, (_, index) => (activeVideoModel?.duration[0] ?? 4) + index).map((duration) => <option value={duration} key={duration}>{duration} 秒</option>)}</select></label>}
+        </div>}
+        <footer>{flow.getEdges().filter((edge) => edge.target === composer.nodeId).length > 0 && <span>{flow.getEdges().filter((edge) => edge.target === composer.nodeId).length} 个引用上下文</span>}<button onClick={() => setComposer(null)}>取消</button><button className="primary" disabled={!composer.prompt.trim()} onClick={() => void submitComposer()}><WandSparkles /> 开始生成</button></footer>
+      </div>
+    </div>}
+    {inspectAsset && <div className="canvas-v2-modal" role="dialog" aria-modal="true" onClick={() => setInspectAsset(null)}><div className="canvas-v2-inspect" onClick={(event) => event.stopPropagation()}>{inspectAsset.kind === "video" ? <video src={inspectAsset.mediaUrl} controls autoPlay /> : <img src={inspectAsset.mediaUrl} alt={inspectAsset.title} />}<footer><b>{inspectAsset.title}</b><a href={inspectAsset.downloadUrl}><Download /> 下载</a><button onClick={() => setInspectAsset(null)}><X /></button></footer></div></div>}
+    {montageOpen && <CanvasMontage canvasId={canvasId} initialAssets={selectedVideoAssets} allAssets={assets} onClose={() => setMontageOpen(false)} onComplete={(asset) => {
+      setAssets((current) => [asset, ...current.filter((item) => item.id !== asset.id)]);
+      const selected = flow.getNodes().filter((node) => node.selected && node.data.domain.type === "video");
+      const x = Math.max(...selected.map((node) => node.position.x + (node.measured?.width ?? node.data.domain.width)), 0) + 150;
+      const y = selected[0]?.position.y ?? 0;
+      const domain = createCanvasNodeV2("video", { x, y }, { title: "Montage 导出", data: { projectAssetId: asset.id, mimeType: asset.contentType, durationMs: asset.durationMs, status: "succeeded" } });
+      setNodes((current) => [...current.map((node) => ({ ...node, selected: false })), { ...makeFlowNode(domain), selected: true }]);
+      setEdges((current) => [...current, ...selected.map((node) => toEdge({ id: `edge-${crypto.randomUUID()}`, source: node.id, target: domain.id, sourceHandle: "right", targetHandle: "left", relation: "context" }))]);
+      setMontageOpen(false);
+    }} />}
+  </main>;
+}
+
+export function CanvasV2Workspace(props: { canvasId: string; navigate: (path: string) => void }) {
+  return <ReactFlowProvider><Workspace {...props} /></ReactFlowProvider>;
+}
