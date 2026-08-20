@@ -2,6 +2,7 @@ import { memo, useEffect, useState } from "react";
 import { Handle, NodeResizer, Position, type Node, type NodeProps } from "@xyflow/react";
 import { Box, CircleStop, Clapperboard, Crop, Download, ImageIcon, Images, LoaderCircle, Maximize2, Plus, RotateCw, ScanFace, TextCursorInput, Users, WandSparkles } from "lucide-react";
 import type { CanvasNodeTypeV2, CanvasNodeV2 } from "../canvas-v2-types";
+import { LazyCanvasVideo } from "../components/media/LazyCanvasVideo";
 import { CanvasRichText } from "./CanvasRichText";
 
 export type CanvasFlowData = {
@@ -46,7 +47,7 @@ function CanvasV2NodeView({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       {domain.type === "text" ? <CanvasRichText value={domain.data.markdown ?? ""} richText={domain.data.richText} readOnly={readOnly} onChange={(markdown, richText) => data.onChange(id, { markdown, richText })} onSelection={(selectionText) => data.onSelection(id, selectionText)} /> :
         domain.type === "group" ? <div className="canvas-v2-node__group"><Users /><span>内容分组</span><small>拖动节点到这里整理镜头关系</small></div> :
         domain.type === "legacy-audio" ? mediaUrl ? <audio className="canvas-v2-node__media canvas-v2-node__audio" src={mediaUrl} controls preload="metadata" /> : <div className="canvas-v2-node__empty"><Icon /><span>{emptyCopy[domain.type]}</span></div> :
-        domain.type === "video" ? mediaUrl ? <video className="canvas-v2-node__media" style={mediaStyle} src={mediaUrl} controls playsInline preload="metadata" /> : <div className="canvas-v2-node__empty"><Icon /><span>{emptyCopy[domain.type]}</span></div> :
+        domain.type === "video" ? mediaUrl ? <LazyCanvasVideo src={mediaUrl} /> : <div className="canvas-v2-node__empty"><Icon /><span>{emptyCopy[domain.type]}</span></div> :
         mediaUrl && !imageError ? <img className="canvas-v2-node__media" style={mediaStyle} src={mediaUrl} alt={domain.title} loading="lazy" draggable={false} onError={() => setImageError(true)} /> : <div className="canvas-v2-node__empty"><Icon /><span>{imageError ? "素材暂时无法显示" : emptyCopy[domain.type]}</span></div>}
     </div>
     {selected && domain.type !== "group" && <footer className="canvas-v2-node__tools nodrag">

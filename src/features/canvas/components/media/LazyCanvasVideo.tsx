@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState } from "react";
 import { LoaderCircle, RefreshCw } from "lucide-react";
 
-type MediaState = "idle" | "loading" | "ready" | "error";
+type MediaState = "idle" | "loading" | "ready" | "buffering" | "error";
 
 export function LazyCanvasVideo({ src }: { src: string | null }) {
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -49,6 +49,7 @@ export function LazyCanvasVideo({ src }: { src: string | null }) {
   useEffect(() => {
     readyOnce.current = false;
     resumeTime.current = 0;
+    setRetryCount(0);
   }, [src]);
 
   useEffect(() => {
@@ -97,6 +98,13 @@ export function LazyCanvasVideo({ src }: { src: string | null }) {
             readyOnce.current = true;
             setState("ready");
           }}
+          onPlaying={() => setState("ready")}
+          onWaiting={(event) => {
+            if (readyOnce.current && !event.currentTarget.paused) setState("buffering");
+          }}
+          onStalled={(event) => {
+            if (readyOnce.current && !event.currentTarget.paused) setState("buffering");
+          }}
           onError={(event) => handleError(event.currentTarget)}
         />
       )}
@@ -111,10 +119,10 @@ export function LazyCanvasVideo({ src }: { src: string | null }) {
                 </button>
               )}
             </>
-          ) : state === "loading" ? (
+          ) : state === "loading" || state === "buffering" ? (
             <>
               <LoaderCircle className="spin" />
-              <b>正在载入视频</b>
+              <b>{state === "buffering" ? "正在继续缓冲" : "正在载入视频"}</b>
             </>
           ) : (
             <b>靠近时自动载入</b>
