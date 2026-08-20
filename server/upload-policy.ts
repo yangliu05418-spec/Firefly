@@ -53,7 +53,7 @@ export const tosMediaInfoViolation = (info: unknown, kind: "image" | "video") =>
   const width = Number(stream.width); const height = Number(stream.height); const ratio = width / height;
   const fps = frameRate(stream.avg_frame_rate && stream.avg_frame_rate !== "0/0" ? stream.avg_frame_rate : stream.r_frame_rate);
   const duration = Number(stream.duration ?? record.format?.duration ?? 0); const pixels = width * height;
-  if (width < 300 || width > 6000 || height < 300 || height > 6000 || ratio <= .4 || ratio >= 2.5 || pixels < 407696 || pixels > 8295044) return "视频分辨率或宽高比不符合官方要求";
+  if (width < 300 || width > 6000 || height < 300 || height > 6000 || ratio < .4 || ratio > 2.5 || pixels < 409600 || pixels > 8295044) return "视频分辨率或宽高比不符合官方要求";
   if (duration < 2 || duration > 30 || fps < 24 || fps > 60) return "视频需为 2–30 秒、24–60 FPS";
   if (!stream.codec_name || !["h264", "hevc"].includes(stream.codec_name.toLowerCase())) return "视频编码仅支持 H.264 或 H.265";
   return undefined;

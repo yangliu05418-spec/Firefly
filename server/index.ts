@@ -25,7 +25,7 @@ import { previewRedirectCacheControl } from "./media-cache.js";
 import { stablePreviewUrl } from "./preview-url-cache.js";
 import { abortMultipartUpload, canvasExportObjectKey, completeMultipartUpload, createMultipartUpload, deleteObject, headObject, inputObjectKey, inspectMediaObject, signUploadPart, signedObjectUrl, tosConfigured, tosEnabled, tosHealth, verifyStoredObject } from "./tos.js";
 import { canonicalUploadContentType, tosMediaInfoViolation, uploadKindFromContentType } from "./upload-policy.js";
-import { acquireUploadCompletionLock, claimUploadSlot, releaseUploadCompletionLock, releaseUploadSlot, UPLOAD_SESSION_TTL_SECONDS } from "./upload-slots.js";
+import { acquireUploadCompletionLock, claimUploadSlot, releaseUploadCompletionLock, releaseUploadSlot, renewUploadSlot, UPLOAD_SESSION_TTL_SECONDS } from "./upload-slots.js";
 import { createCanvasAssetFromUpload, prepareCanvasAssetFromUpload } from "./canvas-assets.js";
 import { createCanvasMediaHandler } from "./canvas-media-route.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
@@ -247,6 +247,20 @@ app.post("/api/uploads/:id/parts/sign", requireAuth, async (req, res) => {
     const body = z.object({ partNumbers: z.array(z.number().int().min(1)).min(1).max(100) }).parse(req.body);
     if (body.partNumbers.some((partNumber) => partNumber > meta.partCount)) throw new Error("分片编号超出范围");
     res.json({ parts: body.partNumbers.map((partNumber) => ({ partNumber, url: signUploadPart(meta.objectKey, meta.tosUploadId, partNumber) })) });
+  } catch (error) { respondError(res, error); }
+});
+
+app.post("/api/uploads/:id/heartbeat", requireAuth, async (req, res) => {
+  try {
+    const uploadId = param(req.params.id);
+    const owner = res.locals.user as SessionUser;
+    const raw = await redis.get(`upload:${uploadId}`);
+    if (!raw) return users.readUpload(uploadId)?.ownerId === owner.id ? res.status(204).end() : res.status(404).json({ error: "上传不存在或已过期" });
+    const meta = JSON.parse(raw);
+    if (meta.ownerId !== owner.id) return res.status(404).json({ error: "上传不存在或已过期" });
+    const active = await renewUploadSlot(redis, owner.id, uploadId) || await claimUploadSlot(redis, owner.id, uploadId, config.maxActiveUploadsPerUser);
+    if (!active) return res.status(429).json({ error: "当前上传并发较高，素材传输仍可继续", code: "UPLOAD_HEARTBEAT_LIMIT" });
+    return res.status(204).end();
   } catch (error) { respondError(res, error); }
 });
 
@@ -1337,7 +1351,7 @@ app.get("/api/health/ready", async (_req, res) => {
       if (!checkedAt || checkedAt < Date.now() - 30_000) await probeTos();
       if (!latestTosHealth.configured || !latestTosHealth.reachable) throw new Error("TOS unavailable");
     }
-    res.json({ status: "ready", redis: "ok", database: "ok", queues: "ok", tos: tosEnabled() ? "ok" : "disabled", schemaVersion: users.schemaVersion(), ...runtimeIdentity });
+    res.json({ status: "ready", redis: "ok", database: "ok", queues: "ok", tos: tosEnabled() ? "ok" : "disabled", previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, schemaVersion: users.schemaVersion(), ...runtimeIdentity });
   } catch (error) {
     console.warn(JSON.stringify({ type: "readiness_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }));
     res.status(503).json({ status: "not_ready", ...runtimeIdentity });
@@ -1348,8 +1362,8 @@ app.get("/api/health", async (_req, res) => {
   try {
     await redis.ping();
     if (!users.healthCheck()) throw new Error("database unavailable");
-    res.json({ status: "ok", redis: "ok", database: "ok", schemaVersion: users.schemaVersion(), tosConfigured: latestTosHealth.configured, tosReachable: latestTosHealth.reachable, tosCheckedAt: latestTosHealth.checkedAt, ...runtimeIdentity });
-  } catch { res.status(503).json({ status: "degraded", redis: "unavailable", database: "unavailable", tosConfigured: latestTosHealth.configured, tosReachable: latestTosHealth.reachable, ...runtimeIdentity }); }
+    res.json({ status: "ok", redis: "ok", database: "ok", schemaVersion: users.schemaVersion(), tosConfigured: latestTosHealth.configured, tosReachable: latestTosHealth.reachable, tosCheckedAt: latestTosHealth.checkedAt, previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, ...runtimeIdentity });
+  } catch { res.status(503).json({ status: "degraded", redis: "unavailable", database: "unavailable", tosConfigured: latestTosHealth.configured, tosReachable: latestTosHealth.reachable, previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, ...runtimeIdentity }); }
 });
 
 app.use((error: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {

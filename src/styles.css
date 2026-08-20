@@ -701,6 +701,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .canvas-node__media-status button{height:28px;padding:0 10px;border:1px solid rgba(255,255,255,.14);border-radius:999px;display:flex;align-items:center;gap:5px;color:#d8d7d2;background:rgba(255,255,255,.05);cursor:pointer;font-size:10px}
 .canvas-node__media-status button:hover{background:rgba(255,255,255,.09)}
 .canvas-node__media-status button svg{width:11px}
+.canvas-node__media-status--buffering{align-items:flex-start;justify-content:flex-end;pointer-events:none;background:linear-gradient(180deg,transparent 48%,rgba(10,11,14,.88))}
+.canvas-node__media-status--buffering svg{width:13px}
 
 /* 插入素材弹层 */
 .canvas-insert-backdrop{position:fixed;z-index:150;inset:0;display:grid;place-items:center;padding:20px;background:rgba(3,4,10,.72);backdrop-filter:blur(14px)}

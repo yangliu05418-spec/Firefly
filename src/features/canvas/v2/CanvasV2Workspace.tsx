@@ -7,6 +7,7 @@ import "@xyflow/react/dist/style.css";
 import dagre from "@dagrejs/dagre";
 import { Archive, Check, ChevronDown, CircleHelp, Copy, Download, FolderOpen, Grid2X2, Group as GroupIcon, Home, ImageIcon, Keyboard, LayoutDashboard, Library, LoaderCircle, LockKeyhole, LogOut, Map as MapIcon, MousePointer2, Move, Plus, Redo2, RefreshCw, ScanFace, Scissors, Search, Sparkles, TextCursorInput, Undo2, Ungroup, Upload, Users, Video, WandSparkles, X, ZoomIn, ZoomOut } from "lucide-react";
 import { api, inferUploadType, uploadFile } from "../../../api";
+import { runWithConcurrency } from "../../../concurrency";
 import type { AssetCategory, ImageModel, LibraryAsset, ModelCapability, SessionUser } from "../../../types";
 import {
   acquireCanvasLease, cancelCanvasJob, createCanvasJob, getCanvasV2, importCanvasProjectAsset, listCanvasAssets, listCanvasJobs,
@@ -16,10 +17,13 @@ import { canCreateFromNode, createCanvasNodeV2, defaultCanvasDocumentV2, NODE_CO
 import { deleteCanvasDraft, readCanvasDraft, writeCanvasDraft } from "./canvas-draft";
 import { CanvasV2Node, type CanvasFlowData, type CanvasFlowNode } from "./CanvasV2Node";
 import { CanvasMontage } from "./CanvasMontage";
+import { canvasAssetDownloadName } from "./canvas-download";
+import { canvasVideoModeForReferences, canvasVideoModelsForReferences, type CanvasVideoReferenceKind } from "./canvas-video-capability";
 
 type SaveState = "saved" | "draft" | "saving" | "offline" | "conflict" | "error";
 type CreateMenu = { sourceId?: string; side?: "left" | "right"; screen: { x: number; y: number }; position?: { x: number; y: number } };
 type ComposerState = { nodeId: string; prompt: string; kind: "text" | "image" | "video" | "character_tool"; model: string; ratio: string; resolution: string; duration: number; tool: "turnaround" | "closeup" | "expressions" | "portrait"; portraitStyle: string; strength: "轻" | "标准" | "强"; textAction: "replace_selection" | "append" | "overwrite"; selectionText: string };
+type CanvasUploadItem = { id: string; name: string; progress: number; phase: "preparing" | "uploading" | "verifying" | "saving"; error?: string };
 const nodeTypes = { character: CanvasV2Node, scene: CanvasV2Node, text: CanvasV2Node, image: CanvasV2Node, video: CanvasV2Node, group: CanvasV2Node, "legacy-audio": CanvasV2Node };
 const creatableTypes = ["character", "scene", "video", "image", "text"] as const;
 const typeLabels: Record<CanvasNodeTypeV2, string> = { character: "角色", scene: "场景", video: "视频", image: "图片", text: "文本", group: "分组", "legacy-audio": "旧音频" };
@@ -42,6 +46,24 @@ const clientId = () => {
 
 const edgeStyle = { stroke: "rgba(186, 204, 201, .48)", strokeWidth: 1.35 };
 const toEdge = (edge: CanvasDocumentV2["connections"][number]): Edge => ({ ...edge, type: "bezier", markerEnd: { type: MarkerType.ArrowClosed, width: 12, height: 12, color: "rgba(186, 204, 201, .5)" }, style: edgeStyle });
+const canvasReferenceKinds = (targetId: string, nodes: readonly CanvasFlowNode[], edges: readonly Edge[]) => {
+  const target = nodes.find((node) => node.id === targetId);
+  const kindFor = (node?: CanvasFlowNode): CanvasVideoReferenceKind | undefined => {
+    if (!node?.data.domain.data.projectAssetId) return undefined;
+    return node.data.domain.type === "video" ? "video" : node.data.domain.type === "legacy-audio" ? "audio" : "image";
+  };
+  const ownKind = kindFor(target);
+  if (ownKind) return [ownKind];
+  const byAsset = new Map<string, CanvasVideoReferenceKind>();
+  for (const edge of edges) {
+    if (edge.target !== targetId) continue;
+    const source = nodes.find((node) => node.id === edge.source);
+    const assetId = source?.data.domain.data.projectAssetId;
+    const kind = kindFor(source);
+    if (assetId && kind) byAsset.set(assetId, kind);
+  }
+  return [...byAsset.values()];
+};
 
 function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; navigate: (path: string) => void; user: SessionUser; logout: () => void }) {
   const flow = useReactFlow<CanvasFlowNode, Edge>();
@@ -68,7 +90,8 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   const [imageModels, setImageModels] = useState<ImageModel[]>([]);
   const [imageRatios, setImageRatios] = useState<string[]>([]);
   const [assetSearch, setAssetSearch] = useState("");
-  const [uploading, setUploading] = useState<{ name: string; progress: number; error?: string }[]>([]);
+  const [uploading, setUploading] = useState<CanvasUploadItem[]>([]);
+  const uploadBatchControllers = useRef(new Set<AbortController>());
   const [composer, setComposer] = useState<ComposerState | null>(null);
   const [inspectAsset, setInspectAsset] = useState<CanvasProjectAsset | null>(null);
   const [cropNodeId, setCropNodeId] = useState<string | null>(null);
@@ -99,6 +122,11 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   const textSelections = useRef(new Map<string, string>());
   const cid = useMemo(clientId, []);
 
+  useEffect(() => () => {
+    for (const controller of uploadBatchControllers.current) controller.abort();
+    uploadBatchControllers.current.clear();
+  }, []);
+
   const patchNode = useCallback((id: string, patch: Partial<CanvasNodeV2["data"]>) => {
     setNodes((current) => current.map((node) => node.id === id ? { ...node, data: { ...node.data, domain: { ...node.data.domain, data: { ...node.data.domain.data, ...patch } } } } : node));
   }, [setNodes]);
@@ -108,9 +136,9 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     if (!node || readOnly) return;
     const kind = node.data.domain.type === "text" ? "text" : node.data.domain.type === "video" ? "video" : node.data.domain.type === "character" ? "character_tool" : "image";
     const imageModel = imageModels[0];
-    const videoModel = videoModels[0];
+    const videoModel = canvasVideoModelsForReferences(videoModels, canvasReferenceKinds(id, flow.getNodes(), flow.getEdges()))[0];
     if ((kind === "image" || kind === "character_tool") && !imageModel) return setMessage("图片模型能力尚未载入，请稍后重试");
-    if (kind === "video" && !videoModel) return setMessage("视频模型能力尚未载入，请稍后重试");
+    if (kind === "video" && !videoModel) return setMessage("没有模型支持当前已连接素材的类型或数量");
     const model = kind === "image" || kind === "character_tool" ? imageModel?.id ?? "" : videoModel?.id ?? "";
     const ratio = kind === "video" ? (videoModel?.ratios.includes("adaptive") ? "adaptive" : videoModel?.ratios[0] ?? "16:9") : (imageRatios.includes("16:9") ? "16:9" : imageRatios[0] ?? "1:1");
     const resolution = kind === "video" ? (videoModel?.resolutions.includes("1080p") ? "1080p" : videoModel?.resolutions[0] ?? "720p") : imageModel?.defaultResolution ?? "1024";
@@ -364,7 +392,10 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   const selectedAssets = useMemo(() => nodes.filter((node) => node.selected && node.data.domain.data.projectAssetId).map((node) => assets.find((asset) => asset.id === node.data.domain.data.projectAssetId)).filter((asset): asset is CanvasProjectAsset => Boolean(asset)), [assets, nodes]);
   const selectedNodeCount = useMemo(() => nodes.filter((node) => node.selected).length, [nodes]);
   const selectedGroupCount = useMemo(() => nodes.filter((node) => node.selected && node.data.domain.type === "group").length, [nodes]);
-  const activeVideoModel = composer?.kind === "video" ? videoModels.find((model) => model.id === composer.model) : undefined;
+  const composerNode = composer?.kind === "video" ? nodes.find((node) => node.id === composer.nodeId) : undefined;
+  const composerReferenceKinds = composerNode ? canvasReferenceKinds(composerNode.id, nodes, edges) : [];
+  const compatibleVideoModels = canvasVideoModelsForReferences(videoModels, composerReferenceKinds);
+  const activeVideoModel = composer?.kind === "video" ? compatibleVideoModels.find((model) => model.id === composer.model) : undefined;
   const activeImageModel = composer && (composer.kind === "image" || composer.kind === "character_tool") ? imageModels.find((model) => model.id === composer.model) : undefined;
 
   useEffect(() => {
@@ -464,29 +495,29 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   };
 
   const downloadSelected = async () => {
+    let savedToDirectory = 0;
     const picker = (window as typeof window & { showDirectoryPicker?: () => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker;
     if (picker && selectedAssets.length > 1) {
       try {
         const directory = await picker();
         for (const [index, asset] of selectedAssets.entries()) {
-          const extension = asset.kind === "video" ? ".mp4" : asset.kind === "audio" ? ".mp3" : ".webp";
-          const base = (asset.title || `Firefly-${index + 1}`).replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-").slice(0, 90);
           const response = await fetch(asset.downloadUrl);
           if (!response.ok || !response.body) throw new Error(`${asset.title} 下载失败 (${response.status})`);
-          const handle = await directory.getFileHandle(base.toLowerCase().endsWith(extension) ? base : `${base}${extension}`, { create: true });
+          const handle = await directory.getFileHandle(canvasAssetDownloadName(asset, index), { create: true });
           const writable = await handle.createWritable();
           await response.body.pipeTo(writable);
+          savedToDirectory += 1;
         }
         setMessage(`${selectedAssets.length} 个文件已保存到所选目录`); return;
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") return;
-        setMessage(error instanceof Error ? error.message : "批量保存失败，已改用浏览器下载器");
       }
     }
-    for (const asset of selectedAssets) {
+    const remaining = selectedAssets.slice(savedToDirectory);
+    for (const asset of remaining) {
       const anchor = document.createElement("a"); anchor.href = asset.downloadUrl; anchor.target = "_blank"; anchor.rel = "noopener"; anchor.click();
     }
-    setMessage(`已将 ${selectedAssets.length} 个文件交给浏览器下载器`);
+    setMessage(savedToDirectory ? `${savedToDirectory} 个文件已保存；其余 ${remaining.length} 个已交给浏览器下载器` : `已将 ${remaining.length} 个文件交给浏览器下载器`);
   };
 
   const submitComposer = async () => {
@@ -495,6 +526,10 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     const sourceNode = flow.getNode(composer.nodeId);
     const domain = sourceNode?.data.domain;
     const hasExistingContent = Boolean(domain && (domain.type === "text" ? domain.data.markdown?.trim() : domain.data.projectAssetId));
+    const videoReferences = canvasReferenceKinds(composer.nodeId, flow.getNodes(), flow.getEdges());
+    const videoMode = canvasVideoModeForReferences(videoReferences);
+    const videoModel = composer.kind === "video" ? videoModels.find((model) => model.id === composer.model) : undefined;
+    if (composer.kind === "video" && (!videoModel || !canvasVideoModelsForReferences([videoModel], videoReferences).length)) { setMessage("当前模型不支持已连接素材的类型或数量，请重新选择模型"); return; }
     if (sourceNode && domain && hasExistingContent && composer.kind !== "text") {
       const next = createCanvasNodeV2(domain.type === "legacy-audio" || domain.type === "group" ? "video" : domain.type, { x: sourceNode.position.x + (sourceNode.measured?.width ?? domain.width) + 140, y: sourceNode.position.y });
       targetId = next.id;
@@ -511,8 +546,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     else if (composer.kind === "image") body = { kind: "image", nodeId: targetId, revision: currentRevision, payload: { prompt: composer.prompt, model: composer.model, ratio: composer.ratio, resolution: composer.resolution, referenceAssetIds: [] } };
     else if (composer.kind === "character_tool") body = { kind: "character_tool", nodeId: targetId, revision: currentRevision, payload: { tool: composer.tool, prompt: `${composer.prompt}\n人像质感：${composer.portraitStyle}；控制强度：${composer.strength}。`, model: composer.model, ratio: composer.ratio, resolution: composer.resolution, referenceAssetIds: [] } };
     else {
-      const incoming = flow.getEdges().filter((edge) => edge.target === targetId).map((edge) => flow.getNode(edge.source)?.data.domain.data.projectAssetId).filter(Boolean);
-      body = { kind: "video", nodeId: targetId, revision: currentRevision, payload: { generation: { prompt: composer.prompt, model: composer.model, mode: incoming.length ? "omni" : "text", ratio: composer.ratio, resolution: composer.resolution, duration: composer.duration, generateAudio: true, seed: -1, cameraFixed: false, watermark: false, outputFormat: "mp4" }, references: [] } };
+      body = { kind: "video", nodeId: targetId, revision: currentRevision, payload: { generation: { prompt: composer.prompt, model: composer.model, mode: videoMode, ratio: composer.ratio, resolution: composer.resolution, duration: composer.duration, generateAudio: videoModel?.supportsAudio ?? false, seed: -1, cameraFixed: false, watermark: false, outputFormat: "mp4" }, references: [] } };
     }
     try { const job = await createCanvasJob(canvasId, body); applyJob(job); setComposer(null); }
     catch (error) { setMessage(error instanceof Error ? error.message : "任务提交失败"); }
@@ -581,19 +615,29 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   }, [assets, canvasId, flow, makeFlowNode, patchNode, setEdges, setNodes]);
   deriveImageRef.current = deriveImage;
 
-  const uploadAssets = async (files: FileList | null) => {
-    if (!files?.length) return;
-    const pending = Array.from(files).map((file) => ({ name: file.name, progress: 0 })); setUploading((old) => [...old, ...pending]);
-    await Promise.all(Array.from(files).map(async (file) => {
-      const kind = inferUploadType(file);
-      if (!kind) return setUploading((old) => old.map((item) => item.name === file.name ? { ...item, error: "不支持的文件类型" } : item));
-      try {
-        const uploaded = await uploadFile(file, kind, (progress) => setUploading((old) => old.map((item) => item.name === file.name ? { ...item, progress } : item)));
-        const imported = await importCanvasProjectAsset(canvasId, { kind: "upload", uploadId: uploaded.uploadId ?? uploaded.id });
-        setAssets((old) => [imported.projectAsset, ...old.filter((item) => item.id !== imported.projectAsset.id)]);
-        setUploading((old) => old.filter((item) => item.name !== file.name));
-      } catch (error) { setUploading((old) => old.map((item) => item.name === file.name ? { ...item, error: error instanceof Error ? error.message : "上传失败" } : item)); }
-    }));
+  const uploadAssets = async (files: readonly File[]) => {
+    if (!files.length) return;
+    if (files.length > 50) { setMessage("单次最多选择 50 个素材，请分批上传"); return; }
+    const entries = files.map((file) => ({ id: crypto.randomUUID(), file }));
+    setUploading((old) => [...old, ...entries.map(({ id, file }) => ({ id, name: file.name, progress: 0, phase: "uploading" as const }))]);
+    const controller = new AbortController();
+    uploadBatchControllers.current.add(controller);
+    try {
+      await runWithConcurrency(entries, 3, async ({ id, file }) => {
+        const kind = inferUploadType(file);
+        if (!kind) { setUploading((old) => old.map((item) => item.id === id ? { ...item, error: "不支持的文件类型" } : item)); return; }
+        try {
+          const uploaded = await uploadFile(file, kind, (progress, phase) => setUploading((old) => old.map((item) => item.id === id ? { ...item, progress, phase: phase === "ready" ? "verifying" : phase } : item)), { signal: controller.signal });
+          setUploading((old) => old.map((item) => item.id === id ? { ...item, progress: 100, phase: "saving" } : item));
+          const imported = await importCanvasProjectAsset(canvasId, { kind: "upload", uploadId: uploaded.uploadId ?? uploaded.id });
+          setAssets((old) => [imported.projectAsset, ...old.filter((item) => item.id !== imported.projectAsset.id)]);
+          setUploading((old) => old.filter((item) => item.id !== id));
+        } catch (error) {
+          if (error instanceof DOMException && error.name === "AbortError") return;
+          setUploading((old) => old.map((item) => item.id === id ? { ...item, error: error instanceof Error ? error.message : "上传失败" } : item));
+        }
+      });
+    } finally { uploadBatchControllers.current.delete(controller); }
   };
 
   const loadGlobalAssets = useCallback(async () => {
@@ -694,7 +738,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     {message && saveState !== "saved" && <div className="canvas-v2-toast" role="status">{message}<button onClick={() => setMessage("")}><X /></button></div>}
     {createMenu && <div className="canvas-v2-create-menu" style={{ left: Math.min(createMenu.screen.x, innerWidth - 250), top: Math.min(createMenu.screen.y, innerHeight - 360) }} role="menu"><header>{createMenu.side === "left" ? "添加上下文" : createMenu.side === "right" ? "引用该节点生成" : "添加节点"}</header>{allowedCreateTypes.map((type) => { const Icon = typeIcons[type]; return <button key={type} onClick={() => createNode(type)}><Icon /><span>{typeLabels[type]}</span><ChevronDown /></button>; })}</div>}
 
-    {assetPanel && <aside className="canvas-v2-assets" role="dialog" aria-label="画布资产"><header><div><b>{assetTab === "project" ? "项目资产" : "全局资产库"}</b><span>{assetTab === "project" ? "属于这个画布的素材不会随节点删除" : "从你的常用资产中插入并建立项目副本"}</span></div><button onClick={() => setAssetPanel(false)}><X /></button></header><nav><button className={assetTab === "project" ? "active" : ""} onClick={() => setAssetTab("project")}>项目资产</button><button className={assetTab === "global" ? "active" : ""} onClick={() => setAssetTab("global")}>全局资产库</button></nav>{assetTab === "global" && <div className="canvas-v2-assets__categories"><button className={assetCategory === "all" ? "active" : ""} onClick={() => setAssetCategory("all")}>全部</button>{(Object.entries(assetCategoryLabels) as Array<[AssetCategory, string]>).map(([category, label]) => <button key={category} className={assetCategory === category ? "active" : ""} onClick={() => setAssetCategory(category)}>{label}</button>)}</div>}<label className="canvas-v2-assets__search"><Search /><input autoFocus value={assetSearch} onChange={(event) => setAssetSearch(event.target.value)} placeholder="搜索素材" /></label>{assetTab === "project" && <label className="canvas-v2-assets__upload"><Upload /><b>上传到项目</b><span>支持多选，上传完成后可立即插入</span><input type="file" multiple accept="image/*,video/mp4,video/quicktime,audio/mpeg,audio/wav" onChange={(event) => void uploadAssets(event.target.files)} /></label>}<div className="canvas-v2-assets__list">{uploading.map((item) => <div className="canvas-v2-assets__progress" key={item.name}><span>{item.name}</span><i><em style={{ width: `${item.progress}%` }} /></i><small>{item.error ?? `${item.progress}%`}</small></div>)}{assetTab === "project" ? assets.filter((asset) => asset.title.toLowerCase().includes(assetSearch.toLowerCase())).map((asset) => <button key={asset.id} onClick={() => insertAsset(asset)}><span className="canvas-v2-assets__thumb">{asset.kind === "video" ? <Video /> : asset.kind === "audio" ? <Sparkles /> : <img src={asset.mediaUrl} loading="lazy" alt="" />}</span><div><b>{asset.title}</b><small>{asset.kind === "video" ? "视频" : asset.kind === "audio" ? "音频" : "图片"}</small></div><Plus /></button>) : globalAssets.map((asset) => <button key={asset.Id} onClick={() => void importGlobal(asset)} disabled={asset.Status !== "Active"}><span className="canvas-v2-assets__thumb">{asset.URL ? <img src={asset.URL} loading="lazy" alt="" /> : <ImageIcon />}</span><div><b>{asset.Name}</b><small>{assetCategoryLabels[asset.Category]} · {asset.Status === "Active" ? "可用" : "处理中"}</small></div><Plus /></button>)}</div></aside>}
+    {assetPanel && <aside className="canvas-v2-assets" role="dialog" aria-label="画布资产"><header><div><b>{assetTab === "project" ? "项目资产" : "全局资产库"}</b><span>{assetTab === "project" ? "属于这个画布的素材不会随节点删除" : "从你的常用资产中插入并建立项目副本"}</span></div><button onClick={() => setAssetPanel(false)}><X /></button></header><nav><button className={assetTab === "project" ? "active" : ""} onClick={() => setAssetTab("project")}>项目资产</button><button className={assetTab === "global" ? "active" : ""} onClick={() => setAssetTab("global")}>全局资产库</button></nav>{assetTab === "global" && <div className="canvas-v2-assets__categories"><button className={assetCategory === "all" ? "active" : ""} onClick={() => setAssetCategory("all")}>全部</button>{(Object.entries(assetCategoryLabels) as Array<[AssetCategory, string]>).map(([category, label]) => <button key={category} className={assetCategory === category ? "active" : ""} onClick={() => setAssetCategory(category)}>{label}</button>)}</div>}<label className="canvas-v2-assets__search"><Search /><input autoFocus value={assetSearch} onChange={(event) => setAssetSearch(event.target.value)} placeholder="搜索素材" /></label>{assetTab === "project" && <label className="canvas-v2-assets__upload"><Upload /><b>上传到项目</b><span>支持多选，上传完成后可立即插入</span><input type="file" multiple accept="image/*,video/mp4,video/quicktime,audio/mpeg,audio/wav" onChange={(event) => { const selected = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void uploadAssets(selected); }} /></label>}<div className="canvas-v2-assets__list">{uploading.map((item) => <div className="canvas-v2-assets__progress" key={item.id}><span>{item.name}</span><i><em style={{ width: `${item.progress}%` }} /></i><small>{item.error ?? (item.phase === "preparing" ? "正在检查图片" : item.phase === "verifying" ? "上传完成 · 正在确认" : item.phase === "saving" ? "已上传 · 正在加入项目" : `${item.progress}%`)}</small></div>)}{assetTab === "project" ? assets.filter((asset) => asset.title.toLowerCase().includes(assetSearch.toLowerCase())).map((asset) => <button key={asset.id} onClick={() => insertAsset(asset)}><span className="canvas-v2-assets__thumb">{asset.kind === "video" ? <Video /> : asset.kind === "audio" ? <Sparkles /> : <img src={asset.mediaUrl} loading="lazy" alt="" />}</span><div><b>{asset.title}</b><small>{asset.kind === "video" ? "视频" : asset.kind === "audio" ? "音频" : "图片"}</small></div><Plus /></button>) : globalAssets.map((asset) => <button key={asset.Id} onClick={() => void importGlobal(asset)} disabled={asset.Status !== "Active"}><span className="canvas-v2-assets__thumb">{asset.URL ? <img src={asset.URL} loading="lazy" alt="" /> : <ImageIcon />}</span><div><b>{asset.Name}</b><small>{assetCategoryLabels[asset.Category]} · {asset.Status === "Active" ? "可用" : "处理中"}</small></div><Plus /></button>)}</div></aside>}
 
     {shortcutOpen && <div className="canvas-v2-modal" role="dialog" aria-modal="true" aria-labelledby="canvas-shortcuts-title" onClick={() => setShortcutOpen(false)}><section className="canvas-v2-shortcuts" onClick={(event) => event.stopPropagation()}><header><div><span>KEYBOARD MAP</span><h2 id="canvas-shortcuts-title">画布快捷键</h2></div><button onClick={() => setShortcutOpen(false)} aria-label="关闭"><X /></button></header><div>{shortcutGroups.map(([group, items]) => <article key={group}><b>{group}</b><dl>{items.map(([label, keys]) => <div key={label}><dt>{label}</dt><dd>{keys}</dd></div>)}</dl></article>)}</div></section></div>}
 
@@ -718,12 +762,12 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
               const spec = imageModels.find((item) => item.id === model);
               setComposer({ ...composer, model, resolution: spec?.resolutions.includes(composer.resolution) ? composer.resolution : spec?.defaultResolution ?? composer.resolution });
             }
-          }}>{(composer.kind === "video" ? videoModels : imageModels).map((model) => <option value={model.id} key={model.id}>{model.name}</option>)}</select></label>
+          }}>{(composer.kind === "video" ? compatibleVideoModels : imageModels).map((model) => <option value={model.id} key={model.id}>{model.name}</option>)}</select></label>
           <label>画幅<select value={composer.ratio} onChange={(event) => setComposer({ ...composer, ratio: event.target.value })}>{(composer.kind === "video" ? activeVideoModel?.ratios ?? [] : imageRatios).map((ratio) => <option key={ratio}>{ratio}</option>)}</select></label>
           <label>清晰度<select value={composer.resolution} onChange={(event) => setComposer({ ...composer, resolution: event.target.value })}>{(composer.kind === "video" ? activeVideoModel?.resolutions ?? [] : activeImageModel?.resolutions ?? []).map((resolution) => <option key={resolution}>{resolution}</option>)}</select></label>
           {composer.kind === "video" && <label>时长<select value={composer.duration} onChange={(event) => setComposer({ ...composer, duration: Number(event.target.value) })}>{Array.from({ length: (activeVideoModel?.duration[1] ?? 6) - (activeVideoModel?.duration[0] ?? 4) + 1 }, (_, index) => (activeVideoModel?.duration[0] ?? 4) + index).map((duration) => <option value={duration} key={duration}>{duration} 秒</option>)}</select></label>}
         </div>}
-        <footer>{flow.getEdges().filter((edge) => edge.target === composer.nodeId).length > 0 && <span>{flow.getEdges().filter((edge) => edge.target === composer.nodeId).length} 个引用上下文</span>}<button onClick={() => setComposer(null)}>取消</button><button className="primary" disabled={!composer.prompt.trim()} onClick={() => void submitComposer()}><WandSparkles /> 开始生成</button></footer>
+        <footer>{composer.kind === "video" && !compatibleVideoModels.length ? <span>当前素材组合超出模型能力</span> : flow.getEdges().filter((edge) => edge.target === composer.nodeId).length > 0 && <span>{flow.getEdges().filter((edge) => edge.target === composer.nodeId).length} 个引用上下文</span>}<button onClick={() => setComposer(null)}>取消</button><button className="primary" disabled={!composer.prompt.trim() || (composer.kind === "video" && !compatibleVideoModels.length)} onClick={() => void submitComposer()}><WandSparkles /> 开始生成</button></footer>
       </div>
     </div>}
     {inspectAsset && <div className="canvas-v2-modal" role="dialog" aria-modal="true" onClick={() => setInspectAsset(null)}><div className="canvas-v2-inspect" onClick={(event) => event.stopPropagation()}>{inspectAsset.kind === "video" ? <video src={inspectAsset.mediaUrl} controls autoPlay /> : <img src={inspectAsset.mediaUrl} alt={inspectAsset.title} />}<footer><b>{inspectAsset.title}</b><a href={inspectAsset.downloadUrl}><Download /> 下载</a><button onClick={() => setInspectAsset(null)}><X /></button></footer></div></div>}
