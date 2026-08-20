@@ -21,6 +21,8 @@ APIKEY+MODEL.txt
 output/
 .playwright-cli/
 .playwright-mcp/
+playwright-report/
+test-results/
 .vscode/
 .idea/
 
