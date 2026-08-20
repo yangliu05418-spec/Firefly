@@ -15,7 +15,7 @@ import { users } from "./store.js";
 import { canvasDocumentSchema, DEFAULT_CANVAS_DOCUMENT } from "./canvas-document.js";
 import { publicCanvasProject, publicCanvasProjectDetail } from "./canvas-public.js";
 import { consumeFeishuAuthorization, createFeishuAuthorization, exchangeFeishuCode } from "./feishu.js";
-import { generationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, readTask, redis, saveTask, type StoredTask } from "./redis.js";
+import { generationQueue, imageGenerationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, readTask, redis, saveTask, type StoredTask } from "./redis.js";
 import { canAccessTask } from "./task-access.js";
 import { publicTask } from "./task-public.js";
 import { validateGeneration } from "./provider.js";
@@ -28,8 +28,10 @@ import { createCanvasAssetFromUpload } from "./canvas-assets.js";
 import { createCanvasMediaHandler } from "./canvas-media-route.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
 import { IMAGE_MODELS, IMAGE_RATIOS, imageModelById, computeImageSize, DEFAULT_IMAGE_MODEL } from "./image-models.js";
-import { acquireImageSlot, downloadImageBuffer, generateSingleImage, openRouterPool, OpenRouterError, releaseImageSlot } from "./openrouter.js";
-import { storeGeneratedImage } from "./generated-media.js";
+import { openRouterPool } from "./openrouter.js";
+import { acquireCompatibilityImageLease, releaseCompatibilityImageLease } from "./image-concurrency.js";
+import { createImageGenerationTask, ImageGenerationCapacityError } from "./image-generation.js";
+import { accessibleImageGenerationTask, publicImageGenerationTask } from "./image-generation-access.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -571,60 +573,76 @@ app.get("/api/image-models", requireAuth, async (_req, res) => {
   res.json({ Items: IMAGE_MODELS, Ratios: IMAGE_RATIOS, DefaultModel: DEFAULT_IMAGE_MODEL });
 });
 
-app.post("/api/image-generation", requireAuth, async (req, res) => {
+const validateImageGenerationRequest = (body: z.infer<typeof imageGenerationSchema>, userId: string) => {
+  const spec = imageModelById(body.model);
+  if (!spec) throw Object.assign(new Error("未知的图片模型"), { status: 400 });
+  if (body.count > spec.maxCount) throw Object.assign(new Error("该模型单次最多生成 " + spec.maxCount + " 张"), { status: 400 });
+  if (!spec.resolutions.includes(body.resolution)) throw Object.assign(new Error("该模型不支持此分辨率档位"), { status: 400 });
+  computeImageSize(body.ratio, Number(body.resolution), spec.maxSize);
+  for (const uploadId of body.references) {
+    const media = users.readUpload(uploadId);
+    if (!media || media.ownerId !== userId || media.status !== "ready") throw Object.assign(new Error("参考素材不存在或已过期"), { status: 404 });
+  }
+  if (!openRouterPool().size) throw Object.assign(new Error("服务端尚未配置 OpenRouter API Key"), { status: 503 });
+};
+
+const enqueueImageGeneration = async (body: z.infer<typeof imageGenerationSchema>, userId: string, compatibilityLeaseToken?: string) => {
+  validateImageGenerationRequest(body, userId);
+  return createImageGenerationTask({ ownerId: userId, model: body.model, ratio: body.ratio, resolution: body.resolution, count: body.count, prompt: body.prompt, referenceUploadIds: body.references, compatibilityLeaseToken });
+};
+
+const imageGenerationErrorStatus = (error: unknown) => error instanceof ImageGenerationCapacityError ? 429 : Number((error as { status?: number }).status) || (error instanceof z.ZodError ? 400 : 502);
+
+app.post("/api/image-generations", requireAuth, async (req, res) => {
   try {
     const body = imageGenerationSchema.parse(req.body);
     const user = res.locals.user as SessionUser;
-    const spec = imageModelById(body.model);
-    if (!spec) return res.status(400).json({ error: "未知的图片模型" });
-    if (body.count > spec.maxCount) return res.status(400).json({ error: "该模型单次最多生成 " + spec.maxCount + " 张" });
-    if (!spec.resolutions.includes(body.resolution)) return res.status(400).json({ error: "该模型不支持此分辨率档位" });
-    const size = computeImageSize(body.ratio, Number(body.resolution), spec.maxSize);
-    // 参考图（图生图）：uploadId → 签名地址（临时，仅供本次请求）
-    const references: string[] = [];
-    for (const uploadId of body.references) {
-      const media = users.readUpload(uploadId);
-      if (!media || media.ownerId !== user.id) return res.status(404).json({ error: "参考素材不存在或已过期" });
-      references.push(signedObjectUrl(media.objectKey, { expires: 2 * 3600, fileName: media.fileName }));
+    const task = await enqueueImageGeneration(body, user.id);
+    res.status(202).json(publicImageGenerationTask(task));
+  } catch (error) { respondError(res, error, imageGenerationErrorStatus(error)); }
+});
+
+app.get("/api/image-generations", requireAuth, (req, res) => {
+  try {
+    const { limit } = z.object({ limit: z.coerce.number().int().min(1).max(50).default(20) }).parse(req.query);
+    const user = res.locals.user as SessionUser;
+    res.json({ Items: users.listImageGenerationTasks(user.id, limit).map(publicImageGenerationTask) });
+  } catch (error) { respondError(res, error); }
+});
+
+app.get("/api/image-generations/:id", requireAuth, (req, res) => {
+  const user = res.locals.user as SessionUser;
+  const task = accessibleImageGenerationTask(users.readImageGenerationTask(param(req.params.id)), user.id);
+  if (!task) return res.status(404).json({ error: "图片生成任务不存在" });
+  res.json(publicImageGenerationTask(task));
+});
+
+// One-release compatibility path for tabs opened before the async API shipped.
+app.post("/api/image-generation", requireAuth, async (req, res) => {
+  const user = res.locals.user as SessionUser;
+  let leaseToken: string | null = null;
+  let enqueued = false;
+  try {
+    const body = imageGenerationSchema.parse(req.body);
+    leaseToken = await acquireCompatibilityImageLease(user.id);
+    if (!leaseToken) throw new ImageGenerationCapacityError();
+    const task = await enqueueImageGeneration(body, user.id, leaseToken);
+    enqueued = true;
+    let disconnected = false;
+    res.on("close", () => { disconnected = true; });
+    const deadline = Date.now() + 10 * 60_000;
+    while (Date.now() < deadline) {
+      if (disconnected) return;
+      const current = users.readImageGenerationTask(task.id);
+      if (!current || current.ownerId !== user.id) return res.status(404).json({ error: "图片生成任务不存在" });
+      if (current.status === "succeeded") return res.json({ Items: current.items, Model: current.model, Ratio: current.ratio, Resolution: current.resolution, Failed: current.failures });
+      if (current.status === "failed") return res.status(502).json({ error: current.error ?? current.failures[0] ?? "图片生成失败", requestId: res.locals.requestId });
+      await new Promise((resolve) => setTimeout(resolve, 1000));
     }
-    if (!openRouterPool().size) return res.status(503).json({ error: "服务端尚未配置 OpenRouter API Key" });
-    if (!acquireImageSlot(user.id)) return res.status(429).json({ error: "图片生成繁忙，请等当前生成完成后再试（每用户同时最多 2 组）" });
-    const startedAt = Date.now();
-    let slotReleased = false;
-    const releaseSlot = () => { if (!slotReleased) { slotReleased = true; releaseImageSlot(user.id); } };
-    res.on("finish", releaseSlot);
-    res.on("close", releaseSlot);
-    console.info(JSON.stringify({ type: "image_generation_started", at: new Date().toISOString(), userId: user.id, model: body.model, ratio: body.ratio, resolution: body.resolution, size, count: body.count, references: references.length, healthyKeys: openRouterPool().healthyCount() }));
-    // 并发生成（上限 2），逐个落盘
-    let cursor = 0;
-    const items: { mediaId: string; width?: number; height?: number }[] = [];
-    const failures: string[] = [];
-    const worker = async () => {
-      while (cursor < body.count) {
-        const index = cursor++;
-        try {
-          const url = await generateSingleImage({ model: body.model, prompt: body.prompt, references, size });
-          const buffer = await downloadImageBuffer(url);
-          const contentType = url.startsWith("data:image/png") ? "image/png" : url.startsWith("data:image/webp") ? "image/webp" : url.startsWith("data:image/jpeg") ? "image/jpeg" : "image/png";
-          const media = await storeGeneratedImage({ ownerId: user.id, body: buffer, contentType, fileName: "nano-image-" + (index + 1) + ".png" });
-          items.push({ mediaId: media.id });
-          console.info(JSON.stringify({ type: "image_generation_completed", at: new Date().toISOString(), userId: user.id, mediaId: media.id, index, bytes: buffer.length }));
-        } catch (error) {
-          failures.push(error instanceof Error ? error.message : "生成失败");
-          console.warn(JSON.stringify({ type: "image_generation_failed", at: new Date().toISOString(), userId: user.id, index, code: (error as { code?: string }).code ?? "unknown", message: error instanceof Error ? error.message : undefined }));
-        }
-      }
-    };
-    await Promise.all(Array.from({ length: Math.min(2, body.count) }, worker));
-    if (!items.length) {
-      const message = failures[0] ?? "图片生成失败";
-      return res.status(502).json({ error: message, requestId: res.locals.requestId });
-    }
-    console.info(JSON.stringify({ type: "image_generation_done", at: new Date().toISOString(), userId: user.id, model: body.model, requested: body.count, ok: items.length, failed: failures.length, elapsedMs: Date.now() - startedAt }));
-    res.json({ Items: items, Model: body.model, Ratio: body.ratio, Resolution: body.resolution, Failed: failures });
+    res.status(202).json({ ...publicImageGenerationTask(users.readImageGenerationTask(task.id)!), message: "图片仍在后台生成，可刷新页面继续查看" });
   } catch (error) {
-    if (error instanceof OpenRouterError) console.warn(JSON.stringify({ type: "image_generation_error", at: new Date().toISOString(), status: error.status, message: error.message }));
-    respondError(res, error, error instanceof OpenRouterError ? (error.status === "network" ? 502 : 502) : 400);
+    if (leaseToken && !enqueued) await releaseCompatibilityImageLease(user.id, leaseToken).catch(() => undefined);
+    respondError(res, error, imageGenerationErrorStatus(error));
   }
 });
 
@@ -785,7 +803,7 @@ app.get("/api/health/ready", async (_req, res) => {
   try {
     await redis.ping();
     if (!users.healthCheck()) throw new Error("database unavailable");
-    await Promise.all([generationQueue.getJobCounts("wait", "active"), mediaQueue.getJobCounts("wait", "active")]);
+    await Promise.all([generationQueue.getJobCounts("wait", "active"), mediaQueue.getJobCounts("wait", "active"), imageGenerationQueue.getJobCounts("wait", "active")]);
     if (tosEnabled()) {
       const checkedAt = latestTosHealth.checkedAt ? Date.parse(latestTosHealth.checkedAt) : 0;
       if (!checkedAt || checkedAt < Date.now() - 30_000) await probeTos();
@@ -836,6 +854,6 @@ const cleanupTimer = setInterval(() => void cleanupUploads().catch(console.error
 void probeTos();
 const tosProbeTimer = setInterval(() => void probeTos(), 60 * 1000);
 const server = app.listen(config.port, "0.0.0.0", () => console.log(`Firefly listening on ${config.port}`));
-const shutdown = async () => { clearInterval(cleanupTimer); clearInterval(tosProbeTimer); server.close(); await Promise.all([generationQueue.close(), mediaQueue.close()]); await redis.quit(); users.close(); process.exit(0); };
+const shutdown = async () => { clearInterval(cleanupTimer); clearInterval(tosProbeTimer); server.close(); await Promise.all([generationQueue.close(), mediaQueue.close(), imageGenerationQueue.close()]); await redis.quit(); users.close(); process.exit(0); };
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);

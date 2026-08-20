@@ -55,7 +55,7 @@ on_exit() {
 }
 trap on_exit EXIT
 cleanup_candidate() {
-  for role in web worker media-worker; do
+  for role in web worker media-worker image-worker; do
     /usr/bin/docker stop --time 35 "firefly-$role-$next_slot" >/dev/null 2>&1 || true
     /usr/bin/docker rm "firefly-$role-$next_slot" >/dev/null 2>&1 || true
   done
@@ -76,13 +76,13 @@ switch_upstream() {
 }
 stop_old_workers() {
   if [ "$current_slot" = "legacy" ]; then
-    for service in worker media-worker; do
+    for service in worker media-worker image-worker; do
       for container in $(/usr/bin/docker ps -q --filter "label=com.docker.compose.service=$service"); do
         printf '%s\n' "$container" >> "$old_workers_file"
       done
     done
   else
-    for role in worker media-worker; do
+    for role in worker media-worker image-worker; do
       container="firefly-$role-$current_slot"
       /usr/bin/docker inspect "$container" >/dev/null 2>&1 && printf '%s\n' "$container" >> "$old_workers_file"
     done
@@ -118,7 +118,7 @@ while [ "$attempt" -lt 60 ] && [ "$ready_count" -lt 3 ]; do
 done
 if [ "$ready_count" -lt 3 ]; then failure_event=failed_readiness; cleanup_candidate; exit 1; fi
 
-for role_command in 'worker:dist-server/worker.js' 'media-worker:dist-server/media-worker.js'; do
+for role_command in 'worker:dist-server/worker.js' 'media-worker:dist-server/media-worker.js' 'image-worker:dist-server/image-worker.js'; do
   role=${role_command%%:*}; command=${role_command#*:}
   /usr/bin/docker run -d --name "firefly-$role-$next_slot" --restart unless-stopped --stop-timeout 35 \
     --network "$network" --label com.firefly.role="$role" --label com.firefly.slot="$next_slot" --security-opt no-new-privileges --cap-drop ALL \

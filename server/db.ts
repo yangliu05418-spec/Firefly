@@ -96,6 +96,25 @@ export type AssetRegistrationOperation = {
   updatedAt: number;
 };
 
+export type ImageGenerationItem = { index: number; mediaId: string; width?: number; height?: number };
+export type ImageGenerationTask = {
+  id: string;
+  ownerId: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  model: string;
+  ratio: string;
+  resolution: string;
+  requestedCount: number;
+  prompt: string;
+  referenceUploadIds: string[];
+  items: ImageGenerationItem[];
+  failures: string[];
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+  completedAt?: number;
+};
+
 export type CanvasAsset = {
   id: string;
   ownerId: string;
@@ -163,6 +182,13 @@ type AssetRegistrationOperationRow = {
   created_at: number; updated_at: number;
 };
 
+type ImageGenerationTaskRow = {
+  id: string; owner_id: string; status: ImageGenerationTask["status"]; model: string; ratio: string;
+  resolution: string; requested_count: number; prompt: string; reference_upload_ids_json: string;
+  items_json: string; failures_json: string; error: string | null; created_at: number; updated_at: number;
+  completed_at: number | null;
+};
+
 type CanvasProjectRow = {
   id: string; owner_id: string; title: string; document_json: string; revision: number;
   created_at: number; updated_at: number; deleted_at: number | null;
@@ -209,6 +235,15 @@ const mapAssetRegistrationOperation = (row?: AssetRegistrationOperationRow): Ass
   groupId: row.group_id, providerAssetId: row.provider_asset_id ?? undefined, assetType: row.asset_type,
   status: row.status, attemptCount: row.attempt_count, lastError: row.last_error ?? undefined,
   createdAt: row.created_at, updatedAt: row.updated_at
+}) : null;
+
+const mapImageGenerationTask = (row?: ImageGenerationTaskRow): ImageGenerationTask | null => row ? ({
+  id: row.id, ownerId: row.owner_id, status: row.status, model: row.model, ratio: row.ratio,
+  resolution: row.resolution, requestedCount: row.requested_count, prompt: row.prompt,
+  referenceUploadIds: JSON.parse(row.reference_upload_ids_json) as string[],
+  items: JSON.parse(row.items_json) as ImageGenerationItem[], failures: JSON.parse(row.failures_json) as string[],
+  error: row.error ?? undefined, createdAt: row.created_at, updatedAt: row.updated_at,
+  completedAt: row.completed_at ?? undefined
 }) : null;
 
 const mapCanvasProject = (row?: CanvasProjectRow): CanvasProject | null => row ? ({
@@ -486,6 +521,43 @@ export class UserStore {
   listAssetRegistrationOperations(ownerId: string, limit = 100) {
     return (this.database.prepare("SELECT * FROM asset_registration_operations WHERE owner_id = ? AND status != 'failed' ORDER BY updated_at ASC LIMIT ?").all(ownerId, limit) as AssetRegistrationOperationRow[])
       .map((row) => mapAssetRegistrationOperation(row)!);
+  }
+
+  createImageGenerationTask(task: ImageGenerationTask, maximumActivePerUser = 2) {
+    return this.database.transaction(() => {
+      const active = (this.database.prepare("SELECT COUNT(*) AS count FROM image_generation_tasks WHERE owner_id = ? AND status IN ('queued', 'running')").get(task.ownerId) as { count: number }).count;
+      if (active >= maximumActivePerUser) return null;
+      this.database.prepare(`
+        INSERT INTO image_generation_tasks
+          (id, owner_id, status, model, ratio, resolution, requested_count, prompt, reference_upload_ids_json, items_json, failures_json, error, created_at, updated_at, completed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(task.id, task.ownerId, task.status, task.model, task.ratio, task.resolution, task.requestedCount,
+        task.prompt, JSON.stringify(task.referenceUploadIds), JSON.stringify(task.items), JSON.stringify(task.failures),
+        task.error ?? null, task.createdAt, task.updatedAt, task.completedAt ?? null);
+      return task;
+    }).immediate();
+  }
+
+  readImageGenerationTask(id: string) {
+    return mapImageGenerationTask(this.database.prepare("SELECT * FROM image_generation_tasks WHERE id = ?").get(id) as ImageGenerationTaskRow | undefined);
+  }
+
+  listImageGenerationTasks(ownerId: string, limit = 20) {
+    return (this.database.prepare("SELECT * FROM image_generation_tasks WHERE owner_id = ? ORDER BY created_at DESC LIMIT ?").all(ownerId, limit) as ImageGenerationTaskRow[])
+      .map((row) => mapImageGenerationTask(row)!);
+  }
+
+  updateImageGenerationTask(id: string, patch: Partial<Pick<ImageGenerationTask, "status" | "items" | "failures" | "updatedAt" | "completedAt">> & { error?: string | null }) {
+    const current = this.readImageGenerationTask(id);
+    if (!current) return null;
+    this.database.prepare(`
+      UPDATE image_generation_tasks
+      SET status = ?, items_json = ?, failures_json = ?, error = ?, updated_at = ?, completed_at = ?
+      WHERE id = ?
+    `).run(patch.status ?? current.status, JSON.stringify(patch.items ?? current.items), JSON.stringify(patch.failures ?? current.failures),
+      patch.error === undefined ? current.error ?? null : patch.error, patch.updatedAt ?? Date.now(),
+      patch.completedAt === undefined ? current.completedAt ?? null : patch.completedAt, id);
+    return this.readImageGenerationTask(id)!;
   }
 
   /**
