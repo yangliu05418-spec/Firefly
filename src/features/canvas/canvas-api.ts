@@ -1,4 +1,4 @@
-import { api, notifySignedOut } from "../../api";
+import { api, ApiError, notifySignedOut } from "../../api";
 import type { CanvasDocument, CanvasListResult, CanvasMediaRef, CanvasProjectDetail } from "./canvas-types";
 import type { AnyCanvasDocument, CanvasDocumentV2 } from "./canvas-v2-types";
 
@@ -76,8 +76,20 @@ export type CanvasJob = {
 
 export const canvasV2Config = () => api.get<{ enabled: boolean }>("/api/canvas/config");
 export const getCanvasV2 = (id: string) => api.get<CanvasV2ProjectDetail>(`/api/canvases/${encode(id)}`);
-export const acquireCanvasLease = (id: string, clientId: string, takeover = false) => api.post<CanvasLease>(`/api/canvases/${encode(id)}/lease`, { clientId, takeover });
-export const renewCanvasLease = (id: string, clientId: string, token: string) => fetch(`/api/canvases/${encode(id)}/lease`, { method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clientId, token }) });
+export const acquireCanvasLease = async (id: string, clientId: string, takeover = false): Promise<CanvasLease> => {
+  const response = await fetch(`/api/canvases/${encode(id)}/lease`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clientId, takeover }) });
+  const body = await response.json().catch(() => ({})) as CanvasLease & { error?: string; code?: string; requestId?: string };
+  if (response.status === 401) notifySignedOut();
+  // A held lease is an expected read-only state, not an API failure. Returning
+  // the 409 body lets a second window load the canvas without losing its draft.
+  if (response.ok || (response.status === 409 && "acquired" in body)) return body;
+  throw new ApiError(body.error ?? `编辑状态确认失败 (${response.status})`, response.status, body.code, body.requestId);
+};
+export const renewCanvasLease = async (id: string, clientId: string, token: string) => {
+  const response = await fetch(`/api/canvases/${encode(id)}/lease`, { method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clientId, token }) });
+  if (response.status === 401) notifySignedOut();
+  return response;
+};
 export const releaseCanvasLease = (id: string, clientId: string, token: string) => fetch(`/api/canvases/${encode(id)}/lease`, { method: "DELETE", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clientId, token }), keepalive: true });
 
 export const saveCanvasV2 = async (id: string, revision: number, document: CanvasDocumentV2, leaseToken: string): Promise<CanvasV2ProjectDetail> => {
