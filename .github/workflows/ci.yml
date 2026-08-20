@@ -68,6 +68,32 @@ jobs:
             fi
           done < <(git ls-files '*.sh')
 
+      - name: Verify legacy Nginx configuration is archived
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_root=$(mktemp -d)
+          trap 'rm -rf "$test_root"' EXIT
+          mkdir -p "$test_root"/{sites-enabled,sites-available,sites-archive,runtime,bin}
+          printf '%s\n' 'server { listen 80; }' > "$test_root/firefly.conf"
+          printf '%s\n' 'server { listen 443 ssl http2; }' > "$test_root/sites-available/internal-image-studio.conf"
+          ln -s "$test_root/sites-available/internal-image-studio.conf" "$test_root/sites-enabled/internal-image-studio.conf"
+          printf '%s\n' '#!/bin/sh' 'exit 0' > "$test_root/bin/nginx"
+          printf '%s\n' '#!/bin/sh' 'exit 0' > "$test_root/bin/systemctl"
+          chmod +x "$test_root/bin/nginx" "$test_root/bin/systemctl"
+          NGINX_ENABLED_DIR="$test_root/sites-enabled" \
+          NGINX_AVAILABLE_DIR="$test_root/sites-available" \
+          NGINX_ARCHIVE_DIR="$test_root/sites-archive" \
+          NGINX_RUNTIME_DIR="$test_root/runtime" \
+          NGINX_BIN="$test_root/bin/nginx" \
+          SYSTEMCTL_BIN="$test_root/bin/systemctl" \
+            sudo --preserve-env=NGINX_ENABLED_DIR,NGINX_AVAILABLE_DIR,NGINX_ARCHIVE_DIR,NGINX_RUNTIME_DIR,NGINX_BIN,SYSTEMCTL_BIN \
+              sh ops/install-nginx-config.sh "$test_root/firefly.conf"
+          test ! -e "$test_root/sites-enabled/internal-image-studio.conf"
+          test ! -e "$test_root/sites-available/internal-image-studio.conf"
+          test -f "$test_root/sites-archive/internal-image-studio.conf"
+          ! grep -R 'listen 443 ssl http2' "$test_root/sites-enabled"
+
       - name: Reject oversized tracked files
         shell: bash
         env:
