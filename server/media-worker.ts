@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import { config } from "./config.js";
@@ -8,6 +9,7 @@ import { MAX_MEDIA_RECOVERY_ATTEMPTS } from "./db.js";
 import { transcodePreview } from "./preview-transcode.js";
 import { closeWorkersWithin } from "./shutdown.js";
 import { markAssetIngestFailed, registerQueuedAsset } from "./asset-ingest.js";
+import { copyPreparedCanvasAsset } from "./canvas-assets.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const numberHeader = (value: unknown) => Number(value ?? 0) || 0;
@@ -139,6 +141,25 @@ const archiveOutput = async (data: { taskId: string; sourceUrl: string; outputFo
       await enqueuePosterRecovery(task.id).catch(() => undefined);
     }
     await saveTask({ ...current, status: "succeeded", mediaStatus: "ready", mediaRevision: (current.mediaRevision ?? 0) + 1, mediaLastError: undefined, updatedAt: Date.now() });
+    const canvasJob = users.readCanvasJobByProviderTask(task.id);
+    if (canvasJob && canvasJob.status !== "cancelled" && canvasJob.ownerId === task.ownerId) {
+      const projectAsset = users.upsertCanvasProjectAsset({
+        id: `canvas-project-asset-${crypto.randomUUID()}`,
+        ownerId: canvasJob.ownerId,
+        canvasId: canvasJob.canvasId,
+        kind: "video",
+        sourceType: "generation",
+        sourceId: task.id,
+        title: task.prompt.slice(0, 80) || "生成视频",
+        contentType,
+        size,
+        status: "ready",
+        createdAt: now,
+        updatedAt: now,
+      });
+      const completedJob = users.updateCanvasJob(canvasJob.id, { status: "succeeded", resultAssetId: projectAsset.id, error: null });
+      await connection.publish(`canvas:events:${canvasJob.canvasId}`, JSON.stringify({ type: "canvas_job", job: completedJob }));
+    }
     await enqueuePreviewRecovery(task.id).catch((error) => console.warn(JSON.stringify({ type: "tos_preview_queue_failed", at: new Date().toISOString(), taskId: task.id, code: (error as { code?: string }).code ?? "unknown" })));
     console.info(JSON.stringify({ type: "tos_fetch_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, strategy: finalAttempt ? "stream_multipart" : "url_fetch", size, posterReady, elapsedMs: Date.now() - startedAt, requestId: head.requestId }));
   } catch (error) {
@@ -197,6 +218,7 @@ const worker = new Worker("media", async (job) => {
   if (job.name === "reconcile-deletes") return deletePendingMedia();
   if (job.name === "create-poster") return createTaskPoster(job.data.taskId);
   if (job.name === "delete-canvas-assets") return deleteCanvasAssets(job.data.canvasId);
+  if (job.name === "copy-canvas-asset") return copyPreparedCanvasAsset(job.data.assetId);
   throw new Error(`Unknown media job: ${job.name}`);
 }, { connection, concurrency: 2, lockDuration: 120000 });
 
@@ -220,6 +242,16 @@ assetWorker.on("failed", (job, error) => {
 });
 
 worker.on("failed", async (job) => {
+  if (job?.name === "copy-canvas-asset") {
+    if (job.attemptsMade < (job.opts.attempts ?? 1)) return;
+    const asset = users.readCanvasAsset(job.data.assetId);
+    if (asset) {
+      users.updateCanvasAsset(asset.id, { status: "failed" });
+      users.updateCanvasProjectAssetByCanvasAsset(asset.id, { status: "failed", size: asset.size, contentType: asset.contentType });
+      console.warn(JSON.stringify({ type: "canvas_copy_failed", at: new Date().toISOString(), assetId: asset.id, ownerId: asset.ownerId, attempts: job.attemptsMade }));
+    }
+    return;
+  }
   if (!job || job.name !== "archive-output" || job.attemptsMade < (job.opts.attempts ?? 1)) return;
   const task = await readTask(job.data.taskId, true);
   if (!task || task.deletedAt) return;
@@ -262,18 +294,25 @@ const reconcileAssets = async () => {
   }
 };
 const assetReconcile = setInterval(() => void reconcileAssets().catch((error) => console.warn(JSON.stringify({ type: "asset_ingest_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }))), 60_000);
+const reconcileCanvasCopies = async () => {
+  for (const asset of users.copyingCanvasAssets(100)) {
+    await mediaQueue.add("copy-canvas-asset", { assetId: asset.id }, { jobId: `copy-${asset.id}`, attempts: 5, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } });
+  }
+};
+const canvasCopyReconcile = setInterval(() => void reconcileCanvasCopies().catch((error) => console.warn(JSON.stringify({ type: "canvas_copy_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }))), 60_000);
 void mediaQueue.add("reconcile-deletes", {}, { removeOnComplete: true, removeOnFail: true });
 void deleteCanvasAssets().catch((error) => console.warn(JSON.stringify({ type: "canvas_asset_cleanup_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" })));
 void reconcileArchives().catch(() => undefined);
 void reconcilePosters().catch(() => undefined);
 void reconcilePreviews().catch(() => undefined);
 void reconcileAssets().catch(() => undefined);
+void reconcileCanvasCopies().catch(() => undefined);
 
 let shuttingDown = false;
 const shutdown = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
-  clearInterval(reconcile); clearInterval(archiveReconcile); clearInterval(posterReconcile); clearInterval(previewReconcile); clearInterval(assetReconcile);
+  clearInterval(reconcile); clearInterval(archiveReconcile); clearInterval(posterReconcile); clearInterval(previewReconcile); clearInterval(assetReconcile); clearInterval(canvasCopyReconcile);
   const graceful = await closeWorkersWithin([worker, previewWorker, assetWorker], config.shutdownGraceMs);
   console.info(JSON.stringify({ type: "worker_shutdown", at: new Date().toISOString(), worker: "media", graceful }));
   await connection.quit(); users.close(); process.exit(0);

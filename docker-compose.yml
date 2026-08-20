@@ -80,6 +80,22 @@ services:
         condition: service_completed_successfully
     stop_grace_period: 35s
     logging: *default-logging
+  canvas-worker:
+    build: .
+    restart: unless-stopped
+    command: ["node", "dist-server/canvas-worker.js"]
+    env_file:
+      - .env
+      - .env.feishu
+    volumes:
+      - /srv/firefly/data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 35s
+    logging: *default-logging
   redis:
     image: redis:7.4-alpine
     restart: unless-stopped

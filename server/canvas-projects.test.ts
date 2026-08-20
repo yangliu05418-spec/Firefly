@@ -21,7 +21,7 @@ const documentWithNodes = (count: number, overrides: Partial<CanvasProject> = {}
     id: `node-${index}`, type: "text", title: `节点 ${index}`,
     position: { x: index * 100, y: 0 }, width: 220, height: 160, metadata: {}
   }));
-  return JSON.stringify({ ...DEFAULT_CANVAS_DOCUMENT, nodes });
+  return JSON.stringify({ version: 1, viewport: { x: 0, y: 0, k: 1 }, background: "dots", nodes, connections: [] });
 };
 
 describe("canvas project persistence", () => {
@@ -99,13 +99,14 @@ describe("canvas document validation and projection", () => {
   it("validates and defaults a full document", () => {
     const parsed = parseCanvasDocument(documentWithNodes(2));
     expect(parsed.version).toBe(1);
+    if (parsed.version !== 1) throw new Error("expected v1 fixture");
     expect(parsed.nodes).toHaveLength(2);
     expect(parsed.nodes[0].title).toBe("节点 0");
     expect(parsed.nodes[0].metadata).toEqual({});
   });
 
   it("rejects invalid shapes and tolerates corrupt JSON", () => {
-    expect(() => parseCanvasDocument('{"version":2,"viewport":{},"background":"x","nodes":[],"connections":[]}')).toThrow();
+    expect(() => parseCanvasDocument('{"version":2,"viewport":{},"background":"x","preferences":{},"nodes":[],"connections":[]}')).toThrow();
     expect(() => parseCanvasDocument('{"version":1,"viewport":{"x":0,"y":0,"k":1},"background":"dots","nodes":[{"id":"n1","type":"text","position":{"x":0,"y":0}}],"connections":[]}')).toThrow();
     expect(() => parseCanvasDocument('{"version":1,"viewport":{"x":0,"y":0,"k":1},"background":"dots","nodes":[],"connections":[{"id":"c1","fromNodeId":"n1"}]}')).toThrow();
     expect(parseCanvasDocumentSafe("not json at all")).toBeNull();

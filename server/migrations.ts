@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 // Compatibility bridge: deploy this reader before the Canvas V2 migration so
 // the previous image remains a valid blue/green rollback target after schema 4.
 export const MAX_SUPPORTED_SCHEMA_VERSION = 4;
@@ -174,6 +174,94 @@ const separateProviderAssetIdentity = (database: Database.Database) => {
   database.exec("CREATE UNIQUE INDEX IF NOT EXISTS user_assets_provider_id_idx ON user_assets(provider_asset_id) WHERE provider_asset_id IS NOT NULL AND deleted_at IS NULL");
 };
 
+const addCanvasV2Tables = (database: Database.Database) => {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS canvas_project_assets (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      canvas_id TEXT NOT NULL,
+      canvas_asset_id TEXT,
+      kind TEXT NOT NULL CHECK (kind IN ('image', 'video', 'audio')),
+      source_type TEXT NOT NULL CHECK (source_type IN ('canvas_asset', 'generation', 'generated', 'user_asset', 'montage')),
+      source_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      content_type TEXT NOT NULL DEFAULT '',
+      size INTEGER NOT NULL DEFAULT 0,
+      width INTEGER,
+      height INTEGER,
+      duration_ms INTEGER,
+      status TEXT NOT NULL DEFAULT 'ready' CHECK (status IN ('copying', 'ready', 'failed')),
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      deleted_at INTEGER,
+      FOREIGN KEY (owner_id) REFERENCES users(id),
+      FOREIGN KEY (canvas_id) REFERENCES canvas_projects(id),
+      FOREIGN KEY (canvas_asset_id) REFERENCES canvas_assets(id)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS canvas_project_assets_source_idx
+      ON canvas_project_assets(canvas_id, source_type, source_id) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS canvas_project_assets_canvas_created_idx
+      ON canvas_project_assets(canvas_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS canvas_jobs (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      canvas_id TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('text', 'image', 'video', 'character_tool')),
+      status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      result_asset_id TEXT,
+      provider_task_id TEXT,
+      partial_text TEXT NOT NULL DEFAULT '',
+      error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      cancelled_at INTEGER,
+      FOREIGN KEY (owner_id) REFERENCES users(id),
+      FOREIGN KEY (canvas_id) REFERENCES canvas_projects(id),
+      FOREIGN KEY (result_asset_id) REFERENCES canvas_project_assets(id)
+    );
+    CREATE INDEX IF NOT EXISTS canvas_jobs_canvas_updated_idx ON canvas_jobs(canvas_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS canvas_jobs_status_updated_idx ON canvas_jobs(status, updated_at);
+    CREATE INDEX IF NOT EXISTS canvas_jobs_owner_kind_status_idx ON canvas_jobs(owner_id, kind, status);
+
+    CREATE TABLE IF NOT EXISTS canvas_montages (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      canvas_id TEXT NOT NULL,
+      revision INTEGER NOT NULL DEFAULT 0,
+      timeline_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      deleted_at INTEGER,
+      FOREIGN KEY (owner_id) REFERENCES users(id),
+      FOREIGN KEY (canvas_id) REFERENCES canvas_projects(id)
+    );
+    CREATE INDEX IF NOT EXISTS canvas_montages_canvas_updated_idx ON canvas_montages(canvas_id, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS canvas_exports (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      canvas_id TEXT NOT NULL,
+      montage_id TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('uploading', 'verifying', 'ready', 'failed', 'cancelled')),
+      object_key TEXT NOT NULL UNIQUE,
+      tos_upload_id TEXT,
+      parts_json TEXT NOT NULL DEFAULT '[]',
+      result_asset_id TEXT,
+      error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (owner_id) REFERENCES users(id),
+      FOREIGN KEY (canvas_id) REFERENCES canvas_projects(id),
+      FOREIGN KEY (montage_id) REFERENCES canvas_montages(id),
+      FOREIGN KEY (result_asset_id) REFERENCES canvas_project_assets(id)
+    );
+    CREATE INDEX IF NOT EXISTS canvas_exports_status_updated_idx ON canvas_exports(status, updated_at);
+  `);
+};
+
 export const migrateDatabase = (databasePath: string) => {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const database = new Database(databasePath);
@@ -196,6 +284,10 @@ export const migrateDatabase = (databasePath: string) => {
       if (version < 3) {
         separateProviderAssetIdentity(database);
         database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(3, "separate-provider-asset-identity", Date.now());
+      }
+      if (version < 4) {
+        addCanvasV2Tables(database);
+        database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(4, "add-canvas-v2", Date.now());
       }
       assertSchemaVersion(database);
     }).exclusive();
