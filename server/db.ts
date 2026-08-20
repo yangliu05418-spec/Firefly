@@ -439,7 +439,7 @@ export class UserStore {
   recoverablePreviewTasks(limit = 20) {
     const rows = this.database.prepare(`
       SELECT * FROM generation_tasks
-      WHERE deleted_at IS NULL AND status = 'succeeded' AND media_status = 'ready'
+      WHERE deleted_at IS NULL AND status = 'succeeded' AND media_status IN ('archiving', 'ready')
         AND EXISTS (
           SELECT 1 FROM media_objects
           WHERE media_objects.task_id = generation_tasks.id AND media_objects.kind = 'output' AND media_objects.status = 'ready'
@@ -448,7 +448,7 @@ export class UserStore {
           SELECT 1 FROM media_objects
           WHERE media_objects.task_id = generation_tasks.id AND media_objects.kind = 'preview' AND media_objects.status = 'ready'
         )
-      ORDER BY updated_at ASC LIMIT ?
+      ORDER BY updated_at DESC LIMIT ?
     `).all(limit) as TaskRow[];
     return rows.map((row) => mapTask(row)!);
   }
@@ -665,6 +665,11 @@ export class UserStore {
   updateCanvasProjectAssetByCanvasAsset(canvasAssetId: string, patch: Pick<CanvasProjectAsset, "status" | "size" | "contentType">) {
     this.database.prepare("UPDATE canvas_project_assets SET status = ?, size = ?, content_type = ?, updated_at = ? WHERE canvas_asset_id = ? AND deleted_at IS NULL")
       .run(patch.status, patch.size, patch.contentType, Date.now(), canvasAssetId);
+  }
+
+  updateCanvasProjectAssetStatusBySource(sourceType: CanvasProjectAsset["sourceType"], sourceId: string, status: CanvasProjectAsset["status"]) {
+    return this.database.prepare("UPDATE canvas_project_assets SET status = ?, updated_at = ? WHERE source_type = ? AND source_id = ? AND deleted_at IS NULL")
+      .run(status, Date.now(), sourceType, sourceId).changes;
   }
 
   listCanvasProjectAssets(canvasId: string, ownerId: string, limit = 100, before = Number.MAX_SAFE_INTEGER) {

@@ -270,13 +270,20 @@ export const streamObjectToTos = async (
   }
 };
 
-export const streamObjectFromUrl = async (key: string, url: string, fileName: string, contentTypeHint: string, onPart?: (partNumber: number, bytes: number) => void) => {
+export const streamObjectFromUrl = async (
+  key: string,
+  url: string,
+  fileName: string,
+  contentTypeHint: string,
+  onPart?: (partNumber: number, bytes: number) => void,
+  partSize = config.tosUploadPartSize,
+) => {
   const controller = new AbortController();
   const sourceTimer = setTimeout(() => controller.abort(), config.tosSourceStreamTimeoutMs);
   try {
     const response = await fetch(url, { signal: controller.signal });
     if (!response.ok || !response.body) throw new Error(`上游成片读取失败 (${response.status})`);
-    return await streamObjectToTos(key, response.body as AsyncIterable<Uint8Array>, fileName, response.headers.get("content-type") || contentTypeHint, onPart);
+    return await streamObjectToTos(key, response.body as AsyncIterable<Uint8Array>, fileName, response.headers.get("content-type") || contentTypeHint, onPart, partSize);
   } catch (error) {
     if ((error as Error).name === "AbortError") throw new Error(`上游流式归档超过 ${Math.round(config.tosSourceStreamTimeoutMs / 1000)} 秒`);
     throw error;

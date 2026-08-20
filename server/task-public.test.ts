@@ -63,6 +63,17 @@ describe("publicTask media exposure", () => {
     expect(task.temporaryVideoUrl).toBeUndefined();
   });
 
+  it("keeps a database-ready original behind the archive state until its streaming preview is verified", () => {
+    const task = publicTask(makeTask("ready"), { stableMediaReady: false });
+
+    expect(task.mediaStatus).toBe("archiving");
+    expect(task.videoUrl).toBeUndefined();
+    expect(task.downloadUrl).toBeUndefined();
+    expect(task.posterUrl).toBeUndefined();
+    expect(task.temporaryVideoUrl).toBe("https://provider.example/temporary.mp4?secret=1");
+    expect(task.mediaSource).toBeUndefined();
+  });
+
   it("never exposes media for non-succeeded tasks", () => {
     const task = publicTask(makeTask("ready", { status: "running" }));
     expect(task.videoUrl).toBeUndefined();

@@ -44,6 +44,9 @@ describe("Canvas V2 durable recovery records", () => {
     expect(database.upsertCanvasProjectAsset(asset).id).toBe(asset.id);
     expect(database.upsertCanvasProjectAsset({ ...asset, id: "duplicate-id", title: "更新标题", updatedAt: now + 1 }).id).toBe(asset.id);
     expect(database.listCanvasProjectAssets("canvas-v2", user.id)).toHaveLength(1);
+    expect(database.updateCanvasProjectAssetStatusBySource("generation", "task-1", "copying")).toBe(1);
+    expect(database.readCanvasProjectAsset(asset.id)?.status).toBe("copying");
+    expect(database.updateCanvasProjectAssetStatusBySource("generation", "task-1", "ready")).toBe(1);
     database.createCanvasJob({ id: "canvas-job-1", ownerId: user.id, canvasId: "canvas-v2", nodeId: "video-1", kind: "video", status: "running", payload: {}, providerTaskId: "task-1", partialText: "", createdAt: now, updatedAt: now });
     expect(database.readCanvasJobByProviderTask("task-1")?.id).toBe("canvas-job-1");
     database.updateCanvasJob("canvas-job-1", { status: "succeeded", resultAssetId: asset.id, error: null });

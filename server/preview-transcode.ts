@@ -2,6 +2,9 @@ import { spawn } from "node:child_process";
 import { config } from "./config.js";
 import { abortIncompleteUploadsForKey, deleteObject, headObject, signedObjectUrl, streamObjectToTos, transcodeVideoOnTos, verifyProgressiveMp4, type VideoTranscodeObserver } from "./tos.js";
 
+const serverTranscodeCooldownMs = 15 * 60 * 1000;
+let serverTranscodeDisabledUntil = 0;
+
 export const transcodePreview = async (sourceKey: string, targetKey: string, onPart?: (partNumber: number, bytes: number, requestId?: string) => void, observer: VideoTranscodeObserver = {}) => {
   let existing: Awaited<ReturnType<typeof headObject>> | null = null;
   try { existing = await headObject(targetKey); }
@@ -14,13 +17,20 @@ export const transcodePreview = async (sourceKey: string, targetKey: string, onP
     }
   }
   await abortIncompleteUploadsForKey(targetKey);
-  try {
-    const head = await transcodeVideoOnTos(sourceKey, targetKey, observer);
-    await verifyProgressiveMp4(targetKey);
-    return head;
-  } catch (error) {
-    observer.stateChanged?.("fallback", "worker_multipart", -1, error instanceof Error ? error.message : "TOS 服务端转码失败");
-    await deleteObject(targetKey).catch(() => undefined);
+  if (Date.now() >= serverTranscodeDisabledUntil) {
+    try {
+      const head = await transcodeVideoOnTos(sourceKey, targetKey, observer);
+      await verifyProgressiveMp4(targetKey);
+      serverTranscodeDisabledUntil = 0;
+      return head;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "TOS 服务端转码失败";
+      if (/assume role access denied/i.test(message)) serverTranscodeDisabledUntil = Date.now() + serverTranscodeCooldownMs;
+      observer.stateChanged?.("fallback", "worker_multipart", -1, message);
+      await deleteObject(targetKey).catch(() => undefined);
+    }
+  } else {
+    observer.stateChanged?.("fallback", "worker_multipart", -1, "TOS 服务端转码权限冷却中，直接使用本地流式快启转码");
   }
   const sourceUrl = signedObjectUrl(sourceKey, { expires: Math.max(1800, Math.ceil(config.tosSourceStreamTimeoutMs / 1000) + 300), fileName: "source.mp4" });
   const maxRate = `${Math.max(500, Math.floor(config.tosPreviewMaxBitrate / 1000))}k`;

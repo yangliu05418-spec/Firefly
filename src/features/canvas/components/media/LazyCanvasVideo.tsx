@@ -13,6 +13,8 @@ export function LazyCanvasVideo({ src }: { src: string | null }) {
   const [state, setState] = useState<MediaState>(src ? "idle" : "error");
   const [retryCount, setRetryCount] = useState(0);
   const retryTimer = useRef<number | null>(null);
+  const bufferWatchdog = useRef<number | null>(null);
+  const automaticRecoveries = useRef(0);
   const resumeTime = useRef(0);
   const readyOnce = useRef(false);
 
@@ -43,12 +45,14 @@ export function LazyCanvasVideo({ src }: { src: string | null }) {
     setState("loading");
     return () => {
       if (retryTimer.current !== null) window.clearTimeout(retryTimer.current);
+      if (bufferWatchdog.current !== null) window.clearTimeout(bufferWatchdog.current);
     };
   }, [inView, src, retryCount]);
 
   useEffect(() => {
     readyOnce.current = false;
     resumeTime.current = 0;
+    automaticRecoveries.current = 0;
     setRetryCount(0);
   }, [src]);
 
@@ -63,10 +67,31 @@ export function LazyCanvasVideo({ src }: { src: string | null }) {
 
   const retry = () => {
     if (retryTimer.current !== null) window.clearTimeout(retryTimer.current);
+    if (bufferWatchdog.current !== null) window.clearTimeout(bufferWatchdog.current);
+    bufferWatchdog.current = null;
     setRetryCount((count) => count + 1);
   };
 
+  const clearBufferWatchdog = () => {
+    if (bufferWatchdog.current !== null) window.clearTimeout(bufferWatchdog.current);
+    bufferWatchdog.current = null;
+  };
+
+  const beginBufferRecovery = (video: HTMLVideoElement) => {
+    if (!readyOnce.current || video.paused || bufferWatchdog.current !== null) return;
+    setState("buffering");
+    bufferWatchdog.current = window.setTimeout(() => {
+      bufferWatchdog.current = null;
+      if (!navigator.onLine) { setState("error"); return; }
+      if (video.paused || video.ended) return;
+      if (Number.isFinite(video.currentTime)) resumeTime.current = Math.max(0, video.currentTime);
+      if (automaticRecoveries.current >= 2) { setState("error"); return; }
+      automaticRecoveries.current += 1; setRetryCount((count) => count + 1);
+    }, 15_000);
+  };
+
   const handleError = (video: HTMLVideoElement) => {
+    clearBufferWatchdog();
     if (readyOnce.current && Number.isFinite(video.currentTime)) resumeTime.current = Math.max(0, video.currentTime);
     if (!navigator.onLine) {
       setState("error");
@@ -98,13 +123,9 @@ export function LazyCanvasVideo({ src }: { src: string | null }) {
             readyOnce.current = true;
             setState("ready");
           }}
-          onPlaying={() => setState("ready")}
-          onWaiting={(event) => {
-            if (readyOnce.current && !event.currentTarget.paused) setState("buffering");
-          }}
-          onStalled={(event) => {
-            if (readyOnce.current && !event.currentTarget.paused) setState("buffering");
-          }}
+          onPlaying={() => { clearBufferWatchdog(); setState("ready"); }}
+          onWaiting={(event) => beginBufferRecovery(event.currentTarget)}
+          onStalled={(event) => beginBufferRecovery(event.currentTarget)}
           onError={(event) => handleError(event.currentTarget)}
         />
       )}

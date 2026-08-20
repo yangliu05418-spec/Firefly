@@ -26,16 +26,35 @@ const enqueuePreviewRecovery = async (taskId: string) => {
   if (!config.tosPreviewTranscodeEnabled) return false;
   await previewQueue.add("create-preview", { taskId }, {
     jobId: `preview-recovery-${taskId}-${Math.floor(Date.now() / previewRecoveryBucketMs)}`, attempts: 3, backoff: { type: "exponential", delay: 15_000 },
+    priority: 10,
     removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 24 * 3600 }
   });
   return true;
+};
+const enqueueLivePreview = async (taskId: string) => {
+  if (!config.tosPreviewTranscodeEnabled) return false;
+  await previewQueue.add("create-preview", { taskId }, {
+    jobId: `preview-live-${taskId}-${Math.floor(Date.now() / previewRecoveryBucketMs)}`,
+    attempts: 3, backoff: { type: "exponential", delay: 15_000 }, priority: 1,
+    removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 24 * 3600 }
+  });
+  return true;
+};
+const finalizeCanvasVideoPreview = async (taskId: string) => {
+  users.updateCanvasProjectAssetStatusBySource("generation", taskId, "ready");
+  const canvasJob = users.readCanvasJobByProviderTask(taskId);
+  if (!canvasJob || canvasJob.status === "cancelled") return;
+  const projectAsset = users.readCanvasProjectAssetBySource(canvasJob.canvasId, "generation", taskId);
+  if (!projectAsset) return;
+  const completedJob = users.updateCanvasJob(canvasJob.id, { status: "succeeded", resultAssetId: projectAsset.id, error: null });
+  await connection.publish(`canvas:events:${canvasJob.canvasId}`, JSON.stringify({ type: "canvas_job", job: completedJob }));
 };
 
 const createTaskPreview = async (taskId: string) => {
   if (!config.tosPreviewTranscodeEnabled) return false;
   const task = await readTask(taskId, true);
   if (!task || task.deletedAt || !task.ownerId) return false;
-  if (users.readTaskMedia(taskId, "preview")) return true;
+  if (users.readTaskMedia(taskId, "preview")) { await finalizeCanvasVideoPreview(taskId); return true; }
   const output = users.readTaskMedia(taskId, "output");
   if (!output) return false;
   const startedAt = Date.now();
@@ -60,8 +79,9 @@ const createTaskPreview = async (taskId: string) => {
     const previewHeaders = optimized.headers as Record<string, string | undefined>;
     const now = Date.now();
     const size = numberHeader(previewData.contentLength ?? previewHeaders["content-length"]);
-    await saveTask({ ...current, mediaRevision: (current.mediaRevision ?? 0) + 1, updatedAt: now });
     users.upsertMedia({ id: `${task.id}:preview`, ownerId: task.ownerId, taskId: task.id, kind: "preview", objectKey: previewKey, status: "ready", fileName: "preview.mp4", contentType: "video/mp4", size, etag: String(previewData.etag ?? previewHeaders.etag ?? "").replace(/^"|"$/g, ""), createdAt: now, updatedAt: now });
+    await saveTask({ ...current, mediaRevision: (current.mediaRevision ?? 0) + 1, updatedAt: now });
+    await finalizeCanvasVideoPreview(task.id);
     console.info(JSON.stringify({ type: "tos_preview_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, sourceBytes: output.size, previewBytes: size, ratio: output.size ? Number((size / output.size).toFixed(3)) : undefined, atoms: structure.atoms, elapsedMs: Date.now() - startedAt, requestId: previewHead.requestId }));
     return true;
   } catch (error) {
@@ -111,7 +131,7 @@ const archiveOutput = async (data: { taskId: string; sourceUrl: string; outputFo
   console.info(JSON.stringify({ type: "tos_fetch_started", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, strategy: finalAttempt ? "stream_multipart" : "url_fetch" }));
   try {
     if (finalAttempt) {
-      await streamObjectFromUrl(objectKey, data.sourceUrl, `result.${data.outputFormat}`, data.outputFormat === "mov" ? "video/quicktime" : "video/mp4", (partNumber, bytes) => console.info(JSON.stringify({ type: "tos_stream_part_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, partNumber, bytes })));
+      await streamObjectFromUrl(objectKey, data.sourceUrl, `result.${data.outputFormat}`, data.outputFormat === "mov" ? "video/quicktime" : "video/mp4", (partNumber, bytes) => console.info(JSON.stringify({ type: "tos_stream_part_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, partNumber, bytes })), 5 * 1024 * 1024);
     } else {
       await fetchObjectFromUrl(objectKey, data.sourceUrl, {
         taskCreated: (fetchTaskId) => {
@@ -153,14 +173,17 @@ const archiveOutput = async (data: { taskId: string; sourceUrl: string; outputFo
         title: task.prompt.slice(0, 80) || "生成视频",
         contentType,
         size,
-        status: "ready",
+        status: config.tosPreviewTranscodeEnabled ? "copying" : "ready",
         createdAt: now,
         updatedAt: now,
       });
-      const completedJob = users.updateCanvasJob(canvasJob.id, { status: "succeeded", resultAssetId: projectAsset.id, error: null });
-      await connection.publish(`canvas:events:${canvasJob.canvasId}`, JSON.stringify({ type: "canvas_job", job: completedJob }));
+      if (config.tosPreviewTranscodeEnabled) users.updateCanvasJob(canvasJob.id, { resultAssetId: projectAsset.id, error: null });
+      else {
+        const completedJob = users.updateCanvasJob(canvasJob.id, { status: "succeeded", resultAssetId: projectAsset.id, error: null });
+        await connection.publish(`canvas:events:${canvasJob.canvasId}`, JSON.stringify({ type: "canvas_job", job: completedJob }));
+      }
     }
-    await enqueuePreviewRecovery(task.id).catch((error) => console.warn(JSON.stringify({ type: "tos_preview_queue_failed", at: new Date().toISOString(), taskId: task.id, code: (error as { code?: string }).code ?? "unknown" })));
+    await enqueueLivePreview(task.id).catch((error) => console.warn(JSON.stringify({ type: "tos_preview_queue_failed", at: new Date().toISOString(), taskId: task.id, code: (error as { code?: string }).code ?? "unknown" })));
     console.info(JSON.stringify({ type: "tos_fetch_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, strategy: finalAttempt ? "stream_multipart" : "url_fetch", size, posterReady, elapsedMs: Date.now() - startedAt, requestId: head.requestId }));
   } catch (error) {
     const current = await readTask(task.id, true);
@@ -225,7 +248,7 @@ const worker = new Worker("media", async (job) => {
 const previewWorker = new Worker("preview", async (job) => {
   if (job.name !== "create-preview") throw new Error(`Unknown preview job: ${job.name}`);
   return createTaskPreview(job.data.taskId);
-}, { connection, concurrency: 1, lockDuration: config.tosTranscodeDeadlineMs + config.tosSourceStreamTimeoutMs + 60_000 });
+}, { connection, concurrency: config.tosPreviewConcurrency, lockDuration: config.tosTranscodeDeadlineMs + config.tosSourceStreamTimeoutMs + 60_000 });
 
 const assetWorker = new Worker("asset-ingest", async (job) => {
   if (job.name !== "register") throw new Error(`Unknown asset job: ${job.name}`);
@@ -287,6 +310,10 @@ const reconcilePreviews = async () => {
   if (!config.tosPreviewTranscodeEnabled) return;
   for (const task of users.recoverablePreviewTasks(20)) await enqueuePreviewRecovery(task.id);
 };
+const deprioritizeExistingPreviewBacklog = async () => {
+  const waiting = await previewQueue.getWaiting(0, 499);
+  await Promise.all(waiting.map((job) => job.changePriority({ priority: 10 })));
+};
 const previewReconcile = setInterval(() => void reconcilePreviews().catch((error) => console.warn(JSON.stringify({ type: "tos_preview_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }))), 15 * 60 * 1000);
 const reconcileAssets = async () => {
   for (const asset of users.listProcessingUserAssets(100)) {
@@ -304,7 +331,7 @@ void mediaQueue.add("reconcile-deletes", {}, { removeOnComplete: true, removeOnF
 void deleteCanvasAssets().catch((error) => console.warn(JSON.stringify({ type: "canvas_asset_cleanup_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" })));
 void reconcileArchives().catch(() => undefined);
 void reconcilePosters().catch(() => undefined);
-void reconcilePreviews().catch(() => undefined);
+void deprioritizeExistingPreviewBacklog().then(reconcilePreviews).catch((error) => console.warn(JSON.stringify({ type: "tos_preview_priority_reconcile_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" })));
 void reconcileAssets().catch(() => undefined);
 void reconcileCanvasCopies().catch(() => undefined);
 

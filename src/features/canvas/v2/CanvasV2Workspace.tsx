@@ -109,6 +109,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   const serverSaveTimer = useRef<number | undefined>(undefined);
   const saving = useRef<Promise<void> | null>(null);
   const saveAgain = useRef(false);
+  const flushSaveRef = useRef<() => Promise<void>>(async () => undefined);
   const latestDocument = useRef<CanvasDocumentV2>(defaultCanvasDocumentV2());
   const history = useRef<CanvasDocumentV2[]>([]);
   const historyCursor = useRef(-1);
@@ -295,6 +296,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     await saving.current;
     if (saveAgain.current) { saveAgain.current = false; await flushSave(); }
   }, [canvasId, documentFromFlow, readOnly]);
+  useEffect(() => { flushSaveRef.current = flushSave; }, [flushSave]);
 
   const scheduleSave = useCallback(() => {
     if (!initialized.current || readOnly) return;
@@ -309,14 +311,17 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     if (!leaseToken) return;
     const renew = async () => {
       const response = await renewCanvasLease(canvasId, cid, leaseToken);
-      if (!response.ok) { setReadOnly(true); setSaveState("conflict"); setMessage("另一个窗口已接管编辑，本地草稿仍安全保留"); }
+      if (!response.ok) {
+        leaseTokenRef.current = ""; setLeaseToken(""); setReadOnly(true); setSaveState("conflict");
+        setMessage("另一个窗口已接管编辑，本地草稿仍安全保留");
+      }
     };
     const timer = window.setInterval(() => void renew(), 10_000);
-    const onVisibility = () => { if (document.visibilityState === "visible") void renew(); else void flushSave(); };
-    const onOnline = () => void flushSave();
+    const onVisibility = () => { if (document.visibilityState === "visible") void renew(); else void flushSaveRef.current(); };
+    const onOnline = () => void flushSaveRef.current();
     document.addEventListener("visibilitychange", onVisibility); window.addEventListener("online", onOnline);
     return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", onVisibility); window.removeEventListener("online", onOnline); void releaseCanvasLease(canvasId, cid, leaseToken); };
-  }, [canvasId, cid, flushSave, leaseToken]);
+  }, [canvasId, cid, leaseToken]);
 
   const refreshAssets = useCallback(async () => {
     const result = await listCanvasAssets(canvasId); setAssets(result.Items);

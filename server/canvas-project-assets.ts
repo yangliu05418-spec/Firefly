@@ -1,5 +1,6 @@
 import type { CanvasProjectAsset } from "./db.js";
 import type { RequestHandler } from "express";
+import { config } from "./config.js";
 import { users } from "./store.js";
 import { signedObjectUrl } from "./tos.js";
 
@@ -19,7 +20,9 @@ export const resolveCanvasProjectMedia = (asset: CanvasProjectAsset, preferOrigi
   if (asset.sourceType === "generation") {
     const media = preferOriginal
       ? users.readTaskMedia(asset.sourceId, "output") ?? users.readTaskMedia(asset.sourceId, "preview")
-      : users.readTaskMedia(asset.sourceId, "preview") ?? users.readTaskMedia(asset.sourceId, "output");
+      : config.tosPreviewTranscodeEnabled
+        ? users.readTaskMedia(asset.sourceId, "preview")
+        : users.readTaskMedia(asset.sourceId, "preview") ?? users.readTaskMedia(asset.sourceId, "output");
     if (!media || media.ownerId !== asset.ownerId || media.status !== "ready") throw new Error(`参考视频「${asset.title}」尚未就绪`);
     return { objectKey: media.objectKey, fileName: media.fileName, contentType: media.contentType, size: media.size };
   }
