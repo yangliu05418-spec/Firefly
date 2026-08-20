@@ -4,6 +4,7 @@ import { Archive, ArrowRight, AudioLines, Check, CheckSquare2, ChevronDown, Chev
 import { api, inferUploadType, listenForSignedOut, notifySignedOut, uploadFile } from "./api";
 import type { AssetCategory, CreationMode, ImageGenResponse, ImageModel, ImageResultBundle, LibraryAsset, LibraryGroup, ModelCapability, SessionUser, Task, UploadAsset } from "./types";
 import { materializePromptReferences, promptAssetLabel, promptAssetMarker } from "./prompt-references";
+import { clearEditorSelection } from "./prompt-selection";
 import { CanvasProjectList } from "./features/canvas/CanvasProjectList";
 import { CanvasWorkspace } from "./features/canvas/CanvasWorkspace";
 import { CanvasInsertPicker } from "./features/canvas/CanvasInsertPicker";
@@ -199,7 +200,7 @@ function PromptEditor({ value, placeholder, assets, disabled, attach, change }: 
     <footer>↑↓ 选择　Enter 插入　Esc 关闭</footer>
   </div>, document.body);
 
-  return <div className="prompt-editor-wrap"><div ref={editor} className="prompt-editor" contentEditable role="textbox" aria-multiline="true" aria-label="创作提示词" data-placeholder={placeholder} suppressContentEditableWarning onInput={() => { sync(); detectMention(); }} onKeyUp={(event) => !["ArrowDown", "ArrowUp", "Enter", "Escape"].includes(event.key) && detectMention()} onKeyDown={keyDown} onBlur={() => window.setTimeout(() => setOpen(false), 120)} onPaste={(event) => { event.preventDefault(); document.execCommand("insertText", false, event.clipboardData.getData("text/plain")); }} />{popup}</div>;
+  return <div className="prompt-editor-wrap"><div ref={editor} className="prompt-editor" contentEditable role="textbox" aria-multiline="true" aria-label="创作提示词" data-placeholder={placeholder} suppressContentEditableWarning onInput={() => { sync(); detectMention(); }} onKeyUp={(event) => !["ArrowDown", "ArrowUp", "Enter", "Escape"].includes(event.key) && detectMention()} onKeyDown={keyDown} onBlur={(event) => { clearEditorSelection(event.currentTarget); window.setTimeout(() => setOpen(false), 120); }} onPaste={(event) => { event.preventDefault(); document.execCommand("insertText", false, event.clipboardData.getData("text/plain")); }} />{popup}</div>;
 }
 
 function Composer({ models, compact, onCreated, onImagesGenerated }: { models: ModelCapability[]; compact: boolean; onCreated: (task: Task) => void; onImagesGenerated?: (bundle: ImageResultBundle) => void }) {
