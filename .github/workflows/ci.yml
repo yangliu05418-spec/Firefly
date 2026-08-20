@@ -61,7 +61,11 @@ jobs:
         run: |
           set -euo pipefail
           while IFS= read -r script; do
-            sh -n "$script"
+            if head -n 1 "$script" | grep -q 'bash'; then
+              bash -n "$script"
+            else
+              sh -n "$script"
+            fi
           done < <(git ls-files '*.sh')
 
       - name: Reject oversized tracked files
