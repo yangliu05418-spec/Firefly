@@ -7,6 +7,7 @@ import "@xyflow/react/dist/style.css";
 import dagre from "@dagrejs/dagre";
 import { Archive, Check, ChevronDown, CircleHelp, Copy, Download, FolderOpen, Grid2X2, Group as GroupIcon, Home, ImageIcon, Keyboard, LayoutDashboard, Library, LoaderCircle, LockKeyhole, LogOut, Map as MapIcon, MousePointer2, Move, Plus, Redo2, RefreshCw, ScanFace, Scissors, Search, Sparkles, TextCursorInput, Undo2, Ungroup, Upload, Users, Video, WandSparkles, X, ZoomIn, ZoomOut } from "lucide-react";
 import { api, inferUploadType, uploadFile } from "../../../api";
+import { runWithConcurrency } from "../../../concurrency";
 import type { AssetCategory, ImageModel, LibraryAsset, ModelCapability, SessionUser } from "../../../types";
 import {
   acquireCanvasLease, cancelCanvasJob, createCanvasJob, getCanvasV2, importCanvasProjectAsset, listCanvasAssets, listCanvasJobs,
@@ -20,6 +21,7 @@ import { CanvasMontage } from "./CanvasMontage";
 type SaveState = "saved" | "draft" | "saving" | "offline" | "conflict" | "error";
 type CreateMenu = { sourceId?: string; side?: "left" | "right"; screen: { x: number; y: number }; position?: { x: number; y: number } };
 type ComposerState = { nodeId: string; prompt: string; kind: "text" | "image" | "video" | "character_tool"; model: string; ratio: string; resolution: string; duration: number; tool: "turnaround" | "closeup" | "expressions" | "portrait"; portraitStyle: string; strength: "轻" | "标准" | "强"; textAction: "replace_selection" | "append" | "overwrite"; selectionText: string };
+type CanvasUploadItem = { id: string; name: string; progress: number; phase: "uploading" | "verifying" | "saving"; error?: string };
 const nodeTypes = { character: CanvasV2Node, scene: CanvasV2Node, text: CanvasV2Node, image: CanvasV2Node, video: CanvasV2Node, group: CanvasV2Node, "legacy-audio": CanvasV2Node };
 const creatableTypes = ["character", "scene", "video", "image", "text"] as const;
 const typeLabels: Record<CanvasNodeTypeV2, string> = { character: "角色", scene: "场景", video: "视频", image: "图片", text: "文本", group: "分组", "legacy-audio": "旧音频" };
@@ -68,7 +70,8 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   const [imageModels, setImageModels] = useState<ImageModel[]>([]);
   const [imageRatios, setImageRatios] = useState<string[]>([]);
   const [assetSearch, setAssetSearch] = useState("");
-  const [uploading, setUploading] = useState<{ name: string; progress: number; error?: string }[]>([]);
+  const [uploading, setUploading] = useState<CanvasUploadItem[]>([]);
+  const uploadBatchControllers = useRef(new Set<AbortController>());
   const [composer, setComposer] = useState<ComposerState | null>(null);
   const [inspectAsset, setInspectAsset] = useState<CanvasProjectAsset | null>(null);
   const [cropNodeId, setCropNodeId] = useState<string | null>(null);
@@ -98,6 +101,11 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   const deriveImageRef = useRef<(id: string, operation: { cropRatio?: number; rotation?: 90 | 180 | 270 }) => void>(() => undefined);
   const textSelections = useRef(new Map<string, string>());
   const cid = useMemo(clientId, []);
+
+  useEffect(() => () => {
+    for (const controller of uploadBatchControllers.current) controller.abort();
+    uploadBatchControllers.current.clear();
+  }, []);
 
   const patchNode = useCallback((id: string, patch: Partial<CanvasNodeV2["data"]>) => {
     setNodes((current) => current.map((node) => node.id === id ? { ...node, data: { ...node.data, domain: { ...node.data.domain, data: { ...node.data.domain.data, ...patch } } } } : node));
@@ -581,19 +589,29 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   }, [assets, canvasId, flow, makeFlowNode, patchNode, setEdges, setNodes]);
   deriveImageRef.current = deriveImage;
 
-  const uploadAssets = async (files: FileList | null) => {
-    if (!files?.length) return;
-    const pending = Array.from(files).map((file) => ({ name: file.name, progress: 0 })); setUploading((old) => [...old, ...pending]);
-    await Promise.all(Array.from(files).map(async (file) => {
-      const kind = inferUploadType(file);
-      if (!kind) return setUploading((old) => old.map((item) => item.name === file.name ? { ...item, error: "不支持的文件类型" } : item));
-      try {
-        const uploaded = await uploadFile(file, kind, (progress) => setUploading((old) => old.map((item) => item.name === file.name ? { ...item, progress } : item)));
-        const imported = await importCanvasProjectAsset(canvasId, { kind: "upload", uploadId: uploaded.uploadId ?? uploaded.id });
-        setAssets((old) => [imported.projectAsset, ...old.filter((item) => item.id !== imported.projectAsset.id)]);
-        setUploading((old) => old.filter((item) => item.name !== file.name));
-      } catch (error) { setUploading((old) => old.map((item) => item.name === file.name ? { ...item, error: error instanceof Error ? error.message : "上传失败" } : item)); }
-    }));
+  const uploadAssets = async (files: readonly File[]) => {
+    if (!files.length) return;
+    if (files.length > 50) { setMessage("单次最多选择 50 个素材，请分批上传"); return; }
+    const entries = files.map((file) => ({ id: crypto.randomUUID(), file }));
+    setUploading((old) => [...old, ...entries.map(({ id, file }) => ({ id, name: file.name, progress: 0, phase: "uploading" as const }))]);
+    const controller = new AbortController();
+    uploadBatchControllers.current.add(controller);
+    try {
+      await runWithConcurrency(entries, 3, async ({ id, file }) => {
+        const kind = inferUploadType(file);
+        if (!kind) { setUploading((old) => old.map((item) => item.id === id ? { ...item, error: "不支持的文件类型" } : item)); return; }
+        try {
+          const uploaded = await uploadFile(file, kind, (progress) => setUploading((old) => old.map((item) => item.id === id ? { ...item, progress, phase: progress >= 100 ? "verifying" : "uploading" } : item)), { signal: controller.signal });
+          setUploading((old) => old.map((item) => item.id === id ? { ...item, progress: 100, phase: "saving" } : item));
+          const imported = await importCanvasProjectAsset(canvasId, { kind: "upload", uploadId: uploaded.uploadId ?? uploaded.id });
+          setAssets((old) => [imported.projectAsset, ...old.filter((item) => item.id !== imported.projectAsset.id)]);
+          setUploading((old) => old.filter((item) => item.id !== id));
+        } catch (error) {
+          if (error instanceof DOMException && error.name === "AbortError") return;
+          setUploading((old) => old.map((item) => item.id === id ? { ...item, error: error instanceof Error ? error.message : "上传失败" } : item));
+        }
+      });
+    } finally { uploadBatchControllers.current.delete(controller); }
   };
 
   const loadGlobalAssets = useCallback(async () => {
@@ -694,7 +712,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     {message && saveState !== "saved" && <div className="canvas-v2-toast" role="status">{message}<button onClick={() => setMessage("")}><X /></button></div>}
     {createMenu && <div className="canvas-v2-create-menu" style={{ left: Math.min(createMenu.screen.x, innerWidth - 250), top: Math.min(createMenu.screen.y, innerHeight - 360) }} role="menu"><header>{createMenu.side === "left" ? "添加上下文" : createMenu.side === "right" ? "引用该节点生成" : "添加节点"}</header>{allowedCreateTypes.map((type) => { const Icon = typeIcons[type]; return <button key={type} onClick={() => createNode(type)}><Icon /><span>{typeLabels[type]}</span><ChevronDown /></button>; })}</div>}
 
-    {assetPanel && <aside className="canvas-v2-assets" role="dialog" aria-label="画布资产"><header><div><b>{assetTab === "project" ? "项目资产" : "全局资产库"}</b><span>{assetTab === "project" ? "属于这个画布的素材不会随节点删除" : "从你的常用资产中插入并建立项目副本"}</span></div><button onClick={() => setAssetPanel(false)}><X /></button></header><nav><button className={assetTab === "project" ? "active" : ""} onClick={() => setAssetTab("project")}>项目资产</button><button className={assetTab === "global" ? "active" : ""} onClick={() => setAssetTab("global")}>全局资产库</button></nav>{assetTab === "global" && <div className="canvas-v2-assets__categories"><button className={assetCategory === "all" ? "active" : ""} onClick={() => setAssetCategory("all")}>全部</button>{(Object.entries(assetCategoryLabels) as Array<[AssetCategory, string]>).map(([category, label]) => <button key={category} className={assetCategory === category ? "active" : ""} onClick={() => setAssetCategory(category)}>{label}</button>)}</div>}<label className="canvas-v2-assets__search"><Search /><input autoFocus value={assetSearch} onChange={(event) => setAssetSearch(event.target.value)} placeholder="搜索素材" /></label>{assetTab === "project" && <label className="canvas-v2-assets__upload"><Upload /><b>上传到项目</b><span>支持多选，上传完成后可立即插入</span><input type="file" multiple accept="image/*,video/mp4,video/quicktime,audio/mpeg,audio/wav" onChange={(event) => void uploadAssets(event.target.files)} /></label>}<div className="canvas-v2-assets__list">{uploading.map((item) => <div className="canvas-v2-assets__progress" key={item.name}><span>{item.name}</span><i><em style={{ width: `${item.progress}%` }} /></i><small>{item.error ?? `${item.progress}%`}</small></div>)}{assetTab === "project" ? assets.filter((asset) => asset.title.toLowerCase().includes(assetSearch.toLowerCase())).map((asset) => <button key={asset.id} onClick={() => insertAsset(asset)}><span className="canvas-v2-assets__thumb">{asset.kind === "video" ? <Video /> : asset.kind === "audio" ? <Sparkles /> : <img src={asset.mediaUrl} loading="lazy" alt="" />}</span><div><b>{asset.title}</b><small>{asset.kind === "video" ? "视频" : asset.kind === "audio" ? "音频" : "图片"}</small></div><Plus /></button>) : globalAssets.map((asset) => <button key={asset.Id} onClick={() => void importGlobal(asset)} disabled={asset.Status !== "Active"}><span className="canvas-v2-assets__thumb">{asset.URL ? <img src={asset.URL} loading="lazy" alt="" /> : <ImageIcon />}</span><div><b>{asset.Name}</b><small>{assetCategoryLabels[asset.Category]} · {asset.Status === "Active" ? "可用" : "处理中"}</small></div><Plus /></button>)}</div></aside>}
+    {assetPanel && <aside className="canvas-v2-assets" role="dialog" aria-label="画布资产"><header><div><b>{assetTab === "project" ? "项目资产" : "全局资产库"}</b><span>{assetTab === "project" ? "属于这个画布的素材不会随节点删除" : "从你的常用资产中插入并建立项目副本"}</span></div><button onClick={() => setAssetPanel(false)}><X /></button></header><nav><button className={assetTab === "project" ? "active" : ""} onClick={() => setAssetTab("project")}>项目资产</button><button className={assetTab === "global" ? "active" : ""} onClick={() => setAssetTab("global")}>全局资产库</button></nav>{assetTab === "global" && <div className="canvas-v2-assets__categories"><button className={assetCategory === "all" ? "active" : ""} onClick={() => setAssetCategory("all")}>全部</button>{(Object.entries(assetCategoryLabels) as Array<[AssetCategory, string]>).map(([category, label]) => <button key={category} className={assetCategory === category ? "active" : ""} onClick={() => setAssetCategory(category)}>{label}</button>)}</div>}<label className="canvas-v2-assets__search"><Search /><input autoFocus value={assetSearch} onChange={(event) => setAssetSearch(event.target.value)} placeholder="搜索素材" /></label>{assetTab === "project" && <label className="canvas-v2-assets__upload"><Upload /><b>上传到项目</b><span>支持多选，上传完成后可立即插入</span><input type="file" multiple accept="image/*,video/mp4,video/quicktime,audio/mpeg,audio/wav" onChange={(event) => { const selected = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void uploadAssets(selected); }} /></label>}<div className="canvas-v2-assets__list">{uploading.map((item) => <div className="canvas-v2-assets__progress" key={item.id}><span>{item.name}</span><i><em style={{ width: `${item.progress}%` }} /></i><small>{item.error ?? (item.phase === "verifying" ? "上传完成 · 正在确认" : item.phase === "saving" ? "已上传 · 正在加入项目" : `${item.progress}%`)}</small></div>)}{assetTab === "project" ? assets.filter((asset) => asset.title.toLowerCase().includes(assetSearch.toLowerCase())).map((asset) => <button key={asset.id} onClick={() => insertAsset(asset)}><span className="canvas-v2-assets__thumb">{asset.kind === "video" ? <Video /> : asset.kind === "audio" ? <Sparkles /> : <img src={asset.mediaUrl} loading="lazy" alt="" />}</span><div><b>{asset.title}</b><small>{asset.kind === "video" ? "视频" : asset.kind === "audio" ? "音频" : "图片"}</small></div><Plus /></button>) : globalAssets.map((asset) => <button key={asset.Id} onClick={() => void importGlobal(asset)} disabled={asset.Status !== "Active"}><span className="canvas-v2-assets__thumb">{asset.URL ? <img src={asset.URL} loading="lazy" alt="" /> : <ImageIcon />}</span><div><b>{asset.Name}</b><small>{assetCategoryLabels[asset.Category]} · {asset.Status === "Active" ? "可用" : "处理中"}</small></div><Plus /></button>)}</div></aside>}
 
     {shortcutOpen && <div className="canvas-v2-modal" role="dialog" aria-modal="true" aria-labelledby="canvas-shortcuts-title" onClick={() => setShortcutOpen(false)}><section className="canvas-v2-shortcuts" onClick={(event) => event.stopPropagation()}><header><div><span>KEYBOARD MAP</span><h2 id="canvas-shortcuts-title">画布快捷键</h2></div><button onClick={() => setShortcutOpen(false)} aria-label="关闭"><X /></button></header><div>{shortcutGroups.map(([group, items]) => <article key={group}><b>{group}</b><dl>{items.map(([label, keys]) => <div key={label}><dt>{label}</dt><dd>{keys}</dd></div>)}</dl></article>)}</div></section></div>}
 
