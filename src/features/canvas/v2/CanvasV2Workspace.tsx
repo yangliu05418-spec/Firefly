@@ -17,6 +17,7 @@ import { canCreateFromNode, createCanvasNodeV2, defaultCanvasDocumentV2, NODE_CO
 import { deleteCanvasDraft, readCanvasDraft, writeCanvasDraft } from "./canvas-draft";
 import { CanvasV2Node, type CanvasFlowData, type CanvasFlowNode } from "./CanvasV2Node";
 import { CanvasMontage } from "./CanvasMontage";
+import { canvasAssetDownloadName } from "./canvas-download";
 
 type SaveState = "saved" | "draft" | "saving" | "offline" | "conflict" | "error";
 type CreateMenu = { sourceId?: string; side?: "left" | "right"; screen: { x: number; y: number }; position?: { x: number; y: number } };
@@ -472,29 +473,29 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   };
 
   const downloadSelected = async () => {
+    let savedToDirectory = 0;
     const picker = (window as typeof window & { showDirectoryPicker?: () => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker;
     if (picker && selectedAssets.length > 1) {
       try {
         const directory = await picker();
         for (const [index, asset] of selectedAssets.entries()) {
-          const extension = asset.kind === "video" ? ".mp4" : asset.kind === "audio" ? ".mp3" : ".webp";
-          const base = (asset.title || `Firefly-${index + 1}`).replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-").slice(0, 90);
           const response = await fetch(asset.downloadUrl);
           if (!response.ok || !response.body) throw new Error(`${asset.title} 下载失败 (${response.status})`);
-          const handle = await directory.getFileHandle(base.toLowerCase().endsWith(extension) ? base : `${base}${extension}`, { create: true });
+          const handle = await directory.getFileHandle(canvasAssetDownloadName(asset, index), { create: true });
           const writable = await handle.createWritable();
           await response.body.pipeTo(writable);
+          savedToDirectory += 1;
         }
         setMessage(`${selectedAssets.length} 个文件已保存到所选目录`); return;
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") return;
-        setMessage(error instanceof Error ? error.message : "批量保存失败，已改用浏览器下载器");
       }
     }
-    for (const asset of selectedAssets) {
+    const remaining = selectedAssets.slice(savedToDirectory);
+    for (const asset of remaining) {
       const anchor = document.createElement("a"); anchor.href = asset.downloadUrl; anchor.target = "_blank"; anchor.rel = "noopener"; anchor.click();
     }
-    setMessage(`已将 ${selectedAssets.length} 个文件交给浏览器下载器`);
+    setMessage(savedToDirectory ? `${savedToDirectory} 个文件已保存；其余 ${remaining.length} 个已交给浏览器下载器` : `已将 ${remaining.length} 个文件交给浏览器下载器`);
   };
 
   const submitComposer = async () => {
