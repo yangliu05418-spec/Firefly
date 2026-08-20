@@ -75,24 +75,6 @@ const pool = new OpenRouterKeyPool(config.openrouterApiKeys);
 
 export const openRouterPool = () => pool;
 
-/** 每用户图片生成并发上限（成本防护；单实例部署，内存计数即可） */
-export const MAX_USER_IMAGE_INFLIGHT = 2;
-
-const userInflight = new Map<string, number>();
-
-export const acquireImageSlot = (userId: string): boolean => {
-  const current = userInflight.get(userId) ?? 0;
-  if (current >= MAX_USER_IMAGE_INFLIGHT) return false;
-  userInflight.set(userId, current + 1);
-  return true;
-};
-
-export const releaseImageSlot = (userId: string) => {
-  const current = userInflight.get(userId) ?? 0;
-  if (current <= 1) userInflight.delete(userId);
-  else userInflight.set(userId, current - 1);
-};
-
 const chatCompletionsUrl = () => config.openrouterBaseUrl.replace(/\/$/, "") + "/chat/completions";
 
 type ChatRequestBody = {

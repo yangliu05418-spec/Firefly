@@ -23,8 +23,9 @@ describe("versioned database migrations", () => {
     const database = new Database(target, { readonly: true });
     expect(schemaVersion(database)).toBe(CURRENT_SCHEMA_VERSION);
     expect(assertSchemaVersion(database)).toBe(CURRENT_SCHEMA_VERSION);
-    expect((database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number }).count).toBe(2);
+    expect((database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number }).count).toBe(3);
     expect((database.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='asset_registration_operations'").get() as { count: number }).count).toBe(1);
+    expect((database.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='image_generation_tasks'").get() as { count: number }).count).toBe(1);
     database.close();
   });
 
@@ -55,14 +56,26 @@ describe("versioned database migrations", () => {
     const target = databasePath();
     migrateDatabase(target);
     const database = new Database(target);
-    database.exec("DROP TABLE asset_registration_operations; DELETE FROM schema_migrations WHERE version = 2");
+    database.exec("DROP TABLE image_generation_tasks; DROP TABLE asset_registration_operations; DELETE FROM schema_migrations WHERE version >= 2");
     const mediaSqlBefore = (database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='media_objects'").get() as { sql: string }).sql;
     database.close();
     expect(migrateDatabase(target)).toBe(CURRENT_SCHEMA_VERSION);
     const upgraded = new Database(target, { readonly: true });
-    expect(schemaVersion(upgraded)).toBe(2);
+    expect(schemaVersion(upgraded)).toBe(3);
     expect((upgraded.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='media_objects'").get() as { sql: string }).sql).toBe(mediaSqlBefore);
     expect((upgraded.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='asset_registration_operations'").get() as { count: number }).count).toBe(1);
+    upgraded.close();
+  });
+
+  it("upgrades a version-two database with an expand-only image task table", () => {
+    const target = databasePath();
+    migrateDatabase(target);
+    const database = new Database(target);
+    database.exec("DROP TABLE image_generation_tasks; DELETE FROM schema_migrations WHERE version = 3");
+    database.close();
+    expect(migrateDatabase(target)).toBe(3);
+    const upgraded = new Database(target, { readonly: true });
+    expect((upgraded.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='image_generation_tasks'").get() as { count: number }).count).toBe(1);
     upgraded.close();
   });
 
@@ -78,5 +91,23 @@ describe("versioned database migrations", () => {
     expect(store.claimAssetRegistrationRetry(owner.id, seed.uploadId, 20, 30)?.attemptCount).toBe(2);
     expect(store.claimAssetRegistrationRetry(owner.id, seed.uploadId, 20, 31)).toBeNull();
     store.close();
+  });
+
+  it("atomically enforces two active image tasks per user across web instances", () => {
+    const target = databasePath();
+    migrateDatabase(target);
+    const first = new UserStore(target);
+    const owner = first.upsertFromFeishu({ openId: "ou-image-owner", unionId: "on-image-owner", tenantKey: "tenant", email: "images@dokuai.tv", name: "Images", avatarUrl: "" });
+    const other = first.upsertFromFeishu({ openId: "ou-image-other", unionId: "on-image-other", tenantKey: "tenant", email: "other-images@dokuai.tv", name: "Other", avatarUrl: "" });
+    const second = new UserStore(target);
+    const imageTask = (id: string, ownerId = owner.id) => ({ id, ownerId, status: "queued" as const, model: "model", ratio: "1:1", resolution: "1024", requestedCount: 1, prompt: "prompt", referenceUploadIds: [], items: [], failures: [], createdAt: Date.now(), updatedAt: Date.now() });
+    expect(first.createImageGenerationTask(imageTask("image-1"))).not.toBeNull();
+    expect(second.createImageGenerationTask(imageTask("image-2"))).not.toBeNull();
+    expect(first.createImageGenerationTask(imageTask("image-3"))).toBeNull();
+    expect(second.listImageGenerationTasks(other.id)).toEqual([]);
+    first.updateImageGenerationTask("image-1", { status: "succeeded", items: [{ index: 0, mediaId: "media-1" }], completedAt: Date.now() });
+    expect(second.createImageGenerationTask(imageTask("image-3"))).not.toBeNull();
+    expect(new Set(second.listImageGenerationTasks(owner.id).map((task) => task.id))).toEqual(new Set(["image-1", "image-2", "image-3"]));
+    second.close(); first.close();
   });
 });

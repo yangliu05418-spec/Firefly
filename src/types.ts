@@ -5,16 +5,21 @@ export type SessionUser = { id: string; email: string; name: string; avatarUrl: 
 export type Task = { id: string; caseId: string; ownerId?: string; visibility?: "private" | "shared"; providerId?: string; status: "queued" | "submitting" | "running" | "succeeded" | "failed"; mediaStatus?: "none" | "archiving" | "ready" | "fallback" | "failed"; mediaRevision?: number; prompt: string; model: string; mode: string; ratio: string; resolution: string; duration: number; createdAt: number; updatedAt: number; videoUrl?: string; downloadUrl?: string; posterUrl?: string; videoExpiresAt?: number; mediaSource?: "tos" | "upstream"; error?: string };
 export type ImageModel = { id: string; name: string; resolutions: string[]; defaultResolution: string; maxCount: number };
 export type ImageGenItem = { mediaId: string; width?: number; height?: number };
-export type ImageGenResponse = { Items: ImageGenItem[]; Model: string; Ratio: string; Resolution: string; Failed?: string[] };
-export type ImageResultBundle = {
+export type ImageGenerationTask = {
   id: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  model: string;
   modelName: string;
   ratio: string;
   resolution: string;
+  count: number;
   prompt: string;
-  items: ImageGenItem[];
+  Items: ImageGenItem[];
+  Failed: string[];
+  error?: string;
   createdAt: number;
-  failed?: string[];
+  updatedAt: number;
+  completedAt?: number;
 };
 export type LibraryGroup = { Id: string; Name: string; Description?: string };
 export type LibraryAsset = { Id: string; Name: string; AssetType: "Image" | "Video" | "Audio"; Status: "Active" | "Processing" | "Failed"; URL?: string; GroupId: string; UploadId?: string };

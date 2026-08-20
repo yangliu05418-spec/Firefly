@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Archive, ArrowRight, AudioLines, Check, CheckSquare2, ChevronDown, ChevronRight, Clock3, Clapperboard, Copy, Download, Film, Home, ImageIcon, Layers3, LayoutGrid, Library, LoaderCircle, LogOut, Menu, MessageSquare, PanelLeftClose, Pencil, Play, Plus, RefreshCw, Search, Send, Settings2, Sparkles, Square, Trash2, Upload, Video, WandSparkles, X } from "lucide-react";
 import { api, listenForSignedOut, notifySignedOut, uploadFile } from "./api";
-import type { CreationMode, ImageGenResponse, ImageModel, ImageResultBundle, LibraryAsset, LibraryGroup, ModelCapability, SessionUser, Task, UploadAsset } from "./types";
+import type { CreationMode, ImageGenerationTask, ImageModel, LibraryAsset, LibraryGroup, ModelCapability, SessionUser, Task, UploadAsset } from "./types";
 import { materializePromptReferences, promptAssetLabel, promptAssetMarker } from "./prompt-references";
 import { CanvasProjectList } from "./features/canvas/CanvasProjectList";
 import { CanvasWorkspace } from "./features/canvas/CanvasWorkspace";
@@ -202,7 +202,7 @@ function PromptEditor({ value, placeholder, assets, disabled, attach, change }: 
   return <div className="prompt-editor-wrap"><div ref={editor} className="prompt-editor" contentEditable role="textbox" aria-multiline="true" aria-label="创作提示词" data-placeholder={placeholder} suppressContentEditableWarning onInput={() => { sync(); detectMention(); }} onKeyUp={(event) => !["ArrowDown", "ArrowUp", "Enter", "Escape"].includes(event.key) && detectMention()} onKeyDown={keyDown} onBlur={() => window.setTimeout(() => setOpen(false), 120)} onPaste={(event) => { event.preventDefault(); document.execCommand("insertText", false, event.clipboardData.getData("text/plain")); }} />{popup}</div>;
 }
 
-function Composer({ models, compact, onCreated, onImagesGenerated }: { models: ModelCapability[]; compact: boolean; onCreated: (task: Task) => void; onImagesGenerated?: (bundle: ImageResultBundle) => void }) {
+function Composer({ models, compact, onCreated, onImageQueued }: { models: ModelCapability[]; compact: boolean; onCreated: (task: Task) => void; onImageQueued?: (task: ImageGenerationTask) => void }) {
   const defaultModel = models[0];
   const [modelId, setModelId] = useState(defaultModel?.id ?? "");
   const model = models.find((item) => item.id === modelId) ?? defaultModel;
@@ -294,10 +294,9 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
     setLoading(true); setError("");
     try {
       if (engine === "image") {
-        const spec = imageModels.find((item) => item.id === imageModelId) ?? imageModels[0];
         const references = assets.filter((asset) => asset.type === "image" && asset.uploadId).map((asset) => asset.uploadId!);
-        const result = await api.post<ImageGenResponse>("/api/image-generation", { model: imageModelId, ratio: imageRatio, resolution: imageResolution, count: imageCount, prompt: prompt.trim(), references });
-        onImagesGenerated?.({ id: crypto.randomUUID(), modelName: spec?.name ?? imageModelId, ratio: imageRatio, resolution: imageResolution, prompt: prompt.trim(), items: result.Items ?? [], createdAt: Date.now(), failed: result.Failed });
+        const task = await api.post<ImageGenerationTask>("/api/image-generations", { model: imageModelId, ratio: imageRatio, resolution: imageResolution, count: imageCount, prompt: prompt.trim(), references });
+        onImageQueued?.(task);
         setPrompt(""); setAssets([]);
         return;
       }
@@ -669,39 +668,42 @@ function AssetArchive({ tasks, models, onCreate, onDelete, onInsertCanvas }: { t
   </div>;
 }
 
-function ImageResultsGallery({ results, onInsertCanvas, onRemove }: { results: ImageResultBundle[]; onInsertCanvas: (target: { kind: "generated"; mediaId: string; title: string }) => void; onRemove: (id: string) => void }) {
-  if (!results.length) return null;
+function ImageResultsGallery({ tasks, onInsertCanvas }: { tasks: ImageGenerationTask[]; onInsertCanvas: (target: { kind: "generated"; mediaId: string; title: string }) => void }) {
+  if (!tasks.length) return null;
   return <section className="image-results" aria-label="图片生成结果">
-    {results.map((result) => <article className="image-result" key={result.id}>
-      <header><span className="image-result__badge"><ImageIcon /> 图片生成</span><b>{result.modelName}</b><small>{result.ratio} · {result.resolution}px · {result.items.length} 张 · {new Date(result.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</small></header>
-      {result.prompt && <p className="image-result__prompt" title={result.prompt}>「{result.prompt}」</p>}
-      <div className="image-result__grid">
-        {result.items.map((item) => <figure key={item.mediaId}>
-          <img src={"/api/image-media/" + encodeURIComponent(item.mediaId)} alt={result.prompt || "生成图片"} loading="lazy" decoding="async" />
+    {tasks.map((task) => { const waiting = waitingMoments[task.id.length % waitingMoments.length]!; return <article className={`image-result image-result--${task.status}`} key={task.id}>
+      <header><span className="image-result__badge"><ImageIcon /> 图片生成</span><b>{task.modelName}</b><small>{task.ratio} · {task.resolution}px · {task.status === "succeeded" ? `${task.Items.length} 张` : task.status === "failed" ? "生成失败" : task.status === "running" ? "正在生成" : "等待调度"} · {new Date(task.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</small></header>
+      {task.prompt && <p className="image-result__prompt" title={task.prompt}>「{task.prompt}」</p>}
+      {(task.status === "queued" || task.status === "running") && <div className="image-result__waiting" role="status" aria-live="polite"><span><LoaderCircle className="spin" /></span><p><b>{waiting.title}</b><small>{waiting.detail}</small></p></div>}
+      {!!task.Items.length && <div className="image-result__grid">
+        {task.Items.map((item) => <figure key={item.mediaId}>
+          <img src={"/api/image-media/" + encodeURIComponent(item.mediaId)} alt={task.prompt || "生成图片"} loading="lazy" decoding="async" />
           <figcaption>
             <a href={"/api/image-media/" + encodeURIComponent(item.mediaId) + "?download=1"} download title="下载图片"><Download /> 下载</a>
-            <button onClick={() => onInsertCanvas({ kind: "generated", mediaId: item.mediaId, title: (result.prompt || "生成图片").slice(0, 24) })} title="插入画布"><LayoutGrid /> 插入画布</button>
+            <button onClick={() => onInsertCanvas({ kind: "generated", mediaId: item.mediaId, title: (task.prompt || "生成图片").slice(0, 24) })} title="插入画布"><LayoutGrid /> 插入画布</button>
           </figcaption>
         </figure>)}
-      </div>
-      {!!result.failed?.length && <p className="image-result__failed" role="alert">{result.failed.length} 张生成失败，可调整参数后重试</p>}
-      <button className="image-result__remove" onClick={() => onRemove(result.id)} title="删除这组结果"><X /> 删除</button>
-    </article>)}
+      </div>}
+      {!!task.Failed.length && task.status === "succeeded" && <p className="image-result__failed" role="alert">{task.Failed.length} 张生成失败，其余结果已保留</p>}
+      {task.status === "failed" && <p className="image-result__failed" role="alert">{task.error ?? task.Failed[0] ?? "图片生成失败，请调整参数后重试"}</p>}
+    </article>; })}
   </section>;
 }
 
 function Studio({ user, route, navigate, logout }: { user: SessionUser; route: string; navigate: (path: string) => void; logout: () => void }) {
   const view = route.startsWith("/studio/canvas") ? "canvas" : route === "/studio/assets" ? "assets" : "create";
   const [models, setModels] = useState<ModelCapability[]>([]); const [tasks, setTasks] = useState<Task[]>([]); const [sidebar, setSidebar] = useState(() => window.innerWidth > 760); const [loading, setLoading] = useState(true); const [loadError, setLoadError] = useState(""); const [syncIssue, setSyncIssue] = useState(false); const [creatingNew, setCreatingNew] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<Task | null>(null); const [deleting, setDeleting] = useState(false); const [deleteError, setDeleteError] = useState(""); const [profileOpen, setProfileOpen] = useState(false); const [featureNotice, setFeatureNotice] = useState<{ kind: "atlas"; nonce: number; leaving?: boolean } | null>(null); const [pendingCanvasCreate, setPendingCanvasCreate] = useState(false); const [canvasInsertTarget, setCanvasInsertTarget] = useState<{ kind: "video"; task: Task } | { kind: "image"; asset: LibraryAsset } | { kind: "generated"; mediaId: string; title: string } | null>(null); const [imageResults, setImageResults] = useState<ImageResultBundle[]>([]); const profileRef = useRef<HTMLDivElement>(null); const atlasExitTimer = useRef<number | undefined>(undefined); const atlasAutoTimer = useRef<number | undefined>(undefined);
+  const [deleteTarget, setDeleteTarget] = useState<Task | null>(null); const [deleting, setDeleting] = useState(false); const [deleteError, setDeleteError] = useState(""); const [profileOpen, setProfileOpen] = useState(false); const [featureNotice, setFeatureNotice] = useState<{ kind: "atlas"; nonce: number; leaving?: boolean } | null>(null); const [pendingCanvasCreate, setPendingCanvasCreate] = useState(false); const [canvasInsertTarget, setCanvasInsertTarget] = useState<{ kind: "video"; task: Task } | { kind: "image"; asset: LibraryAsset } | { kind: "generated"; mediaId: string; title: string } | null>(null); const [imageTasks, setImageTasks] = useState<ImageGenerationTask[]>([]); const profileRef = useRef<HTMLDivElement>(null); const atlasExitTimer = useRef<number | undefined>(undefined); const atlasAutoTimer = useRef<number | undefined>(undefined);
   const [now, setNow] = useState(Date.now());
   const activeTasks = useMemo(() => tasks.filter((task) => !["succeeded", "failed"].includes(task.status) || task.mediaStatus === "archiving"), [tasks]);
+  const activeImageTasks = useMemo(() => imageTasks.filter((task) => task.status === "queued" || task.status === "running"), [imageTasks]);
+  const activeWorkCount = activeTasks.length + activeImageTasks.length;
   const privateTasks = useMemo(() => tasks.filter((task) => task.visibility !== "shared"), [tasks]);
   const sharedTasks = useMemo(() => tasks.filter((task) => task.visibility === "shared"), [tasks]);
   const archivedCount = useMemo(() => privateTasks.filter((task) => task.status === "succeeded" && task.videoUrl).length, [privateTasks]);
   const latestVideoTaskId = useMemo(() => tasks.find((task) => task.status === "succeeded" && task.videoUrl && (!task.videoExpiresAt || task.videoExpiresAt > now))?.id, [tasks, now]);
-  const refresh = async () => { try { setTasks(await api.get<Task[]>("/api/generations")); setLoadError(""); setSyncIssue(false); } catch { setSyncIssue(true); } finally { setLoading(false); } };
-  const initialLoad = () => { setLoading(true); setLoadError(""); Promise.all([api.get<ModelCapability[]>("/api/models"), api.get<Task[]>("/api/generations")]).then(([m, t]) => { setModels(m); setTasks(t); setSyncIssue(false); }).catch((error) => setLoadError(error instanceof Error ? error.message : "创作台暂时无法载入")).finally(() => setLoading(false)); };
+  const refresh = async () => { try { const [videoTasks, images] = await Promise.all([api.get<Task[]>("/api/generations"), api.get<{ Items: ImageGenerationTask[] }>("/api/image-generations")]); setTasks(videoTasks); setImageTasks(images.Items ?? []); setLoadError(""); setSyncIssue(false); } catch { setSyncIssue(true); } finally { setLoading(false); } };
+  const initialLoad = () => { setLoading(true); setLoadError(""); Promise.all([api.get<ModelCapability[]>("/api/models"), api.get<Task[]>("/api/generations"), api.get<{ Items: ImageGenerationTask[] }>("/api/image-generations")]).then(([m, t, images]) => { setModels(m); setTasks(t); setImageTasks(images.Items ?? []); setSyncIssue(false); }).catch((error) => setLoadError(error instanceof Error ? error.message : "创作台暂时无法载入")).finally(() => setLoading(false)); };
   useEffect(initialLoad, []);
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 60000); return () => window.clearInterval(timer); }, []);
   useEffect(() => () => { if (atlasExitTimer.current) window.clearTimeout(atlasExitTimer.current); if (atlasAutoTimer.current) window.clearTimeout(atlasAutoTimer.current); }, []);
@@ -712,23 +714,23 @@ function Studio({ user, route, navigate, logout }: { user: SessionUser; route: s
     return () => { document.removeEventListener("pointerdown", close); document.removeEventListener("keydown", escape); };
   }, [deleting]);
   useEffect(() => {
-    if (!activeTasks.length) return;
+    if (!activeWorkCount) return;
     let disposed = false; let timer: number | undefined;
     const schedule = () => { timer = window.setTimeout(tick, document.hidden ? 15000 : 2000); };
     const tick = async () => { await refresh(); if (!disposed) schedule(); };
     const resume = () => { if (timer) window.clearTimeout(timer); if (!document.hidden && navigator.onLine) void refresh(); schedule(); };
     schedule(); document.addEventListener("visibilitychange", resume); window.addEventListener("online", resume);
     return () => { disposed = true; if (timer) window.clearTimeout(timer); document.removeEventListener("visibilitychange", resume); window.removeEventListener("online", resume); };
-  }, [activeTasks.length]);
+  }, [activeWorkCount]);
   useEffect(() => {
-    if (activeTasks.length) return;
+    if (activeWorkCount) return;
     let timer: number | undefined;
     const schedule = () => { timer = window.setTimeout(tick, document.hidden ? 5 * 60_000 : 60_000); };
     const tick = async () => { await refresh(); schedule(); };
     const resume = () => { if (timer) window.clearTimeout(timer); if (!document.hidden && navigator.onLine) void refresh(); schedule(); };
     schedule(); document.addEventListener("visibilitychange", resume); window.addEventListener("online", resume);
     return () => { if (timer) window.clearTimeout(timer); document.removeEventListener("visibilitychange", resume); window.removeEventListener("online", resume); };
-  }, [activeTasks.length]);
+  }, [activeWorkCount]);
   const showCreate = (fresh = false) => { navigate("/studio"); setCreatingNew(fresh); setFeatureNotice(null); if (window.innerWidth <= 760) setSidebar(false); };
   const showAssets = () => { navigate("/studio/assets"); setProfileOpen(false); setFeatureNotice(null); if (window.innerWidth <= 760) setSidebar(false); };
   const showCanvas = () => { navigate("/studio/canvas"); setProfileOpen(false); setFeatureNotice(null); if (window.innerWidth <= 760) setSidebar(false); };
@@ -759,8 +761,8 @@ function Studio({ user, route, navigate, logout }: { user: SessionUser; route: s
     <nav className="app-rail" aria-label="主要导航"><button className="rail-logo" aria-label="Firefly 创作台" onClick={() => showCreate(false)}><FireflyGlyph compact /></button><div className="rail-nav"><button className={view === "create" ? "active" : ""} aria-current={view === "create" ? "page" : undefined} onClick={() => showCreate(false)}><GenerateNavGlyph /><span>生成</span></button><button className={view === "assets" ? "active" : ""} aria-current={view === "assets" ? "page" : undefined} onClick={showAssets}><AssetsNavGlyph /><span>资产</span>{archivedCount > 0 && <i title={`${archivedCount} 个资产`}>{archivedCount > 99 ? "99+" : archivedCount}</i>}</button><button className={view === "canvas" ? "active" : ""} aria-current={view === "canvas" ? "page" : undefined} onClick={showCanvas}><CanvasNavGlyph /><span>画布</span></button><button className={featureNotice && !featureNotice.leaving ? "future active-preview" : "future"} aria-pressed={Boolean(featureNotice && !featureNotice.leaving)} onClick={activateAtlas}><AtlasNavGlyph /><span>Atlas</span></button></div><div className="rail-account" ref={profileRef}><button className="rail-avatar" aria-label="打开账号菜单" aria-expanded={profileOpen} onClick={() => setProfileOpen((open) => !open)}><UserAvatar user={user} /></button>{profileOpen && <AccountMenu user={user} close={() => setProfileOpen(false)} home={() => navigate("/")} logout={logout} />}</div></nav>
     <aside className="sidebar" aria-hidden={!sidebar} inert={!sidebar ? true : undefined}><div className="sidebar-head"><span>{view === "assets" ? "资产归档" : view === "canvas" ? "画布" : "开始创作"}</span><button aria-label="收起侧栏" onClick={() => setSidebar(false)}><PanelLeftClose /></button></div>{view === "create" ? <><button className="new-chat" onClick={() => showCreate(true)}><Plus /> 新创作</button>{historySection("我的创作", privateTasks)}{historySection("团队历史", sharedTasks)}{!tasks.length && <div className="history-list"><p>还没有创作记录</p></div>}</> : view === "assets" ? <><div className="asset-sidebar-summary"><span>已归档成片</span><strong>{archivedCount}</strong><p>完成生成的视频会自动进入资产页，并长期保留至你主动删除。</p></div><button className="new-chat new-chat--quiet" onClick={() => showCreate(true)}><Plus /> 创建新视频</button></> : <div className="canvas-sidebar-summary"><CanvasNavGlyph /><span>自由画布</span><p>把镜头、素材与灵感组织在同一张画布上，自由排版、连接创作。</p><button className="new-chat new-chat--quiet" onClick={createCanvasFromSidebar}><Plus /> 新建画布</button></div>}</aside>
     {sidebar && <button className="sidebar-scrim" aria-label="关闭侧栏" onClick={() => setSidebar(false)} />}
-    <section className="workspace"><header className="workspace-head">{!sidebar && <button className="menu-button" aria-label="打开侧栏" onClick={() => setSidebar(true)}><Menu /></button>}<span>{view === "assets" ? "Firefly media archive" : view === "canvas" ? "Firefly canvas" : "Seedance video studio"}</span><div className={`system-live ${syncIssue ? "system-live--issue" : ""}`} title={syncIssue ? "与服务端的同步暂时中断，系统会自动重试" : undefined}><i /> {syncIssue ? "同步暂时中断" : activeTasks.length ? `${activeTasks.length} 项进行中` : "系统在线"}</div></header>
-      {loading ? <div className="workspace-loading"><LoaderCircle className="spin" /> 正在唤醒 Firefly</div> : loadError ? <div className="workspace-error"><Archive /><h1>创作台暂时无法载入</h1><p>{loadError}</p><button onClick={initialLoad}><RefreshCw /> 重新载入</button></div> : view === "canvas" ? (route === "/studio/canvas" ? <CanvasProjectList navigate={navigate} autoCreate={pendingCanvasCreate} onAutoCreateHandled={() => setPendingCanvasCreate(false)} /> : <CanvasWorkspace canvasId={route.split("/")[3] ?? ""} navigate={navigate} />) : view === "assets" ? <AssetArchive tasks={tasks} models={models} onCreate={() => showCreate(true)} onDelete={requestDelete} onInsertCanvas={setCanvasInsertTarget} /> : creatingNew || !tasks.length ? <div className="empty-workspace"><Composer models={models} compact={false} onCreated={(task) => { setTasks((old) => [task, ...old]); setCreatingNew(false); }} onImagesGenerated={(bundle) => setImageResults((old) => [bundle, ...old])} /><ImageResultsGallery results={imageResults} onInsertCanvas={setCanvasInsertTarget} onRemove={(id) => setImageResults((old) => old.filter((item) => item.id !== id))} /><div className="creation-footnote">输入素材保留 7 天 · 成片将长期保存至主动删除</div></div> : <div className="conversation"><div className="conversation-inner"><ImageResultsGallery results={imageResults} onInsertCanvas={setCanvasInsertTarget} onRemove={(id) => setImageResults((old) => old.filter((item) => item.id !== id))} /><div className="conversation-heading"><span>Current sequence</span><h1>创作正在发生</h1></div>{tasks.map((task) => <TaskCard key={task.id} task={task} models={models} eager={task.id === latestVideoTaskId} now={now} onDelete={requestDelete} canDelete={task.ownerId === user.id} />)}</div><div className="composer-dock"><Composer models={models} compact onCreated={(task) => setTasks((old) => [task, ...old])} onImagesGenerated={(bundle) => setImageResults((old) => [bundle, ...old])} /></div></div>}
+    <section className="workspace"><header className="workspace-head">{!sidebar && <button className="menu-button" aria-label="打开侧栏" onClick={() => setSidebar(true)}><Menu /></button>}<span>{view === "assets" ? "Firefly media archive" : view === "canvas" ? "Firefly canvas" : "Seedance video studio"}</span><div className={`system-live ${syncIssue ? "system-live--issue" : ""}`} title={syncIssue ? "与服务端的同步暂时中断，系统会自动重试" : undefined}><i /> {syncIssue ? "同步暂时中断" : activeWorkCount ? `${activeWorkCount} 项进行中` : "系统在线"}</div></header>
+      {loading ? <div className="workspace-loading"><LoaderCircle className="spin" /> 正在唤醒 Firefly</div> : loadError ? <div className="workspace-error"><Archive /><h1>创作台暂时无法载入</h1><p>{loadError}</p><button onClick={initialLoad}><RefreshCw /> 重新载入</button></div> : view === "canvas" ? (route === "/studio/canvas" ? <CanvasProjectList navigate={navigate} autoCreate={pendingCanvasCreate} onAutoCreateHandled={() => setPendingCanvasCreate(false)} /> : <CanvasWorkspace canvasId={route.split("/")[3] ?? ""} navigate={navigate} />) : view === "assets" ? <AssetArchive tasks={tasks} models={models} onCreate={() => showCreate(true)} onDelete={requestDelete} onInsertCanvas={setCanvasInsertTarget} /> : creatingNew || (!tasks.length && !imageTasks.length) ? <div className="empty-workspace"><Composer models={models} compact={false} onCreated={(task) => { setTasks((old) => [task, ...old]); setCreatingNew(false); }} onImageQueued={(task) => { setImageTasks((old) => [task, ...old]); setCreatingNew(false); }} /><ImageResultsGallery tasks={imageTasks} onInsertCanvas={setCanvasInsertTarget} /><div className="creation-footnote">输入素材保留 7 天 · 成片将长期保存至主动删除</div></div> : <div className="conversation"><div className="conversation-inner"><ImageResultsGallery tasks={imageTasks} onInsertCanvas={setCanvasInsertTarget} /><div className="conversation-heading"><span>Current sequence</span><h1>创作正在发生</h1></div>{tasks.map((task) => <TaskCard key={task.id} task={task} models={models} eager={task.id === latestVideoTaskId} now={now} onDelete={requestDelete} canDelete={task.ownerId === user.id} />)}</div><div className="composer-dock"><Composer models={models} compact onCreated={(task) => setTasks((old) => [task, ...old])} onImageQueued={(task) => setImageTasks((old) => [task, ...old])} /></div></div>}
     </section>
     {canvasInsertTarget && <CanvasInsertPicker payload={canvasInsertTarget.kind === "video" ? { kind: "video", taskId: canvasInsertTarget.task.id, title: canvasInsertTarget.task.prompt || "参考素材生成" } : canvasInsertTarget.kind === "image" ? { kind: "image", uploadId: canvasInsertTarget.asset.UploadId ?? "", name: canvasInsertTarget.asset.Name || "图片" } : { kind: "generated", mediaId: canvasInsertTarget.mediaId, title: canvasInsertTarget.title }} onClose={() => setCanvasInsertTarget(null)} navigate={navigate} />}
     {deleteTarget && <div className="confirm-backdrop" role="dialog" aria-modal="true" aria-labelledby="delete-title" onClick={() => !deleting && setDeleteTarget(null)}><div className="confirm-dialog" onClick={(event) => event.stopPropagation()}><span><Trash2 /></span><h2 id="delete-title">删除这次创作？</h2><p>项目与已归档成片将被删除，此操作无法撤销。</p>{deleteError && <small className="confirm-error" role="alert">{deleteError}</small>}<div><button autoFocus disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button><button className="danger" disabled={deleting} onClick={confirmDelete}>{deleting ? <LoaderCircle className="spin" /> : <Trash2 />} 删除项目</button></div></div></div>}

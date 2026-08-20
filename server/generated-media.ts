@@ -12,8 +12,8 @@ import { putObjectBuffer, shard, signedObjectUrl } from "./tos.js";
 export const generatedObjectKey = (ownerId: string, mediaId: string, extension: string) =>
   `generated/${shard(mediaId)}/${ownerId}/${mediaId}.${extension.replace(/^\./, "")}`;
 
-export const storeGeneratedImage = async (input: { ownerId: string; body: Buffer; contentType: string; fileName: string }): Promise<MediaObject> => {
-  const mediaId = "gen-" + crypto.randomUUID();
+export const storeGeneratedImage = async (input: { ownerId: string; body: Buffer; contentType: string; fileName: string; mediaId?: string }): Promise<MediaObject> => {
+  const mediaId = input.mediaId ?? "gen-" + crypto.randomUUID();
   const extension = (input.contentType.includes("png") ? "png" : input.contentType.includes("webp") ? "webp" : input.contentType.includes("jpeg") || input.contentType.includes("jpg") ? "jpg" : "png");
   const objectKey = generatedObjectKey(input.ownerId, mediaId, extension);
   const stored = await putObjectBuffer(objectKey, input.body, input.contentType);

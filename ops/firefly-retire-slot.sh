@@ -10,7 +10,7 @@ release_env=/etc/firefly/release.env
 . "$release_env"
 
 if [ "$slot" = "legacy" ]; then
-  for service in web worker media-worker; do
+  for service in web worker media-worker image-worker; do
     for container in $(/usr/bin/docker ps -aq --filter "label=com.docker.compose.service=$service"); do
       [ -n "$container" ] || continue
       /usr/bin/docker stop --time 35 "$container" >/dev/null 2>&1 || true
@@ -20,7 +20,7 @@ if [ "$slot" = "legacy" ]; then
 fi
 
 [ "$slot" != "${FIREFLY_ACTIVE_SLOT:-}" ] || exit 0
-for role in web worker media-worker; do
+for role in web worker media-worker image-worker; do
   name="firefly-$role-$slot"
   /usr/bin/docker stop --time 35 "$name" >/dev/null 2>&1 || true
   /usr/bin/docker rm "$name" >/dev/null 2>&1 || true

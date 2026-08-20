@@ -7,6 +7,7 @@ import { users } from "./store.js";
 export const redis = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 export const generationQueue = new Queue("generation", { connection: redis });
 export const mediaQueue = new Queue("media", { connection: redis });
+export const imageGenerationQueue = new Queue("image-generation", { connection: redis });
 export const previewQueue = new Queue("preview", { connection: redis });
 export const assetQueue = new Queue("asset-ingest", { connection: redis });
 

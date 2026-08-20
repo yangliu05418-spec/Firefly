@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 
 const baseSchema = `
   CREATE TABLE IF NOT EXISTS users (
@@ -144,6 +144,31 @@ const assetRegistrationOperationsSchema = `
     ON asset_registration_operations(status, updated_at);
 `;
 
+const imageGenerationTasksSchema = `
+  CREATE TABLE IF NOT EXISTS image_generation_tasks (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
+    model TEXT NOT NULL,
+    ratio TEXT NOT NULL,
+    resolution TEXT NOT NULL,
+    requested_count INTEGER NOT NULL,
+    prompt TEXT NOT NULL,
+    reference_upload_ids_json TEXT NOT NULL DEFAULT '[]',
+    items_json TEXT NOT NULL DEFAULT '[]',
+    failures_json TEXT NOT NULL DEFAULT '[]',
+    error TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    FOREIGN KEY (owner_id) REFERENCES users(id)
+  );
+  CREATE INDEX IF NOT EXISTS image_generation_tasks_owner_created_idx
+    ON image_generation_tasks(owner_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS image_generation_tasks_status_updated_idx
+    ON image_generation_tasks(status, updated_at);
+`;
+
 const tableExists = (database: Database.Database, name: string) => Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
 
 export const schemaVersion = (database: Database.Database) => {
@@ -191,6 +216,10 @@ export const migrateDatabase = (databasePath: string) => {
       if (schemaVersion(database) < 2) {
         database.exec(assetRegistrationOperationsSchema);
         database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(2, "asset-registration-operations", Date.now());
+      }
+      if (schemaVersion(database) < 3) {
+        database.exec(imageGenerationTasksSchema);
+        database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(3, "async-image-generation", Date.now());
       }
       assertSchemaVersion(database);
     }).exclusive();
