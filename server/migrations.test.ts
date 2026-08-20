@@ -23,8 +23,9 @@ describe("versioned database migrations", () => {
     const database = new Database(target, { readonly: true });
     expect(schemaVersion(database)).toBe(CURRENT_SCHEMA_VERSION);
     expect(assertSchemaVersion(database)).toBe(CURRENT_SCHEMA_VERSION);
-    expect((database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number }).count).toBe(2);
-    expect((database.prepare("PRAGMA table_info(user_assets)").all() as { name: string }[]).some((column) => column.name === "category")).toBe(true);
+    expect((database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number }).count).toBe(3);
+    const assetColumns = (database.prepare("PRAGMA table_info(user_assets)").all() as { name: string }[]).map((column) => column.name);
+    expect(assetColumns).toEqual(expect.arrayContaining(["category", "provider_asset_id", "last_error"]));
     database.close();
   });
 
@@ -41,9 +42,9 @@ describe("versioned database migrations", () => {
       INSERT INTO user_assets VALUES ('asset-1', 'user-1', 'group-1', NULL, '旧素材', 'Image', 'Active', NULL, 1, 1, NULL);
     `);
     database.close();
-    expect(migrateDatabase(target)).toBe(2);
+    expect(migrateDatabase(target)).toBe(CURRENT_SCHEMA_VERSION);
     const migrated = new Database(target, { readonly: true });
-    expect((migrated.prepare("SELECT category FROM user_assets WHERE id = 'asset-1'").get() as { category: string }).category).toBe("material");
+    expect(migrated.prepare("SELECT category, provider_asset_id FROM user_assets WHERE id = 'asset-1'").get()).toMatchObject({ category: "material", provider_asset_id: "asset-1" });
     migrated.close();
   });
 
@@ -56,16 +57,16 @@ describe("versioned database migrations", () => {
     store.close();
   });
 
-  it("keeps the rollback image operable after the next expand-only migration", () => {
+  it("rejects a database newer than this release", () => {
     const target = databasePath();
     migrateDatabase(target);
     const database = new Database(target);
-    database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (3, 'future-expand-only', ?)").run(Date.now());
+    database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (4, 'future-expand-only', ?)").run(Date.now());
     database.close();
-    expect(migrateDatabase(target)).toBe(3);
-    const compatible = new Database(target, { readonly: true });
-    expect(assertSchemaVersion(compatible)).toBe(3);
-    compatible.close();
+    expect(() => migrateDatabase(target)).toThrow("newer than this release");
+    const incompatible = new Database(target, { readonly: true });
+    expect(() => assertSchemaVersion(incompatible)).toThrow("not supported");
+    incompatible.close();
   });
 
   it("adopts the current production schema without rebuilding tables", () => {

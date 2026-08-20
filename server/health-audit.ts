@@ -22,6 +22,7 @@ const main = async () => {
   const generation = new Queue("generation", { connection: redis });
   const media = new Queue("media", { connection: redis });
   const preview = new Queue("preview", { connection: redis });
+  const assets = new Queue("asset-ingest", { connection: redis });
   let database: Database.Database | undefined;
   let queueCounts: Record<string, unknown> = {};
   let backupAgeMs = Number.POSITIVE_INFINITY;
@@ -34,11 +35,11 @@ const main = async () => {
       if (database.pragma("quick_check", { simple: true }) !== "ok") reasons.push("sqlite_integrity_failed");
     } catch { reasons.push("sqlite_unavailable"); }
     try {
-      const [generationCounts, mediaCounts, previewCounts] = await Promise.all([
-        generation.getJobCounts("wait", "active", "failed"), media.getJobCounts("wait", "active", "failed"), preview.getJobCounts("wait", "active", "failed")
+      const [generationCounts, mediaCounts, previewCounts, assetCounts] = await Promise.all([
+        generation.getJobCounts("wait", "active", "failed"), media.getJobCounts("wait", "active", "failed"), preview.getJobCounts("wait", "active", "failed"), assets.getJobCounts("wait", "active", "failed")
       ]);
-      queueCounts = { generation: generationCounts, media: mediaCounts, preview: previewCounts };
-      if ((generationCounts.failed ?? 0) + (mediaCounts.failed ?? 0) + (previewCounts.failed ?? 0) > 0) reasons.push("failed_jobs_present");
+      queueCounts = { generation: generationCounts, media: mediaCounts, preview: previewCounts, assets: assetCounts };
+      if ((generationCounts.failed ?? 0) + (mediaCounts.failed ?? 0) + (previewCounts.failed ?? 0) + (assetCounts.failed ?? 0) > 0) reasons.push("failed_jobs_present");
     } catch { reasons.push("queues_unavailable"); }
     backupAgeMs = latestBackupAge();
     if (backupAgeMs > maximumBackupAgeMs) reasons.push("backup_stale");
@@ -48,7 +49,7 @@ const main = async () => {
     }
   } finally {
     database?.close();
-    await Promise.allSettled([generation.close(), media.close(), preview.close()]);
+    await Promise.allSettled([generation.close(), media.close(), preview.close(), assets.close()]);
     redis.disconnect();
   }
   const blockingReasons = reasons;

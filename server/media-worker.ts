@@ -2,11 +2,12 @@ import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import { config } from "./config.js";
 import { users } from "./store.js";
-import { mediaQueue, previewQueue, readTask, saveTask } from "./redis.js";
+import { assetQueue, mediaQueue, previewQueue, readTask, saveTask } from "./redis.js";
 import { createPoster, deleteObject, fetchObjectFromUrl, optimizePlaybackObject, outputObjectKey, posterObjectKey, previewObjectKey, streamObjectFromUrl, verifyProgressiveMp4 } from "./tos.js";
 import { MAX_MEDIA_RECOVERY_ATTEMPTS } from "./db.js";
 import { transcodePreview } from "./preview-transcode.js";
 import { closeWorkersWithin } from "./shutdown.js";
+import { markAssetIngestFailed, registerQueuedAsset } from "./asset-ingest.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const numberHeader = (value: unknown) => Number(value ?? 0) || 0;
@@ -204,8 +205,18 @@ const previewWorker = new Worker("preview", async (job) => {
   return createTaskPreview(job.data.taskId);
 }, { connection, concurrency: 1, lockDuration: config.tosTranscodeDeadlineMs + config.tosSourceStreamTimeoutMs + 60_000 });
 
+const assetWorker = new Worker("asset-ingest", async (job) => {
+  if (job.name !== "register") throw new Error(`Unknown asset job: ${job.name}`);
+  return registerQueuedAsset(job.data.assetId);
+}, { connection, concurrency: 2, lockDuration: 240_000 });
+
 previewWorker.on("failed", (job, error) => {
   console.warn(JSON.stringify({ type: "tos_preview_failed", at: new Date().toISOString(), taskId: job?.data.taskId, attempt: job?.attemptsMade, code: (error as { code?: string }).code ?? "unknown", message: error.message }));
+});
+
+assetWorker.on("failed", (job, error) => {
+  if (job && job.attemptsMade >= (job.opts.attempts ?? 1)) markAssetIngestFailed(job.data.assetId, "素材已上传，但生成引用暂未准备完成");
+  console.warn(JSON.stringify({ type: "asset_ingest_failed", at: new Date().toISOString(), assetId: job?.data.assetId, attempt: job?.attemptsMade, code: (error as { code?: string }).code ?? "unknown" }));
 });
 
 worker.on("failed", async (job) => {
@@ -245,18 +256,25 @@ const reconcilePreviews = async () => {
   for (const task of users.recoverablePreviewTasks(20)) await enqueuePreviewRecovery(task.id);
 };
 const previewReconcile = setInterval(() => void reconcilePreviews().catch((error) => console.warn(JSON.stringify({ type: "tos_preview_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }))), 15 * 60 * 1000);
+const reconcileAssets = async () => {
+  for (const asset of users.listProcessingUserAssets(100)) {
+    await assetQueue.add("register", { assetId: asset.id }, { jobId: asset.id, attempts: 3, backoff: { type: "exponential", delay: 15_000 }, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } });
+  }
+};
+const assetReconcile = setInterval(() => void reconcileAssets().catch((error) => console.warn(JSON.stringify({ type: "asset_ingest_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }))), 60_000);
 void mediaQueue.add("reconcile-deletes", {}, { removeOnComplete: true, removeOnFail: true });
 void deleteCanvasAssets().catch((error) => console.warn(JSON.stringify({ type: "canvas_asset_cleanup_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" })));
 void reconcileArchives().catch(() => undefined);
 void reconcilePosters().catch(() => undefined);
 void reconcilePreviews().catch(() => undefined);
+void reconcileAssets().catch(() => undefined);
 
 let shuttingDown = false;
 const shutdown = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
-  clearInterval(reconcile); clearInterval(archiveReconcile); clearInterval(posterReconcile); clearInterval(previewReconcile);
-  const graceful = await closeWorkersWithin([worker, previewWorker], config.shutdownGraceMs);
+  clearInterval(reconcile); clearInterval(archiveReconcile); clearInterval(posterReconcile); clearInterval(previewReconcile); clearInterval(assetReconcile);
+  const graceful = await closeWorkersWithin([worker, previewWorker, assetWorker], config.shutdownGraceMs);
   console.info(JSON.stringify({ type: "worker_shutdown", at: new Date().toISOString(), worker: "media", graceful }));
   await connection.quit(); users.close(); process.exit(0);
 };
