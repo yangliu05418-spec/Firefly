@@ -1,12 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Redis } from "ioredis";
-import { acquireAssetCreationLock, acquireUploadCompletionLock, claimUploadSlot, releaseAssetCreationLock, releaseUploadCompletionLock, releaseUploadSlot } from "./upload-slots.js";
+import { acquireAssetCreationLock, acquireUploadCompletionLock, claimUploadSlot, releaseAssetCreationLock, releaseUploadCompletionLock, releaseUploadSlot, renewUploadSlot, UPLOAD_SLOT_TTL_SECONDS } from "./upload-slots.js";
 
 describe("upload concurrency guards", () => {
   it("uses one atomic Redis operation to claim a bounded user slot", async () => {
     const redis = { eval: vi.fn(async () => 1) } as unknown as Redis;
     await expect(claimUploadSlot(redis, "user-1", "upload-1", 6, 1000)).resolves.toBe(true);
-    expect(redis.eval).toHaveBeenCalledTimes(1);
+    expect(redis.eval).toHaveBeenCalledWith(expect.any(String), 1, "upload-slots:user-1", 1000, 1000 + UPLOAD_SLOT_TTL_SECONDS * 1000, 6, "upload-1");
+  });
+
+  it("renews only an upload slot that is still active", async () => {
+    const evalCall = vi.fn().mockResolvedValueOnce(1).mockResolvedValueOnce(0);
+    const redis = { eval: evalCall } as unknown as Redis;
+    await expect(renewUploadSlot(redis, "user-1", "upload-1", 2000)).resolves.toBe(true);
+    expect(redis.eval).toHaveBeenCalledWith(expect.any(String), 1, "upload-slots:user-1", 2000, 2000 + UPLOAD_SLOT_TTL_SECONDS * 1000, "upload-1");
+    await expect(renewUploadSlot(redis, "user-1", "expired-upload", 3000)).resolves.toBe(false);
   });
 
   it("returns null when another completion owns the lock", async () => {

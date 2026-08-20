@@ -163,6 +163,7 @@ export async function uploadFile(file: File, type: UploadKind, onProgress: (valu
   const prepared = type === "image" ? await prepareImageForUpload(file, signal) : { file, normalized: false };
   const upload = prepared.file;
   const init = await api.post<{ id: string; chunkSize: number; direct?: boolean; concurrency?: number; parts?: SignedPart[] }>("/api/uploads", { name: upload.name, size: upload.size, type, mime: upload.type });
+  const heartbeat = globalThis.setInterval(() => { void api.post(`/api/uploads/${init.id}/heartbeat`).catch(() => undefined); }, 60_000);
   try {
   if (init.direct) {
     const parts = init.parts ?? [];
@@ -192,5 +193,5 @@ export async function uploadFile(file: File, type: UploadKind, onProgress: (valu
     // or has already committed to the durable media database.
     await api.delete(`/api/uploads/${init.id}`).catch(() => undefined);
     throw error;
-  }
+  } finally { globalThis.clearInterval(heartbeat); }
 }

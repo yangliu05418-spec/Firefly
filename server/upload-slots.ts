@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import type { Redis } from "ioredis";
 
 export const UPLOAD_SESSION_TTL_SECONDS = 24 * 3600;
+export const UPLOAD_SLOT_TTL_SECONDS = 15 * 60;
 const keyFor = (ownerId: string) => `upload-slots:${ownerId}`;
 
 const claimScript = `
@@ -18,7 +19,22 @@ return 1
 `;
 
 export const claimUploadSlot = async (redis: Redis, ownerId: string, uploadId: string, limit: number, now = Date.now()) =>
-  Number(await redis.eval(claimScript, 1, keyFor(ownerId), now, now + UPLOAD_SESSION_TTL_SECONDS * 1000, limit, uploadId)) === 1;
+  Number(await redis.eval(claimScript, 1, keyFor(ownerId), now, now + UPLOAD_SLOT_TTL_SECONDS * 1000, limit, uploadId)) === 1;
+
+const renewScript = `
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local expires = tonumber(ARGV[2])
+local uploadId = ARGV[3]
+redis.call('ZREMRANGEBYSCORE', key, '-inf', now)
+if not redis.call('ZSCORE', key, uploadId) then return 0 end
+redis.call('ZADD', key, expires, uploadId)
+redis.call('EXPIRE', key, math.ceil((expires - now) / 1000))
+return 1
+`;
+
+export const renewUploadSlot = async (redis: Redis, ownerId: string, uploadId: string, now = Date.now()) =>
+  Number(await redis.eval(renewScript, 1, keyFor(ownerId), now, now + UPLOAD_SLOT_TTL_SECONDS * 1000, uploadId)) === 1;
 
 export const releaseUploadSlot = async (redis: Redis, ownerId: string, uploadId: string) => {
   await redis.zrem(keyFor(ownerId), uploadId);
