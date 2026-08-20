@@ -23,6 +23,7 @@
     "health:audit": "node dist-server/health-audit.js",
     "admin": "node dist-server/admin-cli.js",
     "maintenance": "node dist-server/maintenance.js",
+    "integration:real": "node dist-server/real-integration.js",
     "user:disable": "node dist-server/user-admin.js disable"
   },
   "dependencies": {

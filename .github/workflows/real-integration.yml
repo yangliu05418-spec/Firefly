@@ -1,0 +1,49 @@
+name: Protected real integrations
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: External system to exercise and clean up
+        required: true
+        type: choice
+        options: [tos, byteplus-asset, openrouter]
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: ${{ inputs.target }} round trip
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - name: Install and build the approved revision
+        run: |
+          npm install --global npm@10
+          npm ci
+          npm run build
+      - name: Run bounded round trip with cleanup
+        env:
+          PUBLIC_ORIGIN: https://integration.invalid
+          SESSION_SECRET: integration-only-session-secret-at-least-32-bytes
+          MEDIA_STORAGE_BACKEND: tos
+          TOS_ACCESS_KEY_ID: ${{ secrets.INTEGRATION_TOS_ACCESS_KEY_ID }}
+          TOS_SECRET_ACCESS_KEY: ${{ secrets.INTEGRATION_TOS_SECRET_ACCESS_KEY }}
+          TOS_REGION: ${{ vars.INTEGRATION_TOS_REGION || 'cn-beijing' }}
+          TOS_ENDPOINT: ${{ vars.INTEGRATION_TOS_ENDPOINT || 'tos-cn-beijing.bytepluses.com.cn' }}
+          TOS_BUCKET: ${{ vars.INTEGRATION_TOS_BUCKET }}
+          BYTEPLUS_ACCESS_KEY_ID: ${{ secrets.INTEGRATION_BYTEPLUS_ACCESS_KEY_ID }}
+          BYTEPLUS_SECRET_ACCESS_KEY: ${{ secrets.INTEGRATION_BYTEPLUS_SECRET_ACCESS_KEY }}
+          BYTEPLUS_REGION: ${{ vars.INTEGRATION_BYTEPLUS_REGION || 'ap-southeast-1' }}
+          BYTEPLUS_PROJECT: ${{ vars.INTEGRATION_BYTEPLUS_PROJECT || 'default' }}
+          INTEGRATION_ASSET_GROUP_ID: ${{ vars.INTEGRATION_ASSET_GROUP_ID }}
+          OPENROUTER_API_KEYS: ${{ secrets.INTEGRATION_OPENROUTER_API_KEY }}
+          INTEGRATION_OPENROUTER_MODEL: ${{ vars.INTEGRATION_OPENROUTER_MODEL || 'google/gemini-3.1-flash-lite-image' }}
+        run: node dist-server/real-integration.js "${{ inputs.target }}"

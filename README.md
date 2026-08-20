@@ -7,6 +7,14 @@
 - **生成**：文本/首帧/首尾帧/编辑/续写/全能参考六种创作模式，多模型多比例，素材引用（@图片/@视频/@音频）
 - **资产**：已归档成片（长期保留）+ 图片素材库（inputs/ 前缀 7 天生命周期）
 - **画布（Canvas）**：无限画布工作台 —— 自由排版节点、连线、分组、框选、剪贴板、撤销/重做、小地图、缩放导航；从资产一键插入成片与图片（图片自动迁移到 canvas/ 长期存储）；自动保存（800ms 防抖 + 离页 flush + revision 乐观锁）
+- **图片生成**：持久化异步任务；刷新、断网或 Web 重启后继续执行，结果长期保存到 TOS
+
+## 运行架构
+
+- Web 只承载飞书会话、权限、稳定媒体入口和任务 API。
+- `generation` Worker 提交/轮询 Seedance；`media` Worker 归档、验证和清理 TOS；`image` Worker 执行 OpenRouter 图片任务。
+- SQLite WAL 是用户、项目和媒体元数据的永久真相；Redis/BullMQ 只承担会话、队列、租约和短期缓存。
+- 浏览器上传、视频预览和下载直连 TOS，媒体字节不经过 AWS Web。
 
 ## 画布（Canvas Feature）
 
@@ -51,10 +59,14 @@
 
 ```bash
 npm install
-npm run dev        # vite + server + worker
+npm run db:migrate # 首次启动或切换版本前显式迁移
+npm run dev        # vite + web + generation worker + image worker
 npm test           # vitest（server/** 与 src/**）
+npm run test:e2e   # Playwright Chromium 产品流程
 npm run build      # vite build + tsc server
 ```
+
+生产发布、回滚、恢复和事故处置见 [部署运行手册](docs/deployment-runbook.md)、[数据恢复手册](docs/data-recovery.md) 与 [事故响应手册](docs/incident-response.md)。
 
 ## 许可与来源声明
 
