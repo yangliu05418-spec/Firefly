@@ -23,6 +23,11 @@ for candidate in "$enabled_dir"/firefly.conf.bak-*; do
   mv "$candidate" "$archive_dir/$base"
 done
 
+legacy_config="$enabled_dir/internal-image-studio.conf"
+if [ -e "$legacy_config" ] || [ -L "$legacy_config" ]; then
+  mv "$legacy_config" "$archive_dir/internal-image-studio.conf"
+fi
+
 install -o root -g root -m 0644 "$source_config" "$available_dir/firefly.conf"
 ln -sfn "$available_dir/firefly.conf" "$enabled_dir/firefly.conf"
 nginx -t
