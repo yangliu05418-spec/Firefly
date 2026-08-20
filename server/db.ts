@@ -275,6 +275,15 @@ export class UserStore {
     return row.count;
   }
 
+  /** Atomically reserves one active generation slot and persists the queued task. */
+  createTaskWithinLimit(task: StoredTask, limit: number) {
+    return this.database.transaction(() => {
+      if (!task.ownerId || this.countActiveTasksForUser(task.ownerId) >= limit) return false;
+      this.saveTask(task);
+      return true;
+    })();
+  }
+
   healthCheck() { return (this.database.prepare("SELECT 1 AS ok").get() as { ok: number }).ok === 1; }
   schemaVersion() { return schemaVersion(this.database); }
 
@@ -285,10 +294,6 @@ export class UserStore {
         AND source_video_url IS NOT NULL AND source_video_expires_at > ?
         AND (media_attempts IS NULL OR media_attempts < ?)
         AND (media_status IN ('failed', 'fallback') OR (media_status = 'archiving' AND updated_at < ?))
-        AND NOT EXISTS (
-          SELECT 1 FROM media_objects
-          WHERE media_objects.task_id = generation_tasks.id AND media_objects.kind = 'output' AND media_objects.status = 'ready'
-        )
       ORDER BY updated_at ASC LIMIT ?
     `).all(minimumSourceExpiry, MAX_MEDIA_RECOVERY_ATTEMPTS, staleBefore, limit) as TaskRow[];
     return rows.map((row) => mapTask(row)!);

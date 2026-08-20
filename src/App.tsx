@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Archive, ArrowRight, AudioLines, Check, CheckSquare2, ChevronDown, ChevronRight, Clock3, Clapperboard, Copy, Download, Film, Home, ImageIcon, Layers3, LayoutGrid, Library, LoaderCircle, LogOut, Menu, MessageSquare, PanelLeftClose, Pencil, Play, Plus, RefreshCw, Search, Send, Settings2, Sparkles, Square, Trash2, Upload, Video, WandSparkles, X } from "lucide-react";
-import { api, listenForSignedOut, notifySignedOut, uploadFile } from "./api";
+import { api, inferUploadType, listenForSignedOut, notifySignedOut, uploadFile } from "./api";
 import type { CreationMode, ImageGenResponse, ImageModel, ImageResultBundle, LibraryAsset, LibraryGroup, ModelCapability, SessionUser, Task, UploadAsset } from "./types";
 import { materializePromptReferences, promptAssetLabel, promptAssetMarker } from "./prompt-references";
 import { CanvasProjectList } from "./features/canvas/CanvasProjectList";
@@ -215,6 +215,7 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
   const [assets, setAssets] = useState<UploadAsset[]>([]); const [open, setOpen] = useState<"generation" | "model" | "mode" | "format" | "duration" | "advanced" | "library" | "image-model" | "image-format" | null>(null);
   const [generateAudio, setGenerateAudio] = useState(true); const [cameraFixed, setCameraFixed] = useState(false); const [watermark, setWatermark] = useState(false); const [seed, setSeed] = useState(-1);
   const [loading, setLoading] = useState(false); const [error, setError] = useState(""); const fileInput = useRef<HTMLInputElement>(null);
+  const uploadControllers = useRef(new Map<string, AbortController>());
 
   const isSeedance25 = model?.id === "dreamina-seedance-2-5-260628";
   const ratioLocked = isSeedance25 && (["first_frame", "first_last", "edit", "extend"] as CreationMode[]).includes(mode);
@@ -236,6 +237,8 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
   }, []);
   useEffect(() => {
     if (!model) return;
+    for (const controller of uploadControllers.current.values()) controller.abort();
+    uploadControllers.current.clear();
     if (!model.modes.includes(mode)) { setMode(model.modes[0]); return; }
     if (!model.resolutions.includes(resolution)) setResolution(model.resolutions.includes("720p") ? "720p" : model.resolutions[0]);
     if (ratioLocked) setRatio("adaptive"); else if (ratio === "adaptive" || !model.ratios.includes(ratio)) setRatio("16:9");
@@ -244,14 +247,17 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
     setAssets([]);
     setError("");
   }, [modelId, mode]);
+  useEffect(() => () => { for (const controller of uploadControllers.current.values()) controller.abort(); uploadControllers.current.clear(); }, []);
   useEffect(() => { const close = () => setOpen(null); window.addEventListener("click", close); return () => window.removeEventListener("click", close); }, []);
   if (!model) return null;
 
   const pickFiles = async (files: FileList | null) => {
     if (!files || (mode === "text" && engine === "video")) return;
     const plannedAssets = [...assets];
+    const pendingUploads: { file: File; pending: UploadAsset; controller: AbortController }[] = [];
     for (const file of Array.from(files)) {
-      const type: UploadAsset["type"] = file.type.startsWith("image/") ? "image" : file.type.startsWith("video/") ? "video" : "audio";
+      const type = inferUploadType(file);
+      if (!type) { setError(`不支持素材格式：${file.name}`); continue; }
       if (engine === "image" && type !== "image") { setError("图片生成只接受图片参考（图生图）"); continue; }
       if ((mode === "first_frame" || mode === "first_last") && type !== "image") { setError("首帧与首尾帧模式只接受图片"); continue; }
       if (mode === "first_frame" && plannedAssets.length >= 1) { setError("首帧模式只接受一张图片"); continue; }
@@ -262,12 +268,30 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
       const role: UploadAsset["role"] = mode === "first_frame" ? "first_frame" : mode === "first_last" ? (plannedAssets.some((a) => a.role === "first_frame") ? "last_frame" : "first_frame") : type === "image" ? "reference_image" : type === "video" ? "reference_video" : "reference_audio";
       const pending = { id: tempId, name: file.name, size: file.size, type, role, progress: 0, preview: type === "image" ? URL.createObjectURL(file) : undefined } satisfies UploadAsset;
       plannedAssets.push(pending);
-      setAssets((old) => [...old, pending]);
-      try {
-        const uploaded = await uploadFile(file, type, (progress) => setAssets((old) => old.map((a) => a.id === tempId ? { ...a, progress } : a)));
-        setAssets((old) => old.map((a) => a.id === tempId ? { ...a, ...uploaded, uploadId: uploaded.uploadId ?? uploaded.id, role, progress: 100 } : a));
-      } catch (e) { setAssets((old) => old.filter((a) => a.id !== tempId)); setError(e instanceof Error ? e.message : "上传失败"); }
+      const controller = new AbortController();
+      uploadControllers.current.set(tempId, controller);
+      pendingUploads.push({ file, pending, controller });
     }
+    setAssets(plannedAssets);
+    let cursor = 0;
+    const failures: string[] = [];
+    const uploadNext = async () => {
+      while (cursor < pendingUploads.length) {
+        const item = pendingUploads[cursor++];
+        const { file, pending, controller } = item;
+        const tempId = pending.id;
+        const role = pending.role;
+      try {
+        const uploaded = await uploadFile(file, pending.type, (progress) => setAssets((old) => old.map((a) => a.id === tempId ? { ...a, progress } : a)), { signal: controller.signal });
+        setAssets((old) => old.map((a) => a.id === tempId ? { ...a, ...uploaded, uploadId: uploaded.uploadId ?? uploaded.id, role, progress: 100 } : a));
+        } catch (e) {
+          setAssets((old) => old.filter((a) => a.id !== tempId));
+          if (!(e instanceof DOMException && e.name === "AbortError")) failures.push(`${file.name}：${e instanceof Error ? e.message : "上传失败"}`);
+        } finally { uploadControllers.current.delete(tempId); }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(3, pendingUploads.length) }, uploadNext));
+    if (failures.length) setError(`${failures.length} 个素材上传失败：${failures.slice(0, 2).join("；")}${failures.length > 2 ? " 等" : ""}`);
     if (fileInput.current) fileInput.current.value = "";
   };
 
@@ -348,7 +372,16 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
 
 function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
   const [groups, setGroups] = useState<LibraryGroup[]>([]); const [assets, setAssets] = useState<LibraryAsset[]>([]); const [loading, setLoading] = useState(true); const [error, setError] = useState(""); const [notice, setNotice] = useState(""); const [creating, setCreating] = useState(false); const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null); const [groupName, setGroupName] = useState(""); const [rights, setRights] = useState(false); const libraryFile = useRef<HTMLInputElement>(null);
+  const batchControllers = useRef(new Set<AbortController>());
   useEffect(() => { Promise.all([api.get<{ Items?: LibraryGroup[] }>("/api/assets/groups"), api.get<{ Items?: LibraryAsset[] }>("/api/assets")]).then(([g, a]) => { setGroups(g.Items ?? []); setAssets(a.Items ?? []); }).catch((e) => setError(e.message)).finally(() => setLoading(false)); }, []);
+  useEffect(() => () => { for (const controller of batchControllers.current) controller.abort(); batchControllers.current.clear(); }, []);
+  useEffect(() => {
+    const processing = assets.filter((asset) => asset.Status === "Processing");
+    if (!processing.length) return;
+    const refresh = () => void Promise.all(processing.map((asset) => api.get<LibraryAsset>(`/api/assets/${asset.Id}`).catch(() => asset))).then((updates) => setAssets((current) => current.map((asset) => updates.find((update) => update.Id === asset.Id) ?? asset)));
+    const timer = window.setInterval(refresh, 5000);
+    return () => window.clearInterval(timer);
+  }, [assets.map((asset) => `${asset.Id}:${asset.Status}`).join("|")]);
   const createGroup = async () => { if (!groupName.trim()) return; setCreating(true); setError(""); try { const result = await api.post<{ Id: string }>("/api/assets/groups", { name: groupName, description: "Created by Firefly" }); setGroups((old) => [{ Id: result.Id, Name: groupName }, ...old]); setGroupName(""); } catch (e) { setError(e instanceof Error ? e.message : "无法创建角色分组"); } finally { setCreating(false); } };
   const ingest = async (selected?: FileList | null) => {
     const files = Array.from(selected ?? []);
@@ -359,13 +392,15 @@ function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
     const uploadNext = async () => {
       while (cursor < files.length) {
         const file = files[cursor++];
+        const controller = new AbortController(); batchControllers.current.add(controller);
         try {
-          const type = file.type.startsWith("image/") ? "image" : file.type.startsWith("video/") ? "video" : "audio";
-          const uploaded = await uploadFile(file, type, () => undefined);
+          const type = inferUploadType(file);
+          if (!type) throw new Error("不支持此素材格式");
+          const uploaded = await uploadFile(file, type, () => undefined, { signal: controller.signal });
           const result = await api.post<{ Id: string }>("/api/assets", { groupId: groups[0].Id, uploadId: uploaded.uploadId ?? uploaded.id, url: "url" in uploaded ? uploaded.url : undefined, type: `${type[0].toUpperCase()}${type.slice(1)}`, name: file.name });
           setAssets((old) => [{ Id: result.Id, Name: file.name, AssetType: `${type[0].toUpperCase()}${type.slice(1)}` as LibraryAsset["AssetType"], Status: "Processing", GroupId: groups[0].Id }, ...old]);
         } catch (uploadError) { failures.push(`${file.name}（${uploadError instanceof Error ? uploadError.message.split(" · ")[0].slice(0, 60) : "上传失败"}）`); }
-        finally { setBatchProgress((progress) => progress ? { ...progress, done: progress.done + 1 } : progress); }
+        finally { batchControllers.current.delete(controller); setBatchProgress((progress) => progress ? { ...progress, done: progress.done + 1 } : progress); }
       }
     };
     try {
@@ -427,12 +462,13 @@ function CaseIdButton({ task, compact = false }: { task: Task; compact?: boolean
 
 function TaskCard({ task, models, eager, now, onDelete, canDelete = false }: { task: Task; models: ModelCapability[]; eager: boolean; now: number; onDelete: (task: Task) => void; canDelete?: boolean }) {
   const model = models.find((item) => item.id === task.model);
-  const expired = Boolean(task.videoExpiresAt && task.videoExpiresAt <= now);
+  const temporaryAvailable = Boolean(task.temporaryVideoUrl && (!task.temporaryVideoExpiresAt || task.temporaryVideoExpiresAt > now));
+  const expired = false;
   const mediaFailed = task.status === "succeeded" && task.mediaStatus === "failed";
   const [quoteIndex, setQuoteIndex] = useState(() => Math.abs(task.id.split("").reduce((sum, char) => sum + char.charCodeAt(0), 0)) % waitingMoments.length);
   const cardRef = useRef<HTMLElement>(null); const retryTimer = useRef<number | null>(null); const readyOnce = useRef(false); const loadStartedAt = useRef(Date.now()); const bufferingStartedAt = useRef<number | null>(null); const resumeTime = useRef(0);
   const [nearViewport, setNearViewport] = useState(eager); const [mediaState, setMediaState] = useState<MediaState>("idle"); const [retryCount, setRetryCount] = useState(0); const [downloadNotice, setDownloadNotice] = useState(""); const [copyNotice, setCopyNotice] = useState("");
-  const shouldLoadVideo = task.status === "succeeded" && Boolean(task.videoUrl) && !expired && (eager || nearViewport);
+  const shouldLoadVideo = task.status === "succeeded" && Boolean(task.videoUrl) && (eager || nearViewport);
   const reportTaskMediaEvent = (event: MediaEventName, video?: HTMLVideoElement, bufferingMs?: number) => reportMediaEvent(task.id, event, loadStartedAt.current, video, bufferingMs);
   useEffect(() => {
     if (["succeeded", "failed"].includes(task.status)) return;
@@ -476,7 +512,7 @@ function TaskCard({ task, models, eager, now, onDelete, canDelete = false }: { t
     setMediaState("error");
   };
   const copyVideoLink = async () => {
-    if (!task.videoUrl || expired) return;
+    if (!task.videoUrl) return;
     try { await navigator.clipboard.writeText(new URL(task.videoUrl, window.location.origin).href); setCopyNotice("链接已复制"); } catch { setCopyNotice("复制失败，请使用下载按钮"); }
     window.setTimeout(() => setCopyNotice(""), 2400);
   };
@@ -484,6 +520,7 @@ function TaskCard({ task, models, eager, now, onDelete, canDelete = false }: { t
     <header><div><span className="status-pulse" /><b>{taskStatusText(task)}</b><small>{new Date(task.createdAt).toLocaleString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</small>{task.visibility === "shared" && <small className="shared-mark">团队历史</small>}</div><span>{model?.name ?? task.model} · {task.ratio} · {task.resolution} · {task.duration}s <CaseIdButton task={task} />{canDelete && <button className="task-delete" title="删除项目" onClick={() => onDelete(task)}><Trash2 /></button>}</span></header>
     <p>{task.prompt || "基于参考素材生成"}</p>
     {task.status === "succeeded" && task.videoUrl ? <div className="video-result"><div className="video-stage">{shouldLoadVideo && <video key={`${task.id}-${task.mediaRevision ?? 0}-${retryCount}`} src={task.videoUrl} poster={task.posterUrl} controls playsInline preload={eager ? "auto" : "metadata"} onLoadedMetadata={(event) => { const video = event.currentTarget; if (resumeTime.current > 0 && Number.isFinite(video.duration)) video.currentTime = Math.min(resumeTime.current, Math.max(0, video.duration - 0.1)); reportTaskMediaEvent("metadata", video); }} onCanPlay={(event) => { const firstCanPlay = !readyOnce.current; readyOnce.current = true; setMediaState("ready"); if (firstCanPlay) reportTaskMediaEvent("canplay", event.currentTarget); }} onPlaying={(event) => { const bufferingMs = bufferingStartedAt.current === null ? undefined : Math.min(3600 * 1000, Date.now() - bufferingStartedAt.current); bufferingStartedAt.current = null; setMediaState("ready"); reportTaskMediaEvent("playing", event.currentTarget, bufferingMs); }} onWaiting={(event) => { const video = event.currentTarget; if (!readyOnce.current || (video.paused && !video.seeking) || bufferingStartedAt.current !== null) return; bufferingStartedAt.current = Date.now(); setMediaState("buffering"); reportTaskMediaEvent("waiting", video); }} onStalled={(event) => { const video = event.currentTarget; if (!readyOnce.current || (video.paused && !video.seeking) || bufferingStartedAt.current !== null) return; bufferingStartedAt.current = Date.now(); setMediaState("buffering"); reportTaskMediaEvent("stalled", video); }} onError={(event) => handleMediaError(event.currentTarget)} />}{(!shouldLoadVideo || mediaState !== "ready") && <div className={`video-loading video-loading--${mediaState}`} aria-live="polite"><div className="film-window"><Film /><span /><i /></div><b>{expired ? "预览链接已过期" : mediaState === "error" ? navigator.onLine ? "预览连接失败" : "网络连接已断开" : mediaState === "buffering" ? "正在继续缓冲" : shouldLoadVideo ? "正在载入第一帧" : "靠近时自动载入预览"}</b><small>{expired ? "成片正在重新归档，请稍后再试" : mediaState === "error" ? navigator.onLine ? "播放位置已保留，可重新加载预览" : "网络恢复后将自动重新连接" : "Firefly 正在从北京媒体存储准备画面"}</small>{mediaState === "error" && !expired && navigator.onLine && <button onClick={retryMedia}><RefreshCw /> 重新加载预览</button>}</div>}</div><div className="video-result__footer"><span>{expired ? "预览链接已过期" : downloadNotice || (task.mediaSource === "upstream" ? "临时源预览中，归档完成后将提供稳定入口" : "成片已安全归档，可随时预览与下载")}</span><div className="video-actions">{!expired && <button title="复制受保护的预览入口" onClick={copyVideoLink}><Copy /> {copyNotice || "复制入口"}</button>}{expired ? <button disabled><Download /> 下载暂不可用</button> : <a href={task.downloadUrl ?? task.videoUrl} target="_blank" rel="noreferrer" onClick={() => { setDownloadNotice("已交给浏览器下载器，可在下载列表中继续"); reportTaskMediaEvent("download_click"); }}><Download /> 下载视频</a>}</div></div></div> : task.status === "failed" ? <div className="task-error">{task.error ?? "生成失败，请检查素材与参数后重试"}</div> : <div className={`generation-visual ${mediaFailed ? "generation-visual--recovery" : ""}`}><div className="film-window"><Film /><span /><i /></div><div className="progress-copy"><div className="waiting-quote" aria-live="polite" key={quoteIndex}><b>{mediaFailed ? "成片尚未完成安全归档" : task.status === "succeeded" && task.mediaStatus === "archiving" ? "正在归档到北京 TOS" : task.status === "queued" ? "正在等待一束空闲的算力" : waitingMoment.title}</b><small>{mediaFailed ? "不会使用临时源；系统将在有效期内自动重试" : task.status === "succeeded" && task.mediaStatus === "archiving" ? "完成校验后将自动开放预览与下载" : task.status === "queued" ? "已进入安全队列，可以放心离开页面" : waitingMoment.detail}</small></div><code>{task.providerId ? `TASK / ${task.providerId.slice(0, 18)}…` : "SECURELY SUBMITTING PARAMETERS"}</code></div></div>}
+    {task.status === "succeeded" && !task.videoUrl && temporaryAvailable && <button className="temporary-preview-button" onClick={() => window.open(task.temporaryVideoUrl, "_blank", "noopener,noreferrer")}><Play /> 立即预览临时源（可能卡顿）</button>}
   </article>;
 }
 
@@ -553,7 +590,7 @@ function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: Library
   const [assets, setAssets] = useState<LibraryAsset[]>([]); const [group, setGroup] = useState<LibraryGroup | null>(null); const [query, setQuery] = useState(""); const [page, setPage] = useState(1); const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true); const [loadingMore, setLoadingMore] = useState(false); const [uploading, setUploading] = useState(false); const [progress, setProgress] = useState<{ done: number; total: number } | null>(null); const [error, setError] = useState(""); const [notice, setNotice] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set()); const [editingId, setEditingId] = useState<string | null>(null); const [draftName, setDraftName] = useState(""); const [confirmDelete, setConfirmDelete] = useState(false); const [deleting, setDeleting] = useState(false);
-  const fileInput = useRef<HTMLInputElement>(null); const requestSequence = useRef(0); const renaming = useRef(new Set<string>()); const cancelRename = useRef(false);
+  const fileInput = useRef<HTMLInputElement>(null); const requestSequence = useRef(0); const renaming = useRef(new Set<string>()); const cancelRename = useRef(false); const uploadControllers = useRef(new Set<AbortController>());
   const loadPage = async (requestedPage: number, replace: boolean, search = query) => {
     const sequence = ++requestSequence.current; replace ? setLoading(true) : setLoadingMore(true); setError("");
     try {
@@ -566,6 +603,7 @@ function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: Library
     finally { if (sequence === requestSequence.current) { setLoading(false); setLoadingMore(false); } }
   };
   useEffect(() => { void api.get<{ Items?: LibraryGroup[] }>("/api/assets/groups").then((result) => setGroup(result.Items?.[0] ?? null)).catch((loadError) => setError(loadError instanceof Error ? loadError.message : "素材空间暂时不可用")); }, []);
+  useEffect(() => () => { for (const controller of uploadControllers.current) controller.abort(); uploadControllers.current.clear(); }, []);
   useEffect(() => { const timer = window.setTimeout(() => void loadPage(1, true, query), query ? 260 : 0); return () => window.clearTimeout(timer); }, [query]);
   useEffect(() => {
     const processing = assets.filter((asset) => asset.Status === "Processing");
@@ -578,11 +616,12 @@ function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: Library
   const allSelected = assets.length > 0 && assets.every((asset) => selected.has(asset.Id));
   const toggleAll = () => setSelected(allSelected ? new Set() : new Set(assets.map((asset) => asset.Id)));
   const uploadImages = async (files?: FileList | null) => {
-    const images = Array.from(files ?? []).filter((file) => file.type.startsWith("image/"));
-    if (!images.length || !group) return;
+    const selectedFiles = Array.from(files ?? []);
+    const images = selectedFiles.filter((file) => inferUploadType(file) === "image");
+    if (!images.length || !group) { if (selectedFiles.length) setError("所选文件中没有受支持的图片"); return; }
     if (images.length > 50) { setError("单次最多上传 50 张图片"); if (fileInput.current) fileInput.current.value = ""; return; }
-    setUploading(true); setProgress({ done: 0, total: images.length }); setError(""); setNotice(""); const created: LibraryAsset[] = []; const failures: string[] = []; let cursor = 0;
-    const next = async () => { while (cursor < images.length) { const file = images[cursor++]; if (!file) continue; try { const uploaded = await uploadFile(file, "image", () => undefined); const asset = await api.post<LibraryAsset>("/api/assets", { groupId: group.Id, uploadId: uploaded.uploadId ?? uploaded.id, type: "Image", name: file.name }); created.push(asset); } catch (uploadError) { failures.push(`${file.name}（${uploadError instanceof Error ? uploadError.message.split(" · ")[0].slice(0, 60) : "上传失败"}）`); } finally { setProgress((current) => current ? { ...current, done: current.done + 1 } : current); } } };
+    setUploading(true); setProgress({ done: 0, total: images.length }); setError(""); setNotice(""); const created: LibraryAsset[] = []; const failures: string[] = selectedFiles.filter((file) => !images.includes(file)).map((file) => `${file.name}（不支持的格式）`); let cursor = 0;
+    const next = async () => { while (cursor < images.length) { const file = images[cursor++]; if (!file) continue; const controller = new AbortController(); uploadControllers.current.add(controller); try { const uploaded = await uploadFile(file, "image", () => undefined, { signal: controller.signal }); const asset = await api.post<LibraryAsset>("/api/assets", { groupId: group.Id, uploadId: uploaded.uploadId ?? uploaded.id, type: "Image", name: file.name }); created.push(asset); } catch (uploadError) { failures.push(`${file.name}（${uploadError instanceof Error ? uploadError.message.split(" · ")[0].slice(0, 60) : "上传失败"}）`); } finally { uploadControllers.current.delete(controller); setProgress((current) => current ? { ...current, done: current.done + 1 } : current); } } };
     try {
       await Promise.all(Array.from({ length: Math.min(3, images.length) }, next));
       if (created.length) { setAssets((current) => [...created.reverse(), ...current]); setNotice(`${created.length} 张图片已进入素材处理队列`); }

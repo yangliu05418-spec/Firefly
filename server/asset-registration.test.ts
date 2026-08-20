@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { AssetRegistrationRejected, prepareProviderAssets } from "./asset-registration.js";
+import { AssetRegistrationRejected, isRetryableAssetRejection, prepareProviderAssets } from "./asset-registration.js";
 import { buildProviderPayload, type GenerationInput } from "./provider.js";
 
 const input = (): GenerationInput => ({
@@ -10,6 +10,10 @@ const input = (): GenerationInput => ({
 });
 
 describe("trusted asset registration", () => {
+  it("retries processing timeouts but not deterministic provider rejections", () => {
+    expect(isRetryableAssetRejection(new AssetRegistrationRejected("processing", "ASSET_PROCESSING_TIMEOUT"))).toBe(true);
+    expect(isRetryableAssetRejection(new AssetRegistrationRejected("rejected", "ASSET_PROVIDER_FAILED"))).toBe(false);
+  });
   it("registers a TOS upload, waits for Active, and passes asset URI metadata", async () => {
     const callAsset = vi.fn(async (action: string) => {
       if (action === "ListAssetGroups") return { Items: [{ Id: "group-1", Name: "Firefly Auto References" }] };

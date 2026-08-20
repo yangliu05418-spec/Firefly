@@ -213,8 +213,8 @@ worker.on("failed", async (job) => {
   const task = await readTask(job.data.taskId, true);
   if (!task || task.deletedAt) return;
   const mediaAttempts = (task.mediaAttempts ?? 0) + 1;
-  // 分层保护：任务保持 succeeded（生成本身成功），归档失败进入 fallback 可恢复态；
-  // 临时源在有效期内仍可预览（task-public 暴露 upstream mediaSource），并限制自动恢复轮次。
+  // 分层保护：任务保持 succeeded（生成本身成功），归档失败进入可恢复态；
+  // 临时源只作为前端显式选择的降级预览，默认播放与下载仍等待 TOS 验证完成。
   await saveTask({
     ...task,
     mediaStatus: "failed",

@@ -3,6 +3,7 @@ import { callAssetApi } from "./asset-api.js";
 import { users } from "./store.js";
 import { redis } from "./redis.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
+import { acquireAssetCreationLock, releaseAssetCreationLock } from "./upload-slots.js";
 
 import type { GenerationInput } from "./provider.js";
 
@@ -21,6 +22,7 @@ export class AssetRegistrationRejected extends Error {
     this.code = code;
   }
 }
+export const isRetryableAssetRejection = (error: AssetRegistrationRejected) => error.code === "ASSET_PROCESSING_TIMEOUT";
 
 type AssetRecord = { Id: string; Status?: string; Name?: string; AssetType?: "Image" | "Video" | "Audio"; GroupId?: string; URL?: string };
 type GroupRecord = { Id: string; Name?: string };
@@ -35,6 +37,9 @@ type RegistrationDeps = {
   sleep: (ms: number) => Promise<unknown>;
   now: () => number;
   readOwnedAsset?: (assetId: string, ownerId: string) => boolean;
+  readRegisteredAsset?: (ownerId: string, uploadId: string) => { id: string } | undefined;
+  acquireAssetLock?: (ownerId: string, uploadId: string) => Promise<{ key: string; token: string } | null>;
+  releaseAssetLock?: (lock: { key: string; token: string }) => Promise<unknown>;
   saveAsset?: (asset: { id: string; ownerId: string; groupId: string; uploadId?: string; name: string; assetType: "Image" | "Video" | "Audio"; status: "Active" | "Processing" | "Failed"; url?: string; createdAt: number; updatedAt: number }) => unknown;
 };
 
@@ -48,6 +53,9 @@ const defaultDeps = () => productionDeps ??= {
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now: Date.now,
   readOwnedAsset: (assetId, ownerId) => users.readUserAsset(assetId)?.ownerId === ownerId,
+  readRegisteredAsset: (ownerId, uploadId) => users.readUserAssetByUpload(ownerId, uploadId) ?? undefined,
+  acquireAssetLock: (ownerId, uploadId) => acquireAssetCreationLock(redis, ownerId, uploadId),
+  releaseAssetLock: (lock) => releaseAssetCreationLock(redis, lock),
   saveAsset: (asset) => users.upsertUserAsset(asset)
 };
 
@@ -87,8 +95,17 @@ const waitForActive = async (assetId: string, name: string, deps: RegistrationDe
 const registerUpload = async (uploadId: string, ownerId: string, name: string, inputType: "image" | "video" | "audio", deps: RegistrationDeps) => {
   const cacheKey = `provider-asset:${ownerId}:${uploadId}`;
   let assetId = await deps.cacheGet(cacheKey);
+  let creationLock: { key: string; token: string } | null = null;
   let groupId = "";
   let assetType: "Image" | "Video" | "Audio" = inputType === "video" ? "Video" : inputType === "audio" ? "Audio" : "Image";
+  if (!assetId) {
+    if (deps.acquireAssetLock) {
+      creationLock = await deps.acquireAssetLock(ownerId, uploadId);
+      if (!creationLock) throw new AssetRegistrationRejected(`参考素材「${name}」正在可信资产注册中，请稍后重试`, "ASSET_PROCESSING_TIMEOUT");
+      assetId = deps.readRegisteredAsset?.(ownerId, uploadId)?.id ?? await deps.cacheGet(cacheKey) ?? null;
+    }
+  }
+  try {
   if (!assetId) {
     const media = deps.readUpload(uploadId);
     if (!media || media.ownerId !== ownerId || media.status !== "ready") throw new Error(`参考素材「${name}」不存在或尚未完成上传`);
@@ -113,6 +130,7 @@ const registerUpload = async (uploadId: string, ownerId: string, name: string, i
     deps.saveAsset?.({ id: assetId, ownerId, groupId, uploadId, name: media.fileName, assetType, status: "Processing", createdAt: deps.now(), updatedAt: deps.now() });
     console.info(JSON.stringify({ type: "provider_asset_created", at: new Date().toISOString(), ownerId, uploadId, assetId, groupId }));
   }
+  } finally { if (creationLock && deps.releaseAssetLock) await deps.releaseAssetLock(creationLock).catch(() => undefined); }
   const active = await waitForActive(assetId, name, deps);
   deps.saveAsset?.({ id: assetId, ownerId, groupId: active.GroupId ?? groupId, uploadId, name: active.Name ?? name, assetType: active.AssetType ?? assetType, status: "Active", url: active.URL, createdAt: deps.now(), updatedAt: deps.now() });
   console.info(JSON.stringify({ type: "provider_asset_active", at: new Date().toISOString(), ownerId, uploadId, assetId }));

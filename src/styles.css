@@ -785,3 +785,5 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 }
 @media(max-width:420px){.canvas-grid{grid-template-columns:1fr}}
 @media(hover:none){.canvas-card__actions{opacity:1}}
+
+.temporary-preview-button{min-height:34px;margin:12px auto 0;padding:7px 13px;border:1px solid rgba(199,211,234,.14);border-radius:999px;display:flex;align-items:center;gap:7px;color:#9ca8ba;background:transparent;cursor:pointer;font:10px var(--font-aeonikpro);transition:border-color .18s ease,color .18s ease,background .18s ease}.temporary-preview-button:hover,.temporary-preview-button:focus-visible{outline:0;color:#d1e4fa;border-color:rgba(199,211,234,.28);background:rgba(199,211,234,.045)}.temporary-preview-button svg{width:12px}

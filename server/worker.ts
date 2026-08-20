@@ -4,7 +4,7 @@ import { config } from "./config.js";
 import { shouldRecoverArchiveHandoff } from "./archive-state.js";
 import { createProviderTask, getProviderTask, validateGeneration, type GenerationInput } from "./provider.js";
 import { mediaQueue, readTask, saveTask } from "./redis.js";
-import { AssetRegistrationRejected, prepareProviderAssets } from "./asset-registration.js";
+import { AssetRegistrationRejected, isRetryableAssetRejection, prepareProviderAssets } from "./asset-registration.js";
 import { users } from "./store.js";
 import { closeWorkersWithin } from "./shutdown.js";
 
@@ -24,7 +24,7 @@ const worker = new Worker("generation", async (job) => {
     console.info(JSON.stringify({ type: "generation_submitting", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt: job.attemptsMade + 1 }));
     if (!task.ownerId) throw new UnrecoverableError("任务缺少素材所有者信息");
     try { input = await prepareProviderAssets(input, task.ownerId); }
-    catch (error) { if (error instanceof AssetRegistrationRejected) throw new UnrecoverableError(error.message); throw error; }
+    catch (error) { if (error instanceof AssetRegistrationRejected && !isRetryableAssetRejection(error)) throw new UnrecoverableError(error.message); throw error; }
     task = { ...task, request: input, updatedAt: Date.now() };
     await saveTask(task);
     const created = await createProviderTask(input);

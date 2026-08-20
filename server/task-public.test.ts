@@ -23,29 +23,32 @@ const makeTask = (mediaStatus: StoredTask["mediaStatus"], overrides: Partial<Sto
 });
 
 describe("publicTask media exposure", () => {
-  it("exposes the upstream temporary source while TOS is archiving (playable but non-final)", () => {
+  it("never makes the upstream source the default while TOS is archiving", () => {
     const task = publicTask(makeTask("archiving"));
 
-    expect(task.videoUrl).toBe("https://provider.example/temporary.mp4?secret=1");
-    expect(task.videoExpiresAt).toBeGreaterThan(Date.now());
-    expect(task.mediaSource).toBe("upstream");
+    expect(task.videoUrl).toBeUndefined();
+    expect(task.temporaryVideoUrl).toBe("https://provider.example/temporary.mp4?secret=1");
+    expect(task.temporaryVideoExpiresAt).toBeGreaterThan(Date.now());
+    expect(task.mediaSource).toBeUndefined();
     expect(task.downloadUrl).toBeUndefined();
     expect(task.posterUrl).toBeUndefined();
     expect(task).not.toHaveProperty("sourceVideoUrl");
     expect(task).not.toHaveProperty("sourceVideoExpiresAt");
   });
 
-  it("keeps the temporary source visible in fallback and archive-failed states", () => {
-    expect(publicTask(makeTask("fallback")).videoUrl).toBe("https://provider.example/temporary.mp4?secret=1");
-    expect(publicTask(makeTask("failed")).videoUrl).toBe("https://provider.example/temporary.mp4?secret=1");
-    expect(publicTask(makeTask("failed")).mediaSource).toBe("upstream");
+  it("keeps the temporary source separate in fallback and archive-failed states", () => {
+    expect(publicTask(makeTask("fallback")).temporaryVideoUrl).toBe("https://provider.example/temporary.mp4?secret=1");
+    expect(publicTask(makeTask("failed")).temporaryVideoUrl).toBe("https://provider.example/temporary.mp4?secret=1");
+    expect(publicTask(makeTask("failed")).videoUrl).toBeUndefined();
+    expect(publicTask(makeTask("failed")).mediaSource).toBeUndefined();
     expect(publicTask(makeTask("failed")).downloadUrl).toBeUndefined();
   });
 
   it("hides the temporary source once it expired", () => {
     const task = publicTask(makeTask("archiving", { sourceVideoExpiresAt: Date.now() - 1000 }));
     expect(task.videoUrl).toBeUndefined();
-    expect(task.videoExpiresAt).toBeUndefined();
+    expect(task.temporaryVideoUrl).toBeUndefined();
+    expect(task.temporaryVideoExpiresAt).toBeUndefined();
     expect(task.mediaSource).toBeUndefined();
   });
 
@@ -57,7 +60,7 @@ describe("publicTask media exposure", () => {
     expect(task.downloadUrl).toBe("/api/generations/task-1/download?rev=3");
     expect(task.posterUrl).toBe("/api/generations/task-1/poster?rev=3");
     expect(task.mediaSource).toBe("tos");
-    expect(task.videoExpiresAt).toBeUndefined();
+    expect(task.temporaryVideoUrl).toBeUndefined();
   });
 
   it("never exposes media for non-succeeded tasks", () => {
@@ -65,5 +68,6 @@ describe("publicTask media exposure", () => {
     expect(task.videoUrl).toBeUndefined();
     expect(task.downloadUrl).toBeUndefined();
     expect(task.posterUrl).toBeUndefined();
+    expect(task.temporaryVideoUrl).toBeUndefined();
   });
 });

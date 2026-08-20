@@ -77,7 +77,15 @@ const audit = async () => {
   const lifecycleRules = lifecycleResponse.data.Rules ?? [];
   const matchingCors = corsRules.find((rule) => rule.AllowedOrigins?.includes(config.origin));
   const methods = new Set((matchingCors?.AllowedMethods ?? []).map(String));
-  const corsValid = Boolean(matchingCors && [...requiredMethods].every((method) => methods.has(method)) && matchingCors.ResponseVary);
+  const allowedHeaders = new Set((matchingCors?.AllowedHeaders ?? []).map((header) => String(header).toLowerCase()));
+  const exposedHeaders = new Set((matchingCors?.ExposeHeaders ?? []).map((header) => String(header).toLowerCase()));
+  const corsValid = Boolean(matchingCors
+    && [...requiredMethods].every((method) => methods.has(method))
+    && allowedHeaders.has("content-type")
+    && allowedHeaders.has("x-tos-*")
+    && exposedHeaders.has("etag")
+    && exposedHeaders.has("x-tos-request-id")
+    && matchingCors.ResponseVary);
   const inputRetention = lifecycleRules.find((rule) => rule.ID === "firefly-input-retention");
   const multipartCleanup = lifecycleRules.find((rule) => rule.ID === "firefly-abort-incomplete-multipart");
   const lifecycleValid = inputRetention?.Status === "Enabled"
