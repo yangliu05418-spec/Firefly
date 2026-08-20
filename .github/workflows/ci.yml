@@ -56,16 +56,23 @@ jobs:
 
       - name: Reject oversized tracked files
         shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           set -euo pipefail
           failed=0
+          base="$BASE_SHA"
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == "0000000000000000000000000000000000000000" ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base=$(git rev-parse HEAD^)
+          fi
           while IFS= read -r -d '' file; do
+            [[ -f "$file" ]] || continue
             size=$(wc -c < "$file")
             if (( size > 20971520 )); then
-              echo "Tracked file exceeds 20 MiB: $file ($size bytes)" >&2
+              echo "New or changed tracked file exceeds 20 MiB: $file ($size bytes)" >&2
               failed=1
             fi
-          done < <(git ls-files -z)
+          done < <(git diff --name-only --diff-filter=ACMRT -z "$base" HEAD)
           exit "$failed"
 
       - name: Scan repository for secrets
