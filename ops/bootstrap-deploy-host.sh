@@ -26,7 +26,6 @@ for mapping in \
 done
 
 printf '%s\n' \
-  'Defaults:firefly-deploy !requiretty' \
   'firefly-deploy ALL=(root) NOPASSWD: /usr/local/sbin/firefly-ghcr-login *, /usr/local/sbin/firefly-alerts-configure, /usr/local/sbin/firefly-deploy *' \
   > /etc/sudoers.d/firefly-deploy
 chmod 0440 /etc/sudoers.d/firefly-deploy
