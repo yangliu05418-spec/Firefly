@@ -29,8 +29,8 @@ export function CanvasMontage({ canvasId, initialAssets, allAssets, onClose, onC
   const saveTimer = useRef<number | undefined>(undefined);
   const recordRef = useRef<MontageRecord | null>(null);
   const saveChain = useRef<Promise<void>>(Promise.resolve());
-  const videos = allAssets.filter((asset) => asset.kind === "video");
-  const audios = allAssets.filter((asset) => asset.kind === "audio");
+  const videos = allAssets.filter((asset) => asset.kind === "video" && asset.status === "ready");
+  const audios = allAssets.filter((asset) => asset.kind === "audio" && asset.status === "ready");
   const current = timeline.video[activeClip];
   const currentAsset = allAssets.find((asset) => asset.id === current?.projectAssetId);
   const totalMs = useMemo(() => timeline.video.reduce((total, clip) => total + Math.max(1, clip.durationMs - clip.trimStartMs - clip.trimEndMs), 0), [timeline.video]);

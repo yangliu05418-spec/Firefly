@@ -1288,7 +1288,10 @@ app.post("/api/canvases/:id/exports/:exportId/complete", requireAuth, async (req
       const headers = head.headers as Record<string, string | undefined>;
       const size = Number(headData.contentLength ?? headers["content-length"] ?? 0);
       const now = Date.now();
-      const projectAsset = recordCanvasProjectAsset({ ownerId: user.id, canvasId, kind: "video", sourceType: "montage", sourceId: record.id, title: "Montage 导出", contentType: "video/mp4", size, status: "ready" });
+      const montage = users.readCanvasMontage(record.montageId);
+      const timeline = montageTimelineSchema.parse(montage?.timeline);
+      const durationMs = Math.max(0, ...timeline.video.map((clip) => clip.startMs + clip.durationMs - clip.trimStartMs - clip.trimEndMs));
+      const projectAsset = recordCanvasProjectAsset({ ownerId: user.id, canvasId, kind: "video", sourceType: "montage", sourceId: record.id, title: "Montage 导出", contentType: "video/mp4", size, width: timeline.settings.width, height: timeline.settings.height, durationMs, status: "ready" });
       const completed = users.updateCanvasExport(record.id, { status: "ready", parts: body.parts, resultAssetId: projectAsset.id, error: null })!;
       res.json({ id: completed.id, status: completed.status, projectAsset: publicCanvasProjectAsset(projectAsset) });
     } catch (error) {

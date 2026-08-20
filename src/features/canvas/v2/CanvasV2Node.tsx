@@ -1,6 +1,6 @@
 import { memo, useEffect, useState } from "react";
 import { Handle, NodeResizer, Position, type Node, type NodeProps } from "@xyflow/react";
-import { Box, CircleStop, Clapperboard, Download, ImageIcon, Images, LoaderCircle, Maximize2, Plus, RotateCw, ScanFace, TextCursorInput, Users, WandSparkles } from "lucide-react";
+import { Box, CircleStop, Clapperboard, Crop, Download, ImageIcon, Images, LoaderCircle, Maximize2, Plus, RotateCw, ScanFace, TextCursorInput, Users, WandSparkles } from "lucide-react";
 import type { CanvasNodeTypeV2, CanvasNodeV2 } from "../canvas-v2-types";
 import { CanvasRichText } from "./CanvasRichText";
 
@@ -14,6 +14,8 @@ export type CanvasFlowData = {
   onCancel: (id: string) => void;
   onExtractFrame: (id: string) => void;
   onSelection: (id: string, text: string) => void;
+  onCrop: (id: string) => void;
+  onRotate: (id: string) => void;
 };
 export type CanvasFlowNode = Node<CanvasFlowData, CanvasNodeTypeV2>;
 
@@ -48,7 +50,7 @@ function CanvasV2NodeView({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         mediaUrl && !imageError ? <img className="canvas-v2-node__media" style={mediaStyle} src={mediaUrl} alt={domain.title} loading="lazy" draggable={false} onError={() => setImageError(true)} /> : <div className="canvas-v2-node__empty"><Icon /><span>{imageError ? "素材暂时无法显示" : emptyCopy[domain.type]}</span></div>}
     </div>
     {selected && domain.type !== "group" && <footer className="canvas-v2-node__tools nodrag">
-      {mediaUrl && <><a href={`${mediaUrl}?download=1`} aria-label="下载"><Download /></a><button onClick={() => data.onInspect(id)} aria-label="放大"><Maximize2 /></button>{domain.type === "video" && !readOnly && <button onClick={() => data.onExtractFrame(id)} aria-label="抽取中间帧" title="抽取中间帧"><Images /></button>}{domain.type !== "video" && domain.type !== "legacy-audio" && <button onClick={() => data.onChange(id, { rotation: ((domain.data.rotation ?? 0) + 90) % 360 })} aria-label="旋转"><RotateCw /></button>}</>}
+      {mediaUrl && <><a href={`${mediaUrl}?download=1`} aria-label="下载"><Download /></a><button onClick={() => data.onInspect(id)} aria-label="放大"><Maximize2 /></button>{domain.type === "video" && !readOnly && <button onClick={() => data.onExtractFrame(id)} aria-label="抽取中间帧" title="抽取中间帧"><Images /></button>}{domain.type !== "video" && domain.type !== "legacy-audio" && !readOnly && <><button onClick={() => data.onCrop(id)} aria-label="裁剪"><Crop /></button><button onClick={() => data.onRotate(id)} aria-label="旋转并创建派生图"><RotateCw /></button></>}</>}
       {!readOnly && <button className="canvas-v2-node__generate" onClick={() => data.onGenerate(id)}><WandSparkles /> 生成</button>}
     </footer>}
   </article>;

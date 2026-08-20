@@ -63,6 +63,7 @@ function Workspace({ canvasId, navigate }: { canvasId: string; navigate: (path: 
   const [uploading, setUploading] = useState<{ name: string; progress: number; error?: string }[]>([]);
   const [composer, setComposer] = useState<ComposerState | null>(null);
   const [inspectAsset, setInspectAsset] = useState<CanvasProjectAsset | null>(null);
+  const [cropNodeId, setCropNodeId] = useState<string | null>(null);
   const [montageOpen, setMontageOpen] = useState(false);
   const [edgesHidden, setEdgesHidden] = useState(false);
   const [snapToGrid, setSnapToGrid] = useState(true);
@@ -81,6 +82,7 @@ function Workspace({ canvasId, navigate }: { canvasId: string; navigate: (path: 
   const restoringHistory = useRef(false);
   const copiedSelection = useRef<{ nodes: CanvasNodeV2[]; edges: Array<{ source: string; target: string }> } | null>(null);
   const extractFrameRef = useRef<(id: string) => void>(() => undefined);
+  const deriveImageRef = useRef<(id: string, operation: { cropRatio?: number; rotation?: 90 | 180 | 270 }) => void>(() => undefined);
   const textSelections = useRef(new Map<string, string>());
   const cid = useMemo(clientId, []);
 
@@ -127,7 +129,7 @@ function Workspace({ canvasId, navigate }: { canvasId: string; navigate: (path: 
     setCreateMenu({ sourceId: id, side, position, screen: { x: side === "right" ? innerWidth - 310 : 110, y: 150 } });
   }, [flow]);
 
-  const attachCallbacks = useCallback((domain: CanvasNodeV2): CanvasFlowData => ({ domain, readOnly: readOnly || mobile, onChange: patchNode, onCreateFrom: openCreateFrom, onGenerate: openComposer, onInspect: inspectNode, onCancel: cancelNodeJob, onExtractFrame: (id) => extractFrameRef.current(id), onSelection: (id, text) => { if (text) textSelections.current.set(id, text); else textSelections.current.delete(id); } }), [cancelNodeJob, inspectNode, mobile, openComposer, openCreateFrom, patchNode, readOnly]);
+  const attachCallbacks = useCallback((domain: CanvasNodeV2): CanvasFlowData => ({ domain, readOnly: readOnly || mobile, onChange: patchNode, onCreateFrom: openCreateFrom, onGenerate: openComposer, onInspect: inspectNode, onCancel: cancelNodeJob, onExtractFrame: (id) => extractFrameRef.current(id), onCrop: (id) => setCropNodeId(id), onRotate: (id) => deriveImageRef.current(id, { rotation: 90 }), onSelection: (id, text) => { if (text) textSelections.current.set(id, text); else textSelections.current.delete(id); } }), [cancelNodeJob, inspectNode, mobile, openComposer, openCreateFrom, patchNode, readOnly]);
   const makeFlowNode = useCallback((domain: CanvasNodeV2): CanvasFlowNode => ({ id: domain.id, type: domain.type, position: domain.position, parentId: domain.parentId, extent: domain.parentId ? "parent" : undefined, width: domain.width, height: domain.height, data: attachCallbacks(domain) }), [attachCallbacks]);
 
   useEffect(() => {
@@ -309,7 +311,7 @@ function Workspace({ canvasId, navigate }: { canvasId: string; navigate: (path: 
     return createMenu.side === "right" ? NODE_CONNECTION_MATRIX[sourceType] : creatableTypes.filter((type) => canCreateFromNode(type, sourceType));
   }, [createMenu, flow]);
 
-  const selectedVideoAssets = useMemo(() => nodes.filter((node) => node.selected && node.data.domain.type === "video" && node.data.domain.data.projectAssetId).map((node) => assets.find((asset) => asset.id === node.data.domain.data.projectAssetId)).filter((asset): asset is CanvasProjectAsset => Boolean(asset)), [assets, nodes]);
+  const selectedVideoAssets = useMemo(() => nodes.filter((node) => node.selected && node.data.domain.type === "video" && node.data.domain.data.projectAssetId).map((node) => assets.find((asset) => asset.id === node.data.domain.data.projectAssetId)).filter((asset): asset is CanvasProjectAsset => Boolean(asset && asset.status === "ready")), [assets, nodes]);
   const selectedAssets = useMemo(() => nodes.filter((node) => node.selected && node.data.domain.data.projectAssetId).map((node) => assets.find((asset) => asset.id === node.data.domain.data.projectAssetId)).filter((asset): asset is CanvasProjectAsset => Boolean(asset)), [assets, nodes]);
   const selectedNodeCount = useMemo(() => nodes.filter((node) => node.selected).length, [nodes]);
   const selectedGroupCount = useMemo(() => nodes.filter((node) => node.selected && node.data.domain.type === "group").length, [nodes]);
@@ -459,6 +461,34 @@ function Workspace({ canvasId, navigate }: { canvasId: string; navigate: (path: 
   }, [assets, canvasId, flow, makeFlowNode, patchNode, setEdges, setNodes]);
   extractFrameRef.current = extractFrame;
 
+  const deriveImage = useCallback((nodeId: string, operation: { cropRatio?: number; rotation?: 90 | 180 | 270 }) => {
+    const sourceNode = flow.getNode(nodeId);
+    const assetId = sourceNode?.data.domain.data.projectAssetId;
+    const sourceAsset = assets.find((asset) => asset.id === assetId && asset.kind === "image" && asset.status === "ready");
+    if (!sourceNode || !sourceAsset) return setMessage("图片素材尚未准备完成");
+    patchNode(nodeId, { status: "running", error: undefined }); setCropNodeId(null);
+    const worker = new Worker(new URL("./image-transform.worker.ts", import.meta.url), { type: "module" });
+    worker.onmessage = (event: MessageEvent<{ type: "complete"; buffer: ArrayBuffer; width: number; height: number } | { type: "error"; message: string }>) => {
+      if (event.data.type === "error") { patchNode(nodeId, { status: "succeeded", error: event.data.message }); setMessage(event.data.message); worker.terminate(); return; }
+      const transformed = event.data;
+      void (async () => {
+        const suffix = operation.rotation ? "rotated" : "cropped";
+        const file = new File([transformed.buffer], `${sourceAsset.title.slice(0, 56) || "image"}-${suffix}.webp`, { type: "image/webp" });
+        const uploaded = await uploadFile(file, "image", () => undefined);
+        const imported = await importCanvasProjectAsset(canvasId, { kind: "upload", uploadId: uploaded.uploadId ?? uploaded.id });
+        setAssets((current) => [imported.projectAsset, ...current.filter((asset) => asset.id !== imported.projectAsset.id)]);
+        const position = { x: sourceNode.position.x + (sourceNode.measured?.width ?? sourceNode.data.domain.width) + 140, y: sourceNode.position.y };
+        const domain = createCanvasNodeV2("image", position, { title: `${sourceAsset.title} · ${operation.rotation ? "旋转" : "裁剪"}`, data: { projectAssetId: imported.projectAsset.id, mimeType: imported.projectAsset.contentType, status: imported.projectAsset.status === "ready" ? "succeeded" : "running" } });
+        setNodes((current) => [...current.map((node) => ({ ...node, selected: false })), { ...makeFlowNode(domain), selected: true }]);
+        setEdges((current) => [...current, toEdge({ id: `edge-${crypto.randomUUID()}`, source: nodeId, target: domain.id, sourceHandle: "right", targetHandle: "left", relation: "context" })]);
+        patchNode(nodeId, { status: "succeeded", error: undefined });
+      })().catch((error) => { patchNode(nodeId, { status: "succeeded", error: error instanceof Error ? error.message : "图片处理失败" }); setMessage(error instanceof Error ? error.message : "图片处理失败"); }).finally(() => worker.terminate());
+    };
+    worker.onerror = () => { patchNode(nodeId, { status: "succeeded", error: "图片处理线程异常" }); setMessage("图片处理线程异常"); worker.terminate(); };
+    worker.postMessage({ url: sourceAsset.mediaUrl, ...operation });
+  }, [assets, canvasId, flow, makeFlowNode, patchNode, setEdges, setNodes]);
+  deriveImageRef.current = deriveImage;
+
   const uploadAssets = async (files: FileList | null) => {
     if (!files?.length) return;
     const pending = Array.from(files).map((file) => ({ name: file.name, progress: 0 })); setUploading((old) => [...old, ...pending]);
@@ -496,6 +526,10 @@ function Workspace({ canvasId, navigate }: { canvasId: string; navigate: (path: 
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
+      if (event.key === "Escape") {
+        setCreateMenu(null); setComposer(null); setAssetPanel(false); setInspectAsset(null); setCropNodeId(null); setMontageOpen(false);
+        return;
+      }
       if (target?.closest("input,textarea,[contenteditable=true],[role=dialog]") || readOnly) return;
       const mod = event.metaKey || event.ctrlKey;
       if (mod && event.key.toLowerCase() === "a") { event.preventDefault(); setNodes((current) => current.map((node) => ({ ...node, selected: true }))); }
@@ -510,7 +544,6 @@ function Workspace({ canvasId, navigate }: { canvasId: string; navigate: (path: 
         if (selectedIds.size) { setNodes((current) => current.filter((node) => !selectedIds.has(node.id) && (!node.parentId || !selectedIds.has(node.parentId)))); setEdges((current) => current.filter((edge) => !edge.selected && !selectedIds.has(edge.source) && !selectedIds.has(edge.target))); }
       }
       if (event.key === "Tab") { event.preventDefault(); setCreateMenu({ screen: { x: innerWidth / 2 - 120, y: innerHeight / 2 - 120 }, position: flow.screenToFlowPosition({ x: innerWidth / 2, y: innerHeight / 2 }) }); }
-      if (event.key === "Escape") { setCreateMenu(null); setComposer(null); setAssetPanel(false); }
       if (mod && event.key === "0") { event.preventDefault(); void flow.fitView({ padding: .18, duration: 300 }); }
       if ((event.altKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "f") { event.preventDefault(); layout(); }
     };
@@ -582,6 +615,7 @@ function Workspace({ canvasId, navigate }: { canvasId: string; navigate: (path: 
       </div>
     </div>}
     {inspectAsset && <div className="canvas-v2-modal" role="dialog" aria-modal="true" onClick={() => setInspectAsset(null)}><div className="canvas-v2-inspect" onClick={(event) => event.stopPropagation()}>{inspectAsset.kind === "video" ? <video src={inspectAsset.mediaUrl} controls autoPlay /> : <img src={inspectAsset.mediaUrl} alt={inspectAsset.title} />}<footer><b>{inspectAsset.title}</b><a href={inspectAsset.downloadUrl}><Download /> 下载</a><button onClick={() => setInspectAsset(null)}><X /></button></footer></div></div>}
+    {cropNodeId && <div className="canvas-v2-modal" role="dialog" aria-modal="true" aria-label="裁剪图片" onClick={() => setCropNodeId(null)}><div className="canvas-v2-crop" onClick={(event) => event.stopPropagation()}><header><b>选择裁剪画幅</b><span>原图会保留，结果将作为新节点连接在右侧</span></header><div>{[[16 / 9, "16:9"], [4 / 3, "4:3"], [1, "1:1"], [3 / 4, "3:4"], [9 / 16, "9:16"]].map(([ratio, label]) => <button key={label} onClick={() => deriveImage(cropNodeId, { cropRatio: ratio as number })}>{label}</button>)}</div><footer><button onClick={() => setCropNodeId(null)}>取消</button></footer></div></div>}
     {montageOpen && <CanvasMontage canvasId={canvasId} initialAssets={selectedVideoAssets} allAssets={assets} onClose={() => setMontageOpen(false)} onComplete={(asset) => {
       setAssets((current) => [asset, ...current.filter((item) => item.id !== asset.id)]);
       const selected = flow.getNodes().filter((node) => node.selected && node.data.domain.type === "video");
