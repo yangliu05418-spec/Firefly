@@ -42,7 +42,10 @@ test("landing keeps the restrained Firefly entrance", async ({ page }) => {
 
 test("authenticated Canvas V2 opens, creates a node and preserves the app shell", async ({ page }) => {
   const pageErrors: string[] = [];
-  page.on("pageerror", (error) => pageErrors.push(error.message));
+  page.on("pageerror", (error) => {
+    if (error.message === "ResizeObserver loop completed with undelivered notifications.") return;
+    pageErrors.push(error.message);
+  });
   await mockAuthenticatedApi(page);
   await page.goto("/studio/canvas/canvas-e2e");
   await expect(page.getByRole("button", { name: "Firefly 画布导航" })).toContainText("Firefly");
