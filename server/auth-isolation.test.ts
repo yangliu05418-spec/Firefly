@@ -136,16 +136,19 @@ describe("enterprise identity and isolation", () => {
     store.close();
   });
 
-  it("selects ready originals whose streaming preview still needs recovery", () => {
+  it("selects the newest archived originals whose streaming preview still needs recovery", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-previews-")); directories.push(directory);
     const store = openStore(path.join(directory, "previews.db"));
     const owner = store.upsertFromFeishu({ openId: "ou_preview", unionId: "on_preview", tenantKey: "tenant-dokuai", email: "preview@dokuai.tv", name: "Preview", avatarUrl: "" });
     const now = Date.now();
-    const saveReady = (id: string) => store.saveTask(task({ id, ownerId: owner.id, visibility: "private", status: "succeeded", mediaStatus: "ready", updatedAt: now }));
-    saveReady("preview-missing"); saveReady("preview-ready"); saveReady("original-missing");
-    for (const id of ["preview-missing", "preview-ready"]) store.upsertMedia({ id: `${id}:output`, ownerId: owner.id, taskId: id, kind: "output", objectKey: `outputs/${id}.mp4`, status: "ready", fileName: "result.mp4", contentType: "video/mp4", size: 10, etag: "etag", createdAt: now, updatedAt: now });
+    const saveReady = (id: string, updatedAt: number, mediaStatus: StoredTask["mediaStatus"] = "ready") => store.saveTask(task({ id, ownerId: owner.id, visibility: "private", status: "succeeded", mediaStatus, updatedAt }));
+    saveReady("preview-older", now - 2000);
+    saveReady("preview-newer", now - 1000, "archiving");
+    saveReady("preview-ready", now - 3000);
+    saveReady("original-missing", now);
+    for (const id of ["preview-older", "preview-newer", "preview-ready"]) store.upsertMedia({ id: `${id}:output`, ownerId: owner.id, taskId: id, kind: "output", objectKey: `outputs/${id}.mp4`, status: "ready", fileName: "result.mp4", contentType: "video/mp4", size: 10, etag: "etag", createdAt: now, updatedAt: now });
     store.upsertMedia({ id: "preview-ready:preview", ownerId: owner.id, taskId: "preview-ready", kind: "preview", objectKey: "previews/preview-ready.mp4", status: "ready", fileName: "preview.mp4", contentType: "video/mp4", size: 5, etag: "etag", createdAt: now, updatedAt: now });
-    expect(store.recoverablePreviewTasks().map((item) => item.id)).toEqual(["preview-missing"]);
+    expect(store.recoverablePreviewTasks().map((item) => item.id)).toEqual(["preview-newer", "preview-older"]);
     store.close();
   });
 

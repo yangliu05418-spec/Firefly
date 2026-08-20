@@ -65,6 +65,16 @@ const respondError = (res: express.Response, error: unknown, status = 400) => {
 };
 const param = (value: string | string[]) => Array.isArray(value) ? value[0] : value;
 const execFileAsync = promisify(execFile);
+const publicGenerationTask = (task: StoredTask) => {
+  const stableMediaReady = task.status !== "succeeded" || task.mediaStatus !== "ready"
+    ? true
+    : !tosEnabled()
+      ? true
+      : config.tosPreviewTranscodeEnabled
+        ? Boolean(users.readTaskMedia(task.id, "preview"))
+        : Boolean(users.readTaskMedia(task.id, "output"));
+  return publicTask(task, { stableMediaReady });
+};
 
 /** 全局素材校验并发闸：批量上传时避免 N 个 ffprobe 同时拉取 TOS 对象压垮容器网络 */
 class Semaphore {
@@ -470,16 +480,16 @@ app.post("/api/generations", requireAuth, async (req, res) => {
       return res.status(503).json({ error: `${failed.error}（Case ID: ${id}）`, caseId: id });
     }
     console.info(JSON.stringify({ type: "generation_queued", at: new Date().toISOString(), requestId: res.locals.requestId, taskId: id, userId: owner.id, model: input.model, mode: input.mode, assetCount: input.assets.length }));
-    res.status(202).json(publicTask(task));
+    res.status(202).json(publicGenerationTask(task));
   } catch (error) { respondError(res, error); }
 });
 
 app.get("/api/generations", requireAuth, async (_req, res) => {
-  res.json((await listTasksForUser((res.locals.user as SessionUser).id)).map(publicTask));
+  res.json((await listTasksForUser((res.locals.user as SessionUser).id)).map(publicGenerationTask));
 });
 app.get("/api/generations/:id", requireAuth, async (req, res) => {
   const task = await readTask(param(req.params.id));
-  task && canAccessTask(task, (res.locals.user as SessionUser).id) ? res.json(publicTask(task)) : res.status(404).json({ error: "任务不存在或已过期" });
+  task && canAccessTask(task, (res.locals.user as SessionUser).id) ? res.json(publicGenerationTask(task)) : res.status(404).json({ error: "任务不存在或已过期" });
 });
 
 const accessibleTask = async (req: express.Request, res: express.Response) => {
@@ -492,7 +502,11 @@ app.get("/api/generations/:id/media", requireAuth, async (req, res) => {
   try {
     const task = await accessibleTask(req, res);
     if (!task || task.status !== "succeeded") return res.status(404).json({ error: "成片不存在或尚未就绪" });
-    const media = task.mediaStatus === "ready" ? (users.readTaskMedia(task.id, "preview") ?? users.readTaskMedia(task.id, "output")) : null;
+    const media = task.mediaStatus === "ready"
+      ? config.tosPreviewTranscodeEnabled
+        ? users.readTaskMedia(task.id, "preview")
+        : users.readTaskMedia(task.id, "preview") ?? users.readTaskMedia(task.id, "output")
+      : null;
     if (!media) return res.status(425).json({ error: "成片正在归档到TOS，请稍后重试" });
     const target = await stablePreviewUrl({ objectKey: media.objectKey, fileName: media.fileName }); const source = "tos" as const;
     res.setHeader("Cache-Control", previewRedirectCacheHeader);
@@ -927,7 +941,9 @@ app.post("/api/canvases/:id/media", requireAuth, async (req, res) => {
     if (body.kind === "generation") {
       const task = await readTask(body.taskId);
       if (!task || !canAccessTask(task, user.id) || task.status !== "succeeded" || task.mediaStatus !== "ready") return res.status(404).json({ error: "成片不存在或尚未就绪" });
-      const media = users.readTaskMedia(task.id, "output") ?? users.readTaskMedia(task.id, "preview");
+      const media = config.tosPreviewTranscodeEnabled
+        ? users.readTaskMedia(task.id, "preview")
+        : users.readTaskMedia(task.id, "output") ?? users.readTaskMedia(task.id, "preview");
       if (!media) return res.status(425).json({ error: "成片正在归档，请稍后重试" });
       let width: number | undefined;
       let height: number | undefined;

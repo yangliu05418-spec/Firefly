@@ -8,6 +8,7 @@ const json = (route: Route, body: unknown, status = 200) => route.fulfill({ stat
 
 async function mockAuthenticatedApi(page: Page) {
   let revision = 0;
+  let leaseReleaseCount = 0;
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -19,7 +20,10 @@ async function mockAuthenticatedApi(page: Page) {
     if (path === "/api/assets") return json(route, { Items: [], HasMore: false });
     if (path === "/api/canvas/config") return json(route, { enabled: true });
     if (path === "/api/canvases/canvas-e2e/lease" && request.method() === "POST") return json(route, { acquired: true, token: "e".repeat(64), ttlMs: 30_000 });
-    if (path === "/api/canvases/canvas-e2e/lease") return route.fulfill({ status: 204 });
+    if (path === "/api/canvases/canvas-e2e/lease") {
+      if (request.method() === "DELETE") leaseReleaseCount += 1;
+      return route.fulfill({ status: 204 });
+    }
     if (path === "/api/canvases/canvas-e2e/assets") return json(route, { Items: [], HasMore: false });
     if (path === "/api/canvases/canvas-e2e/jobs") return json(route, { Items: [] });
     if (path === "/api/canvases/canvas-e2e/events") return route.fulfill({ status: 200, contentType: "text/event-stream", body: ": connected\n\n" });
@@ -32,6 +36,7 @@ async function mockAuthenticatedApi(page: Page) {
     if (path === "/api/canvases/canvas-e2e" && request.method() === "PATCH") return json(route, { id: "canvas-e2e", title: "分镜实验" });
     return json(route, { error: `Unhandled E2E route: ${request.method()} ${path}` }, 404);
   });
+  return { leaseReleaseCount: () => leaseReleaseCount };
 }
 
 test("landing keeps the restrained Firefly entrance", async ({ page }) => {
@@ -46,7 +51,7 @@ test("authenticated Canvas V2 opens, creates a node and preserves the app shell"
     if (error.message === "ResizeObserver loop completed with undelivered notifications.") return;
     pageErrors.push(error.message);
   });
-  await mockAuthenticatedApi(page);
+  const mock = await mockAuthenticatedApi(page);
   await page.goto("/studio/canvas/canvas-e2e");
   await expect(page.getByRole("button", { name: "Firefly 画布导航" })).toContainText("Firefly");
   await expect(page.getByText("让片段彼此照亮")).toBeVisible();
@@ -64,4 +69,7 @@ test("authenticated Canvas V2 opens, creates a node and preserves the app shell"
   await page.locator(".canvas-v2-account__avatar").click();
   await expect(page.getByText("artist@dokuai.tv")).toBeVisible();
   await expect(page.getByText(/已保存|本地草稿|保存中/)).toBeVisible();
+  await page.getByTitle("小地图").click();
+  await expect(page.getByText(/已保存|保存中/)).toBeVisible();
+  await expect.poll(mock.leaseReleaseCount).toBe(0);
 });

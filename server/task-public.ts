@@ -7,16 +7,23 @@ import type { StoredTask } from "./db.js";
  * - archiving / fallback / failed：稳定入口保持关闭；上游临时源仅作为显式、可选的降级预览，
  *   前端不得自动挂载或预加载；绝不在任务对象中暴露 provider 密钥字段。
  */
-export const publicTask = ({ ownerId: _ownerId, request: _request, sourceVideoUrl, sourceVideoExpiresAt, deletedAt: _deletedAt, ...task }: StoredTask) => {
+export const publicTask = (
+  { ownerId: _ownerId, request: _request, sourceVideoUrl, sourceVideoExpiresAt, deletedAt: _deletedAt, ...task }: StoredTask,
+  { stableMediaReady = true }: { stableMediaReady?: boolean } = {},
+) => {
   const revision = task.mediaRevision ?? 0;
-  const stable = task.status === "succeeded" && task.mediaStatus === "ready";
+  const stable = task.status === "succeeded" && task.mediaStatus === "ready" && stableMediaReady;
+  const mediaStatus = task.status === "succeeded" && task.mediaStatus === "ready" && !stableMediaReady
+    ? "archiving" as const
+    : task.mediaStatus;
   const temporary =
     task.status === "succeeded" &&
     Boolean(sourceVideoUrl) &&
-    (task.mediaStatus === "archiving" || task.mediaStatus === "fallback" || task.mediaStatus === "failed") &&
+    (!stable || task.mediaStatus === "archiving" || task.mediaStatus === "fallback" || task.mediaStatus === "failed") &&
     (!sourceVideoExpiresAt || sourceVideoExpiresAt > Date.now());
   return {
     ...task,
+    mediaStatus,
     caseId: task.id,
     videoUrl: stable ? `/api/generations/${task.id}/media?rev=${revision}` : undefined,
     downloadUrl: stable ? `/api/generations/${task.id}/download?rev=${revision}` : undefined,

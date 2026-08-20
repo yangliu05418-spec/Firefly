@@ -60,6 +60,7 @@ export const config = {
   tosFetchDeadlineMs: positiveInt("TOS_FETCH_DEADLINE_MS", 120000),
   tosSourceStreamTimeoutMs: positiveInt("TOS_SOURCE_STREAM_TIMEOUT_MS", 15 * 60 * 1000),
   tosPreviewTranscodeEnabled: (process.env.TOS_PREVIEW_TRANSCODE_ENABLED ?? "true").toLowerCase() === "true",
+  tosPreviewConcurrency: boundedInt("TOS_PREVIEW_CONCURRENCY", 2, 1, 2),
   tosPreviewMaxBitrate: positiveInt("TOS_PREVIEW_MAX_BITRATE", 3_500_000),
   openrouterApiKeys: (process.env.OPENROUTER_API_KEYS ?? "").split(",").map((key) => key.trim()).filter(Boolean),
   openrouterBaseUrl: process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1",
