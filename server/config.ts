@@ -57,5 +57,8 @@ export const config = {
   tosPreviewMaxBitrate: positiveInt("TOS_PREVIEW_MAX_BITRATE", 3_500_000),
   openrouterApiKeys: (process.env.OPENROUTER_API_KEYS ?? "").split(",").map((key) => key.trim()).filter(Boolean),
   openrouterBaseUrl: process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1",
-  openrouterRequestTimeoutMs: positiveInt("OPENROUTER_REQUEST_TIMEOUT_MS", 180_000)
+  openrouterRequestTimeoutMs: positiveInt("OPENROUTER_REQUEST_TIMEOUT_MS", 180_000),
+  shutdownGraceMs: positiveInt("SHUTDOWN_GRACE_MS", 30_000),
+  revision: process.env.FIREFLY_REVISION ?? "development",
+  imageDigest: process.env.FIREFLY_IMAGE_DIGEST ?? "unknown"
 };

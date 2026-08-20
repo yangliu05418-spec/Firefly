@@ -1,4 +1,20 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "5"
+
 services:
+  migrate:
+    build: .
+    command: ["node", "dist-server/migrate.js"]
+    restart: "no"
+    env_file:
+      - .env
+      - .env.feishu
+    volumes:
+      - /srv/firefly/data:/data
+    logging: *default-logging
   web:
     build: .
     restart: unless-stopped
@@ -17,8 +33,12 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 35s
+    logging: *default-logging
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://localhost:8090/api/health').then(r=>{if(!r.ok)process.exit(1)})"]
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8090/api/health/ready').then(r=>{if(!r.ok)process.exit(1)})"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -35,6 +55,10 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 35s
+    logging: *default-logging
   media-worker:
     build: .
     restart: unless-stopped
@@ -52,6 +76,10 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 35s
+    logging: *default-logging
   redis:
     image: redis:7.4-alpine
     restart: unless-stopped
@@ -63,3 +91,4 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    logging: *default-logging

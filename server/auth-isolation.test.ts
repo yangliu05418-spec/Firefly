@@ -5,9 +5,12 @@ import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { config } from "./config.js";
 import { UserStore } from "./db.js";
+import { migrateDatabase } from "./migrations.js";
 import { consumeFeishuAuthorization, createFeishuAuthorization, validateFeishuProfile } from "./feishu.js";
 import type { StoredTask } from "./redis.js";
 import { canAccessTask } from "./task-access.js";
+
+const openStore = (databasePath: string) => { migrateDatabase(databasePath); return new UserStore(databasePath); };
 
 class MemoryRedis {
   values = new Map<string, string>();
@@ -42,7 +45,7 @@ describe("enterprise identity and isolation", () => {
 
   it("creates one durable user per Feishu identity and rejects email rebinding", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-users-")); directories.push(directory);
-    const store = new UserStore(path.join(directory, "users.db"));
+    const store = openStore(path.join(directory, "users.db"));
     const profile = { openId: "ou_1", unionId: "on_1", tenantKey: "tenant-dokuai", email: "artist@dokuai.tv", name: "Artist", avatarUrl: "" };
     const first = store.upsertFromFeishu(profile);
     expect(store.upsertFromFeishu({ ...profile, name: "Artist Two" }).id).toBe(first.id);
@@ -54,7 +57,7 @@ describe("enterprise identity and isolation", () => {
   it("persists private tasks and media independently of Redis", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-tasks-")); directories.push(directory);
     const databasePath = path.join(directory, "firefly.db");
-    let store = new UserStore(databasePath);
+    let store = openStore(databasePath);
     const owner = store.upsertFromFeishu({ openId: "ou_owner", unionId: "on_owner", tenantKey: "tenant-dokuai", email: "owner@dokuai.tv", name: "Owner", avatarUrl: "" });
     const other = store.upsertFromFeishu({ openId: "ou_other", unionId: "on_other", tenantKey: "tenant-dokuai", email: "other@dokuai.tv", name: "Other", avatarUrl: "" });
     const storedTask = task({ id: "task-durable", ownerId: owner.id, visibility: "private", status: "succeeded", mediaStatus: "ready", mediaRevision: 1 });
@@ -65,7 +68,7 @@ describe("enterprise identity and isolation", () => {
     expect(store.countActiveTasksForUser(owner.id)).toBe(1);
     store.upsertMedia({ id: "media-output", ownerId: owner.id, taskId: storedTask.id, kind: "output", objectKey: "outputs/aa/result.mp4", status: "ready", fileName: "result.mp4", contentType: "video/mp4", size: 1024, etag: "etag", createdAt: Date.now(), updatedAt: Date.now() });
     store.close();
-    store = new UserStore(databasePath);
+    store = openStore(databasePath);
     expect(store.listTasksForUser(owner.id).map((item) => item.id)).toContain(storedTask.id);
     expect(store.listTasksForUser(other.id).map((item) => item.id)).not.toContain(storedTask.id);
     expect(store.readTaskMedia(storedTask.id, "output")?.objectKey).toBe("outputs/aa/result.mp4");
@@ -76,7 +79,7 @@ describe("enterprise identity and isolation", () => {
     store.close();
   });
 
-  it("migrates the legacy media table before storing preview derivatives", () => {
+  it("refuses a legacy media-table rebuild during an online migration", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-preview-migration-")); directories.push(directory);
     const databasePath = path.join(directory, "legacy.db");
     const legacy = new Database(databasePath);
@@ -89,18 +92,12 @@ describe("enterprise identity and isolation", () => {
       etag TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER
     )`);
     legacy.close();
-    const store = new UserStore(databasePath);
-    const owner = store.upsertFromFeishu({ openId: "ou_migrate", unionId: "on_migrate", tenantKey: "tenant-dokuai", email: "migrate@dokuai.tv", name: "Migrate", avatarUrl: "" });
-    const stored = task({ id: "task-migrate", ownerId: owner.id, visibility: "private", status: "succeeded", mediaStatus: "ready" });
-    store.saveTask(stored);
-    store.upsertMedia({ id: "task-migrate:preview", ownerId: owner.id, taskId: stored.id, kind: "preview", objectKey: "previews/task-migrate.mp4", status: "ready", fileName: "preview.mp4", contentType: "video/mp4", size: 10, etag: "etag", createdAt: Date.now(), updatedAt: Date.now() });
-    expect(store.readTaskMedia(stored.id, "preview")?.kind).toBe("preview");
-    store.close();
+    expect(() => openStore(databasePath)).toThrow("refusing a destructive migration");
   });
 
   it("selects only recoverable TOS archives with a valid temporary source", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-recovery-")); directories.push(directory);
-    const store = new UserStore(path.join(directory, "recovery.db"));
+    const store = openStore(path.join(directory, "recovery.db"));
     const owner = store.upsertFromFeishu({ openId: "ou_recovery", unionId: "on_recovery", tenantKey: "tenant-dokuai", email: "recovery@dokuai.tv", name: "Recovery", avatarUrl: "" });
     const now = Date.now();
     const archive = (id: string, values: Partial<StoredTask> = {}) => store.saveTask(task({ id, ownerId: owner.id, visibility: "private", status: "succeeded", mediaStatus: "failed", sourceVideoUrl: "https://provider.example/video.mp4", sourceVideoExpiresAt: now + 60 * 60_000, updatedAt: now - 60 * 60_000, ...values }));
@@ -118,7 +115,7 @@ describe("enterprise identity and isolation", () => {
 
   it("selects ready videos whose poster still needs recovery", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-posters-")); directories.push(directory);
-    const store = new UserStore(path.join(directory, "posters.db"));
+    const store = openStore(path.join(directory, "posters.db"));
     const owner = store.upsertFromFeishu({ openId: "ou_poster", unionId: "on_poster", tenantKey: "tenant-dokuai", email: "poster@dokuai.tv", name: "Poster", avatarUrl: "" });
     const now = Date.now();
     const saveReady = (id: string) => store.saveTask(task({ id, ownerId: owner.id, visibility: "private", status: "succeeded", mediaStatus: "ready", updatedAt: now }));
@@ -131,7 +128,7 @@ describe("enterprise identity and isolation", () => {
 
   it("selects ready originals whose streaming preview still needs recovery", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-previews-")); directories.push(directory);
-    const store = new UserStore(path.join(directory, "previews.db"));
+    const store = openStore(path.join(directory, "previews.db"));
     const owner = store.upsertFromFeishu({ openId: "ou_preview", unionId: "on_preview", tenantKey: "tenant-dokuai", email: "preview@dokuai.tv", name: "Preview", avatarUrl: "" });
     const now = Date.now();
     const saveReady = (id: string) => store.saveTask(task({ id, ownerId: owner.id, visibility: "private", status: "succeeded", mediaStatus: "ready", updatedAt: now }));
@@ -151,7 +148,7 @@ describe("enterprise identity and isolation", () => {
 
   it("isolates user asset visibility, rename, and delete operations", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-assets-")); directories.push(directory);
-    const store = new UserStore(path.join(directory, "assets.db"));
+    const store = openStore(path.join(directory, "assets.db"));
     const owner = store.upsertFromFeishu({ openId: "ou_asset_owner", unionId: "on_asset_owner", tenantKey: "tenant-dokuai", email: "asset-owner@dokuai.tv", name: "Owner", avatarUrl: "" });
     const other = store.upsertFromFeishu({ openId: "ou_asset_other", unionId: "on_asset_other", tenantKey: "tenant-dokuai", email: "asset-other@dokuai.tv", name: "Other", avatarUrl: "" });
     const now = Date.now();
@@ -176,7 +173,7 @@ describe("enterprise identity and isolation", () => {
 
   it("allows the owner to delete their own shared tasks (read-only for others)", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-shared-delete-")); directories.push(directory);
-    const store = new UserStore(path.join(directory, "shared.db"));
+    const store = openStore(path.join(directory, "shared.db"));
     const owner = store.upsertFromFeishu({ openId: "ou_shared_owner", unionId: "on_shared_owner", tenantKey: "tenant-dokuai", email: "shared-owner@dokuai.tv", name: "Owner", avatarUrl: "" });
     const other = store.upsertFromFeishu({ openId: "ou_shared_other", unionId: "on_shared_other", tenantKey: "tenant-dokuai", email: "shared-other@dokuai.tv", name: "Other", avatarUrl: "" });
     store.saveTask(task({ id: "shared-task", ownerId: owner.id, visibility: "shared", status: "succeeded", mediaStatus: "ready", mediaRevision: 1 }));
@@ -188,7 +185,7 @@ describe("enterprise identity and isolation", () => {
 
   it("matches active asset references structurally (no substring false positives)", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-asset-ref-")); directories.push(directory);
-    const store = new UserStore(path.join(directory, "asset-ref.db"));
+    const store = openStore(path.join(directory, "asset-ref.db"));
     const owner = store.upsertFromFeishu({ openId: "ou_ref_owner", unionId: "on_ref_owner", tenantKey: "tenant-dokuai", email: "ref-owner@dokuai.tv", name: "Owner", avatarUrl: "" });
     store.saveTask(task({ id: "ref-running", ownerId: owner.id, status: "running", request: { assets: [{ assetId: "asset-abcdef", name: "a.png", type: "image" }] } }));
     expect(store.isUserAssetInActiveTask("asset-abcdef", owner.id)).toBe(true);
@@ -205,12 +202,12 @@ describe("enterprise identity and isolation", () => {
   it("persists media trace fields and caps recovery attempts", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-trace-")); directories.push(directory);
     const databasePath = path.join(directory, "trace.db");
-    let store = new UserStore(databasePath);
+    let store = openStore(databasePath);
     const owner = store.upsertFromFeishu({ openId: "ou_trace", unionId: "on_trace", tenantKey: "tenant-dokuai", email: "trace@dokuai.tv", name: "Trace", avatarUrl: "" });
     const now = Date.now();
     store.saveTask(task({ id: "trace-1", ownerId: owner.id, visibility: "private", status: "succeeded", mediaStatus: "failed", sourceVideoUrl: "https://provider.example/v.mp4", sourceVideoExpiresAt: now + 3600_000, fetchTaskId: "fetch-123", mediaAttempts: 1, mediaLastError: JSON.stringify({ phase: "url_fetch", message: "boom" }), updatedAt: now }));
     store.close();
-    store = new UserStore(databasePath);
+    store = openStore(databasePath);
     const loaded = store.readTask("trace-1")!;
     expect(loaded.fetchTaskId).toBe("fetch-123");
     expect(loaded.mediaAttempts).toBe(1);

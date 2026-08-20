@@ -1,4 +1,4 @@
-import { users } from "./db.js";
+import { users } from "./store.js";
 import { generationQueue, mediaQueue, redis } from "./redis.js";
 
 if (process.env.CONFIRM_CLEAR_GENERATION_HISTORY !== "yes") throw new Error("Set CONFIRM_CLEAR_GENERATION_HISTORY=yes to clear generation history");

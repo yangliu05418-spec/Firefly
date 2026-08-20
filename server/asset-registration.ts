@@ -1,6 +1,6 @@
 import { config } from "./config.js";
 import { callAssetApi } from "./asset-api.js";
-import { users } from "./db.js";
+import { users } from "./store.js";
 import { redis } from "./redis.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
 
@@ -38,7 +38,8 @@ type RegistrationDeps = {
   saveAsset?: (asset: { id: string; ownerId: string; groupId: string; uploadId?: string; name: string; assetType: "Image" | "Video" | "Audio"; status: "Active" | "Processing" | "Failed"; url?: string; createdAt: number; updatedAt: number }) => unknown;
 };
 
-const defaultDeps: RegistrationDeps = {
+let productionDeps: RegistrationDeps | undefined;
+const defaultDeps = () => productionDeps ??= {
   readUpload: users.readUpload.bind(users),
   cacheGet: (key) => redis.get(key),
   cacheSet: (key, value) => redis.set(key, value, "EX", CACHE_TTL_SECONDS),
@@ -65,12 +66,12 @@ const resolveGroupId = async (deps: RegistrationDeps) => {
 };
 
 const ensureGroupId = (deps: RegistrationDeps) => {
-  if (deps !== defaultDeps) return resolveGroupId(deps);
+  if (deps !== productionDeps) return resolveGroupId(deps);
   groupIdPromise ??= resolveGroupId(deps).catch((error) => { groupIdPromise = undefined; throw error; });
   return groupIdPromise;
 };
 
-export const ensureAutoReferenceGroup = () => ensureGroupId(defaultDeps);
+export const ensureAutoReferenceGroup = () => ensureGroupId(defaultDeps());
 
 const waitForActive = async (assetId: string, name: string, deps: RegistrationDeps) => {
   const deadline = deps.now() + ACTIVE_DEADLINE_MS;
@@ -118,7 +119,7 @@ const registerUpload = async (uploadId: string, ownerId: string, name: string, i
   return assetId;
 };
 
-export const prepareProviderAssets = async (input: GenerationInput, ownerId: string, deps: RegistrationDeps = defaultDeps): Promise<GenerationInput> => {
+export const prepareProviderAssets = async (input: GenerationInput, ownerId: string, deps: RegistrationDeps = defaultDeps()): Promise<GenerationInput> => {
   if (!input.model.startsWith("dreamina-seedance-2-")) return input;
   const assets = new Array<GenerationInput["assets"][number]>(input.assets.length);
   let cursor = 0;

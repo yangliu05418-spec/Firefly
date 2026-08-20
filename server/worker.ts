@@ -5,6 +5,8 @@ import { shouldRecoverArchiveHandoff } from "./archive-state.js";
 import { createProviderTask, getProviderTask, validateGeneration, type GenerationInput } from "./provider.js";
 import { mediaQueue, readTask, saveTask } from "./redis.js";
 import { AssetRegistrationRejected, prepareProviderAssets } from "./asset-registration.js";
+import { users } from "./store.js";
+import { closeWorkersWithin } from "./shutdown.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -85,6 +87,13 @@ worker.on("failed", async (job, error) => {
   }
 });
 
-const shutdown = async () => { await worker.close(); await connection.quit(); process.exit(0); };
+let shuttingDown = false;
+const shutdown = async () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  const graceful = await closeWorkersWithin([worker], config.shutdownGraceMs);
+  console.info(JSON.stringify({ type: "worker_shutdown", at: new Date().toISOString(), worker: "generation", graceful }));
+  await connection.quit(); users.close(); process.exit(0);
+};
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);

@@ -10,7 +10,8 @@ import { z } from "zod";
 import { config } from "./config.js";
 import { MODELS } from "./capabilities.js";
 import { clearSession, createSession, getSessionUser, publicUser, requireAuth, type SessionUser } from "./auth.js";
-import { users, type CanvasProject, type UserAsset } from "./db.js";
+import type { CanvasProject, UserAsset } from "./db.js";
+import { users } from "./store.js";
 import { canvasDocumentSchema, DEFAULT_CANVAS_DOCUMENT } from "./canvas-document.js";
 import { publicCanvasProject, publicCanvasProjectDetail } from "./canvas-public.js";
 import { consumeFeishuAuthorization, createFeishuAuthorization, exchangeFeishuCode } from "./feishu.js";
@@ -763,12 +764,33 @@ app.get("/api/canvas-media/:assetId", requireAuth, createCanvasMediaHandler({
 let latestTosHealth: { configured: boolean; reachable: boolean; checkedAt?: string } = { configured: tosConfigured(), reachable: false };
 const probeTos = async () => { latestTosHealth = { ...await tosHealth(), checkedAt: new Date().toISOString() }; };
 
+const runtimeIdentity = { revision: config.revision, imageDigest: config.imageDigest };
+
+app.get("/api/health/live", (_req, res) => res.json({ status: "ok", ...runtimeIdentity }));
+
+app.get("/api/health/ready", async (_req, res) => {
+  try {
+    await redis.ping();
+    if (!users.healthCheck()) throw new Error("database unavailable");
+    await Promise.all([generationQueue.getJobCounts("wait", "active"), mediaQueue.getJobCounts("wait", "active")]);
+    if (tosEnabled()) {
+      const checkedAt = latestTosHealth.checkedAt ? Date.parse(latestTosHealth.checkedAt) : 0;
+      if (!checkedAt || checkedAt < Date.now() - 30_000) await probeTos();
+      if (!latestTosHealth.configured || !latestTosHealth.reachable) throw new Error("TOS unavailable");
+    }
+    res.json({ status: "ready", redis: "ok", database: "ok", queues: "ok", tos: tosEnabled() ? "ok" : "disabled", schemaVersion: users.schemaVersion(), ...runtimeIdentity });
+  } catch (error) {
+    console.warn(JSON.stringify({ type: "readiness_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }));
+    res.status(503).json({ status: "not_ready", ...runtimeIdentity });
+  }
+});
+
 app.get("/api/health", async (_req, res) => {
   try {
     await redis.ping();
     if (!users.healthCheck()) throw new Error("database unavailable");
-    res.json({ status: "ok", redis: "ok", database: "ok", tosConfigured: latestTosHealth.configured, tosReachable: latestTosHealth.reachable, tosCheckedAt: latestTosHealth.checkedAt });
-  } catch { res.status(503).json({ status: "degraded", redis: "unavailable", database: "unavailable", tosConfigured: latestTosHealth.configured, tosReachable: latestTosHealth.reachable }); }
+    res.json({ status: "ok", redis: "ok", database: "ok", schemaVersion: users.schemaVersion(), tosConfigured: latestTosHealth.configured, tosReachable: latestTosHealth.reachable, tosCheckedAt: latestTosHealth.checkedAt, ...runtimeIdentity });
+  } catch { res.status(503).json({ status: "degraded", redis: "unavailable", database: "unavailable", tosConfigured: latestTosHealth.configured, tosReachable: latestTosHealth.reachable, ...runtimeIdentity }); }
 });
 
 app.use((error: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { UserStore } from "./db.js";
+import { migrateDatabase } from "./migrations.js";
 import { canvasAssetObjectKey } from "./canvas-assets.js";
 
 const makeUser = (store: UserStore, email: string) =>
@@ -16,7 +17,9 @@ describe("canvas asset persistence", () => {
 
   const freshStore = () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-canvas-asset-")); directories.push(directory);
-    return new UserStore(path.join(directory, "assets.db"));
+    const databasePath = path.join(directory, "assets.db");
+    migrateDatabase(databasePath);
+    return new UserStore(databasePath);
   };
 
   it("creates, reads, and transitions canvas asset status", () => {

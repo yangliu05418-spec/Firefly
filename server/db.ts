@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
-import { config } from "./config.js";
+import { assertSchemaVersion, schemaVersion } from "./migrations.js";
 
 export type User = {
   id: string;
@@ -205,159 +205,8 @@ export class UserStore {
     this.database.pragma("journal_mode = WAL");
     this.database.pragma("foreign_keys = ON");
     this.database.pragma("busy_timeout = 5000");
-    this.database.exec(`
-      CREATE TABLE IF NOT EXISTS users (
-        id TEXT PRIMARY KEY,
-        feishu_open_id TEXT NOT NULL UNIQUE,
-        feishu_union_id TEXT NOT NULL,
-        tenant_key TEXT NOT NULL,
-        email TEXT NOT NULL COLLATE NOCASE UNIQUE,
-        name TEXT NOT NULL,
-        avatar_url TEXT NOT NULL DEFAULT '',
-        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
-        created_at INTEGER NOT NULL,
-        last_login_at INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS users_tenant_key_idx ON users(tenant_key);
-      CREATE TABLE IF NOT EXISTS generation_tasks (
-        id TEXT PRIMARY KEY,
-        owner_id TEXT,
-        visibility TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private', 'shared')),
-        provider_id TEXT,
-        status TEXT NOT NULL CHECK (status IN ('queued', 'submitting', 'running', 'succeeded', 'failed')),
-        media_status TEXT NOT NULL DEFAULT 'none' CHECK (media_status IN ('none', 'archiving', 'ready', 'fallback', 'failed')),
-        media_revision INTEGER NOT NULL DEFAULT 0,
-        prompt TEXT NOT NULL,
-        model TEXT NOT NULL,
-        mode TEXT NOT NULL,
-        ratio TEXT NOT NULL,
-        resolution TEXT NOT NULL,
-        duration INTEGER NOT NULL,
-        request_json TEXT NOT NULL DEFAULT '{}',
-        source_video_url TEXT,
-        source_video_expires_at INTEGER,
-        error TEXT,
-        fetch_task_id TEXT,
-        media_attempts INTEGER NOT NULL DEFAULT 0,
-        media_last_error TEXT,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        deleted_at INTEGER,
-        FOREIGN KEY (owner_id) REFERENCES users(id)
-      );
-      CREATE INDEX IF NOT EXISTS generation_tasks_owner_created_idx ON generation_tasks(owner_id, created_at DESC);
-      CREATE INDEX IF NOT EXISTS generation_tasks_visibility_created_idx ON generation_tasks(visibility, created_at DESC);
-      CREATE TABLE IF NOT EXISTS media_objects (
-        id TEXT PRIMARY KEY,
-        owner_id TEXT NOT NULL,
-        task_id TEXT,
-        upload_id TEXT,
-        kind TEXT NOT NULL CHECK (kind IN ('input', 'output', 'preview', 'poster', 'generated')),
-        object_key TEXT NOT NULL UNIQUE,
-        status TEXT NOT NULL CHECK (status IN ('uploading', 'ready', 'delete_pending', 'deleted')),
-        file_name TEXT NOT NULL,
-        content_type TEXT NOT NULL,
-        size INTEGER NOT NULL DEFAULT 0,
-        etag TEXT NOT NULL DEFAULT '',
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        deleted_at INTEGER,
-        FOREIGN KEY (owner_id) REFERENCES users(id),
-        FOREIGN KEY (task_id) REFERENCES generation_tasks(id)
-      );
-      CREATE INDEX IF NOT EXISTS media_objects_task_kind_idx ON media_objects(task_id, kind);
-      CREATE INDEX IF NOT EXISTS media_objects_upload_idx ON media_objects(upload_id);
-      CREATE INDEX IF NOT EXISTS media_objects_delete_idx ON media_objects(status, updated_at);
-      CREATE TABLE IF NOT EXISTS user_assets (
-        id TEXT PRIMARY KEY,
-        owner_id TEXT NOT NULL,
-        group_id TEXT NOT NULL,
-        upload_id TEXT,
-        name TEXT NOT NULL,
-        asset_type TEXT NOT NULL CHECK (asset_type IN ('Image', 'Video', 'Audio')),
-        status TEXT NOT NULL CHECK (status IN ('Active', 'Processing', 'Failed')),
-        url TEXT,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        deleted_at INTEGER,
-        FOREIGN KEY (owner_id) REFERENCES users(id)
-      );
-      CREATE INDEX IF NOT EXISTS user_assets_owner_updated_idx ON user_assets(owner_id, updated_at DESC);
-      CREATE UNIQUE INDEX IF NOT EXISTS user_assets_owner_upload_idx ON user_assets(owner_id, upload_id) WHERE upload_id IS NOT NULL AND deleted_at IS NULL;
-      CREATE TABLE IF NOT EXISTS canvas_projects (
-        id TEXT PRIMARY KEY,
-        owner_id TEXT NOT NULL,
-        title TEXT NOT NULL,
-        document_json TEXT NOT NULL,
-        revision INTEGER NOT NULL DEFAULT 0,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        deleted_at INTEGER,
-        FOREIGN KEY (owner_id) REFERENCES users(id)
-      );
-      CREATE INDEX IF NOT EXISTS canvas_projects_owner_updated_idx ON canvas_projects(owner_id, updated_at DESC);
-      CREATE TABLE IF NOT EXISTS canvas_assets (
-        id TEXT PRIMARY KEY,
-        owner_id TEXT NOT NULL,
-        canvas_id TEXT NOT NULL,
-        source_upload_id TEXT,
-        object_key TEXT NOT NULL UNIQUE,
-        file_name TEXT NOT NULL,
-        content_type TEXT NOT NULL,
-        size INTEGER NOT NULL DEFAULT 0,
-        etag TEXT NOT NULL DEFAULT '',
-        status TEXT NOT NULL CHECK (status IN ('copying', 'ready', 'failed')),
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        deleted_at INTEGER,
-        FOREIGN KEY (owner_id) REFERENCES users(id),
-        FOREIGN KEY (canvas_id) REFERENCES canvas_projects(id)
-      );
-      CREATE INDEX IF NOT EXISTS canvas_assets_canvas_idx ON canvas_assets(canvas_id, created_at DESC);
-      CREATE INDEX IF NOT EXISTS canvas_assets_delete_idx ON canvas_assets(status, updated_at);
-    `);
-    const taskColumns = this.database.prepare("PRAGMA table_info(generation_tasks)").all() as { name: string }[];
-    const addTaskColumn = (name: string, definition: string) => {
-      if (taskColumns.some((column) => column.name === name)) return;
-      this.database.exec(`ALTER TABLE generation_tasks ADD COLUMN ${name} ${definition}`);
-    };
-    addTaskColumn("fetch_task_id", "TEXT");
-    addTaskColumn("media_attempts", "INTEGER NOT NULL DEFAULT 0");
-    addTaskColumn("media_last_error", "TEXT");
-    const mediaSchema = this.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'media_objects'").get() as { sql?: string } | undefined;
-    if (mediaSchema?.sql && (!mediaSchema.sql.includes("'preview'") || !mediaSchema.sql.includes("'generated'"))) {
-      this.database.transaction(() => {
-        this.database.exec(`
-          DROP INDEX IF EXISTS media_objects_task_kind_idx;
-          DROP INDEX IF EXISTS media_objects_upload_idx;
-          DROP INDEX IF EXISTS media_objects_delete_idx;
-          ALTER TABLE media_objects RENAME TO media_objects_before_preview;
-          CREATE TABLE media_objects (
-            id TEXT PRIMARY KEY,
-            owner_id TEXT NOT NULL,
-            task_id TEXT,
-            upload_id TEXT,
-            kind TEXT NOT NULL CHECK (kind IN ('input', 'output', 'preview', 'poster', 'generated')),
-            object_key TEXT NOT NULL UNIQUE,
-            status TEXT NOT NULL CHECK (status IN ('uploading', 'ready', 'delete_pending', 'deleted')),
-            file_name TEXT NOT NULL,
-            content_type TEXT NOT NULL,
-            size INTEGER NOT NULL DEFAULT 0,
-            etag TEXT NOT NULL DEFAULT '',
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL,
-            deleted_at INTEGER,
-            FOREIGN KEY (owner_id) REFERENCES users(id),
-            FOREIGN KEY (task_id) REFERENCES generation_tasks(id)
-          );
-          INSERT INTO media_objects SELECT * FROM media_objects_before_preview;
-          DROP TABLE media_objects_before_preview;
-          CREATE INDEX media_objects_task_kind_idx ON media_objects(task_id, kind);
-          CREATE INDEX media_objects_upload_idx ON media_objects(upload_id);
-          CREATE INDEX media_objects_delete_idx ON media_objects(status, updated_at);
-        `);
-      })();
-    }
+    try { assertSchemaVersion(this.database); }
+    catch (error) { this.database.close(); throw error; }
   }
 
   findById(id: string) { return mapUser(this.database.prepare("SELECT * FROM users WHERE id = ?").get(id) as UserRow | undefined); }
@@ -427,6 +276,7 @@ export class UserStore {
   }
 
   healthCheck() { return (this.database.prepare("SELECT 1 AS ok").get() as { ok: number }).ok === 1; }
+  schemaVersion() { return schemaVersion(this.database); }
 
   recoverableMediaTasks(minimumSourceExpiry: number, staleBefore: number, limit = 20) {
     const rows = this.database.prepare(`
@@ -673,5 +523,3 @@ export class UserStore {
 
   close() { this.database.close(); }
 }
-
-export const users = new UserStore(config.databasePath);

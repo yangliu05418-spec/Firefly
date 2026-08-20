@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
-import { users, type MediaObject } from "./db.js";
+import type { MediaObject } from "./db.js";
+import { users } from "./store.js";
 import { putObjectBuffer, shard, signedObjectUrl } from "./tos.js";
 
 /**

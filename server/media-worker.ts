@@ -1,11 +1,12 @@
 import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import { config } from "./config.js";
-import { users } from "./db.js";
+import { users } from "./store.js";
 import { mediaQueue, previewQueue, readTask, saveTask } from "./redis.js";
 import { createPoster, deleteObject, fetchObjectFromUrl, optimizePlaybackObject, outputObjectKey, posterObjectKey, previewObjectKey, streamObjectFromUrl, verifyProgressiveMp4 } from "./tos.js";
 import { MAX_MEDIA_RECOVERY_ATTEMPTS } from "./db.js";
 import { transcodePreview } from "./preview-transcode.js";
+import { closeWorkersWithin } from "./shutdown.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const numberHeader = (value: unknown) => Number(value ?? 0) || 0;
@@ -250,6 +251,14 @@ void reconcileArchives().catch(() => undefined);
 void reconcilePosters().catch(() => undefined);
 void reconcilePreviews().catch(() => undefined);
 
-const shutdown = async () => { clearInterval(reconcile); clearInterval(archiveReconcile); clearInterval(posterReconcile); clearInterval(previewReconcile); await Promise.all([worker.close(), previewWorker.close()]); await connection.quit(); users.close(); process.exit(0); };
+let shuttingDown = false;
+const shutdown = async () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  clearInterval(reconcile); clearInterval(archiveReconcile); clearInterval(posterReconcile); clearInterval(previewReconcile);
+  const graceful = await closeWorkersWithin([worker, previewWorker], config.shutdownGraceMs);
+  console.info(JSON.stringify({ type: "worker_shutdown", at: new Date().toISOString(), worker: "media", graceful }));
+  await connection.quit(); users.close(); process.exit(0);
+};
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
