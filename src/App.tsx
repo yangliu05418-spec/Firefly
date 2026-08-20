@@ -20,6 +20,8 @@ const modePlaceholders: Record<CreationMode, string> = {
 };
 const statusText: Record<Task["status"], string> = { queued: "等待调度", submitting: "正在提交", running: "正在生成", succeeded: "生成完成", failed: "生成失败" };
 const taskStatusText = (task: Task) => task.status === "succeeded" && task.mediaStatus === "archiving" ? "正在归档成片" : task.status === "succeeded" && task.mediaStatus === "failed" ? "成片归档待恢复" : statusText[task.status];
+type AssetCreateResponse = LibraryAsset | { Pending: true; UploadId: string; Status: "Processing"; Message: string };
+const assetRegistrationPending = (result: AssetCreateResponse): result is Extract<AssetCreateResponse, { Pending: true }> => "Pending" in result && result.Pending;
 
 const waitingMoments = [
   { title: "镜头正在成形", detail: "正在理解画面、运动与声音之间的关系" },
@@ -347,8 +349,14 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
 }
 
 function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
-  const [groups, setGroups] = useState<LibraryGroup[]>([]); const [assets, setAssets] = useState<LibraryAsset[]>([]); const [loading, setLoading] = useState(true); const [error, setError] = useState(""); const [notice, setNotice] = useState(""); const [creating, setCreating] = useState(false); const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null); const [groupName, setGroupName] = useState(""); const [rights, setRights] = useState(false); const libraryFile = useRef<HTMLInputElement>(null);
+  const [groups, setGroups] = useState<LibraryGroup[]>([]); const [assets, setAssets] = useState<LibraryAsset[]>([]); const [loading, setLoading] = useState(true); const [error, setError] = useState(""); const [notice, setNotice] = useState(""); const [creating, setCreating] = useState(false); const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null); const [groupName, setGroupName] = useState(""); const [rights, setRights] = useState(false); const [pendingRegistrations, setPendingRegistrations] = useState(0); const libraryFile = useRef<HTMLInputElement>(null);
   useEffect(() => { Promise.all([api.get<{ Items?: LibraryGroup[] }>("/api/assets/groups"), api.get<{ Items?: LibraryAsset[] }>("/api/assets")]).then(([g, a]) => { setGroups(g.Items ?? []); setAssets(a.Items ?? []); }).catch((e) => setError(e.message)).finally(() => setLoading(false)); }, []);
+  useEffect(() => {
+    if (!pendingRegistrations) return;
+    const refresh = () => void api.get<{ Items?: LibraryAsset[] }>("/api/assets").then((result) => setAssets(result.Items ?? [])).catch(() => undefined);
+    const timers = [5_000, 15_000, 30_000].map((delay) => window.setTimeout(refresh, delay));
+    return () => timers.forEach(window.clearTimeout);
+  }, [pendingRegistrations]);
   const createGroup = async () => { if (!groupName.trim()) return; setCreating(true); setError(""); try { const result = await api.post<{ Id: string }>("/api/assets/groups", { name: groupName, description: "Created by Firefly" }); setGroups((old) => [{ Id: result.Id, Name: groupName }, ...old]); setGroupName(""); } catch (e) { setError(e instanceof Error ? e.message : "无法创建角色分组"); } finally { setCreating(false); } };
   const ingest = async (selected?: FileList | null) => {
     const files = Array.from(selected ?? []);
@@ -362,8 +370,9 @@ function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
         try {
           const type = file.type.startsWith("image/") ? "image" : file.type.startsWith("video/") ? "video" : "audio";
           const uploaded = await uploadFile(file, type, () => undefined);
-          const result = await api.post<{ Id: string }>("/api/assets", { groupId: groups[0].Id, uploadId: uploaded.uploadId ?? uploaded.id, url: "url" in uploaded ? uploaded.url : undefined, type: `${type[0].toUpperCase()}${type.slice(1)}`, name: file.name });
-          setAssets((old) => [{ Id: result.Id, Name: file.name, AssetType: `${type[0].toUpperCase()}${type.slice(1)}` as LibraryAsset["AssetType"], Status: "Processing", GroupId: groups[0].Id }, ...old]);
+          const result = await api.post<AssetCreateResponse>("/api/assets", { groupId: groups[0].Id, uploadId: uploaded.uploadId ?? uploaded.id, url: "url" in uploaded ? uploaded.url : undefined, type: `${type[0].toUpperCase()}${type.slice(1)}`, name: file.name });
+          if (assetRegistrationPending(result)) setPendingRegistrations((count) => count + 1);
+          else setAssets((old) => [result, ...old.filter((asset) => asset.Id !== result.Id)]);
         } catch (uploadError) { failures.push(`${file.name}（${uploadError instanceof Error ? uploadError.message.split(" · ")[0].slice(0, 60) : "上传失败"}）`); }
         finally { setBatchProgress((progress) => progress ? { ...progress, done: progress.done + 1 } : progress); }
       }
@@ -371,7 +380,7 @@ function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
     try {
       await Promise.all(Array.from({ length: Math.min(3, files.length) }, uploadNext));
       const succeeded = files.length - failures.length;
-      if (succeeded) setNotice(`已提交 ${succeeded} 个素材，正在后台处理`);
+      if (succeeded) setNotice(`已接收 ${succeeded} 个素材，正在后台处理与核对`);
       if (failures.length) setError(`${failures.length} 个素材上传失败：${failures.slice(0, 3).join("、")}${failures.length > 3 ? " 等" : ""}`);
     } finally {
       setCreating(false); setBatchProgress(null); if (libraryFile.current) libraryFile.current.value = "";
@@ -551,7 +560,7 @@ function AssetPreview({ task, close, onDelete, initialTime, onPosition }: { task
 
 function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: LibraryAsset) => void }) {
   const [assets, setAssets] = useState<LibraryAsset[]>([]); const [group, setGroup] = useState<LibraryGroup | null>(null); const [query, setQuery] = useState(""); const [page, setPage] = useState(1); const [hasMore, setHasMore] = useState(false);
-  const [loading, setLoading] = useState(true); const [loadingMore, setLoadingMore] = useState(false); const [uploading, setUploading] = useState(false); const [progress, setProgress] = useState<{ done: number; total: number } | null>(null); const [error, setError] = useState(""); const [notice, setNotice] = useState("");
+  const [loading, setLoading] = useState(true); const [loadingMore, setLoadingMore] = useState(false); const [uploading, setUploading] = useState(false); const [progress, setProgress] = useState<{ done: number; total: number } | null>(null); const [error, setError] = useState(""); const [notice, setNotice] = useState(""); const [pendingRegistrations, setPendingRegistrations] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set()); const [editingId, setEditingId] = useState<string | null>(null); const [draftName, setDraftName] = useState(""); const [confirmDelete, setConfirmDelete] = useState(false); const [deleting, setDeleting] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null); const requestSequence = useRef(0); const renaming = useRef(new Set<string>()); const cancelRename = useRef(false);
   const loadPage = async (requestedPage: number, replace: boolean, search = query) => {
@@ -568,6 +577,11 @@ function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: Library
   useEffect(() => { void api.get<{ Items?: LibraryGroup[] }>("/api/assets/groups").then((result) => setGroup(result.Items?.[0] ?? null)).catch((loadError) => setError(loadError instanceof Error ? loadError.message : "素材空间暂时不可用")); }, []);
   useEffect(() => { const timer = window.setTimeout(() => void loadPage(1, true, query), query ? 260 : 0); return () => window.clearTimeout(timer); }, [query]);
   useEffect(() => {
+    if (!pendingRegistrations) return;
+    const timers = [5_000, 15_000, 30_000].map((delay) => window.setTimeout(() => void loadPage(1, true, query), delay));
+    return () => timers.forEach(window.clearTimeout);
+  }, [pendingRegistrations]);
+  useEffect(() => {
     const processing = assets.filter((asset) => asset.Status === "Processing");
     if (!processing.length) return;
     const refresh = () => void Promise.all(processing.map((asset) => api.get<LibraryAsset>(`/api/assets/${asset.Id}`).catch(() => asset))).then((updates) => setAssets((current) => current.map((asset) => updates.find((update) => update.Id === asset.Id) ?? asset)));
@@ -582,10 +596,13 @@ function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: Library
     if (!images.length || !group) return;
     if (images.length > 50) { setError("单次最多上传 50 张图片"); if (fileInput.current) fileInput.current.value = ""; return; }
     setUploading(true); setProgress({ done: 0, total: images.length }); setError(""); setNotice(""); const created: LibraryAsset[] = []; const failures: string[] = []; let cursor = 0;
-    const next = async () => { while (cursor < images.length) { const file = images[cursor++]; if (!file) continue; try { const uploaded = await uploadFile(file, "image", () => undefined); const asset = await api.post<LibraryAsset>("/api/assets", { groupId: group.Id, uploadId: uploaded.uploadId ?? uploaded.id, type: "Image", name: file.name }); created.push(asset); } catch (uploadError) { failures.push(`${file.name}（${uploadError instanceof Error ? uploadError.message.split(" · ")[0].slice(0, 60) : "上传失败"}）`); } finally { setProgress((current) => current ? { ...current, done: current.done + 1 } : current); } } };
+    let pending = 0;
+    const next = async () => { while (cursor < images.length) { const file = images[cursor++]; if (!file) continue; try { const uploaded = await uploadFile(file, "image", () => undefined); const asset = await api.post<AssetCreateResponse>("/api/assets", { groupId: group.Id, uploadId: uploaded.uploadId ?? uploaded.id, type: "Image", name: file.name }); if (assetRegistrationPending(asset)) pending += 1; else created.push(asset); } catch (uploadError) { failures.push(`${file.name}（${uploadError instanceof Error ? uploadError.message.split(" · ")[0].slice(0, 60) : "上传失败"}）`); } finally { setProgress((current) => current ? { ...current, done: current.done + 1 } : current); } } };
     try {
       await Promise.all(Array.from({ length: Math.min(3, images.length) }, next));
-      if (created.length) { setAssets((current) => [...created.reverse(), ...current]); setNotice(`${created.length} 张图片已进入素材处理队列`); }
+      if (created.length) setAssets((current) => [...created.reverse(), ...current.filter((asset) => !created.some((item) => item.Id === asset.Id))]);
+      if (pending) setPendingRegistrations((count) => count + pending);
+      if (created.length || pending) setNotice(`${created.length + pending} 张图片已进入素材处理与核对队列`);
       if (failures.length) setError(`${failures.length} 张上传失败：${failures.slice(0, 3).join("、")}${failures.length > 3 ? " 等" : ""}`);
     } finally { setUploading(false); setProgress(null); if (fileInput.current) fileInput.current.value = ""; }
   };

@@ -20,7 +20,7 @@ import { canAccessTask } from "./task-access.js";
 import { publicTask } from "./task-public.js";
 import { validateGeneration } from "./provider.js";
 import { callAssetApi } from "./asset-api.js";
-import { ensureAutoReferenceGroup } from "./asset-registration.js";
+import { AssetRegistrationRejected, ensureAutoReferenceGroup, reconcileProviderRegistrations, registerProviderUpload } from "./asset-registration.js";
 import { previewRedirectCacheControl } from "./media-cache.js";
 import { stablePreviewUrl } from "./preview-url-cache.js";
 import { abortMultipartUpload, completeMultipartUpload, createMultipartUpload, deleteObject, headObject, inputObjectKey, inspectMediaObject, signUploadPart, signedObjectUrl, tosConfigured, tosEnabled, tosHealth } from "./tos.js";
@@ -479,6 +479,7 @@ app.get("/api/assets", requireAuth, async (req, res) => {
   try {
     const query = z.object({ q: z.string().max(80).optional(), type: z.enum(["Image", "Video", "Audio"]).optional(), page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(100) }).parse(req.query);
     const user = res.locals.user as SessionUser;
+    void reconcileProviderRegistrations(user.id).catch((error) => console.warn(JSON.stringify({ type: "asset_registration_reconcile_failed", at: new Date().toISOString(), userId: user.id, code: (error as { code?: string }).code ?? "unknown" })));
     const assets = users.listUserAssets(user.id, query.q ?? "", query.pageSize + 1, query.type, (query.page - 1) * query.pageSize);
     const hasMore = assets.length > query.pageSize;
     res.json({ Items: (await refreshUserAssetList(assets.slice(0, query.pageSize))).map(publicUserAsset), PageNumber: query.page, PageSize: query.pageSize, HasMore: hasMore });
@@ -501,14 +502,26 @@ app.post("/api/assets", requireAuth, async (req, res) => {
       if (!media || media.ownerId !== user.id) return res.status(404).json({ error: "引用素材不存在或已过期" });
       url = signedObjectUrl(media.objectKey, { expires: 24 * 3600, fileName: media.fileName });
     }
-    const created = await callAssetApi<ProviderAssetRecord>("CreateAsset", { GroupId: groupId, URL: url, AssetType: body.type, Name: body.name });
-    if (!created.Id?.startsWith("asset-")) throw new Error("素材服务未返回有效资产 ID");
-    const now = Date.now();
-    const asset: UserAsset = { id: created.Id, ownerId: user.id, groupId, uploadId: body.uploadId, name: created.Name ?? body.name, assetType: created.AssetType ?? body.type, status: created.Status ?? "Processing", url: created.URL, createdAt: now, updatedAt: now };
-    users.upsertUserAsset(asset);
+    let asset: UserAsset;
+    if (body.uploadId) {
+      asset = await registerProviderUpload({ ownerId: user.id, uploadId: body.uploadId, name: body.name, inputType: body.type.toLowerCase() as "image" | "video" | "audio" });
+    } else {
+      const created = await callAssetApi<ProviderAssetRecord>("CreateAsset", { GroupId: groupId, URL: url, AssetType: body.type, Name: body.name });
+      if (!created.Id?.startsWith("asset-")) throw new Error("素材服务未返回有效资产 ID");
+      const now = Date.now();
+      asset = { id: created.Id, ownerId: user.id, groupId, name: created.Name ?? body.name, assetType: created.AssetType ?? body.type, status: created.Status ?? "Processing", url: created.URL, createdAt: now, updatedAt: now };
+      users.upsertUserAsset(asset);
+    }
     console.info(JSON.stringify({ type: "user_asset_mutation", action: "create_asset", userId: user.id, assetId: asset.id, at: new Date().toISOString() }));
     res.status(201).json(publicUserAsset(asset));
   } catch (error) {
+    if (error instanceof AssetRegistrationRejected && error.code === "ASSET_REGISTRATION_PENDING") {
+      console.info(JSON.stringify({ type: "asset_registration_pending", at: new Date().toISOString(), userId: auditUserId, uploadId: auditUploadId }));
+      return res.status(202).json({ Pending: true, UploadId: auditUploadId, Status: "Processing", Message: error.message });
+    }
+    if (error instanceof AssetRegistrationRejected) {
+      return res.status(422).json({ error: error.message, code: error.code, requestId: res.locals.requestId });
+    }
     // 素材服务对尺寸不合规素材返回英文错误，翻译为清晰中文提示（兜底，正常在 complete 阶段已被拦截）
     const message = error instanceof Error ? error.message : "";
     if (/between 300px and 6000px|out of range|height.{0,40}(?:300|6000)|width.{0,40}(?:300|6000)/i.test(message)) {

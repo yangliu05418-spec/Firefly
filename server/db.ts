@@ -82,6 +82,20 @@ export type UserAsset = {
   deletedAt?: number;
 };
 
+export type AssetRegistrationOperation = {
+  ownerId: string;
+  uploadId: string;
+  deterministicName: string;
+  groupId: string;
+  providerAssetId?: string;
+  assetType: UserAsset["assetType"];
+  status: "pending" | "created" | "unknown" | "failed";
+  attemptCount: number;
+  lastError?: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
 export type CanvasAsset = {
   id: string;
   ownerId: string;
@@ -142,6 +156,13 @@ type UserAssetRow = {
   created_at: number; updated_at: number; deleted_at: number | null;
 };
 
+type AssetRegistrationOperationRow = {
+  owner_id: string; upload_id: string; deterministic_name: string; group_id: string;
+  provider_asset_id: string | null; asset_type: UserAsset["assetType"];
+  status: AssetRegistrationOperation["status"]; attempt_count: number; last_error: string | null;
+  created_at: number; updated_at: number;
+};
+
 type CanvasProjectRow = {
   id: string; owner_id: string; title: string; document_json: string; revision: number;
   created_at: number; updated_at: number; deleted_at: number | null;
@@ -181,6 +202,13 @@ const mapUserAsset = (row?: UserAssetRow): UserAsset | null => row ? ({
   id: row.id, ownerId: row.owner_id, groupId: row.group_id, uploadId: row.upload_id ?? undefined,
   name: row.name, assetType: row.asset_type, status: row.status, url: row.url ?? undefined,
   createdAt: row.created_at, updatedAt: row.updated_at, deletedAt: row.deleted_at ?? undefined
+}) : null;
+
+const mapAssetRegistrationOperation = (row?: AssetRegistrationOperationRow): AssetRegistrationOperation | null => row ? ({
+  ownerId: row.owner_id, uploadId: row.upload_id, deterministicName: row.deterministic_name,
+  groupId: row.group_id, providerAssetId: row.provider_asset_id ?? undefined, assetType: row.asset_type,
+  status: row.status, attemptCount: row.attempt_count, lastError: row.last_error ?? undefined,
+  createdAt: row.created_at, updatedAt: row.updated_at
 }) : null;
 
 const mapCanvasProject = (row?: CanvasProjectRow): CanvasProject | null => row ? ({
@@ -417,6 +445,47 @@ export class UserStore {
     const now = Date.now();
     const result = this.database.prepare("UPDATE user_assets SET deleted_at = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").run(now, now, id, ownerId);
     return result.changes > 0;
+  }
+
+  createAssetRegistrationOperation(operation: Omit<AssetRegistrationOperation, "status" | "attemptCount">) {
+    const result = this.database.prepare(`
+      INSERT OR IGNORE INTO asset_registration_operations
+        (owner_id, upload_id, deterministic_name, group_id, provider_asset_id, asset_type, status, attempt_count, last_error, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', 1, NULL, ?, ?)
+    `).run(operation.ownerId, operation.uploadId, operation.deterministicName, operation.groupId,
+      operation.providerAssetId ?? null, operation.assetType, operation.createdAt, operation.updatedAt);
+    return { inserted: result.changes > 0, operation: this.readAssetRegistrationOperation(operation.ownerId, operation.uploadId)! };
+  }
+
+  readAssetRegistrationOperation(ownerId: string, uploadId: string) {
+    return mapAssetRegistrationOperation(this.database.prepare("SELECT * FROM asset_registration_operations WHERE owner_id = ? AND upload_id = ?").get(ownerId, uploadId) as AssetRegistrationOperationRow | undefined);
+  }
+
+  updateAssetRegistrationOperation(ownerId: string, uploadId: string, patch: Partial<Pick<AssetRegistrationOperation, "status" | "providerAssetId" | "attemptCount" | "updatedAt">> & { lastError?: string | null }) {
+    const current = this.readAssetRegistrationOperation(ownerId, uploadId);
+    if (!current) return null;
+    this.database.prepare(`
+      UPDATE asset_registration_operations
+      SET status = ?, provider_asset_id = ?, last_error = ?, attempt_count = ?, updated_at = ?
+      WHERE owner_id = ? AND upload_id = ?
+    `).run(patch.status ?? current.status, patch.providerAssetId ?? current.providerAssetId ?? null,
+      patch.lastError === undefined ? current.lastError ?? null : patch.lastError,
+      patch.attemptCount ?? current.attemptCount, patch.updatedAt ?? Date.now(), ownerId, uploadId);
+    return this.readAssetRegistrationOperation(ownerId, uploadId)!;
+  }
+
+  claimAssetRegistrationRetry(ownerId: string, uploadId: string, expectedUpdatedAt: number, updatedAt = Date.now()) {
+    const result = this.database.prepare(`
+      UPDATE asset_registration_operations
+      SET status = 'pending', attempt_count = attempt_count + 1, last_error = NULL, updated_at = ?
+      WHERE owner_id = ? AND upload_id = ? AND updated_at = ? AND status IN ('pending', 'unknown')
+    `).run(updatedAt, ownerId, uploadId, expectedUpdatedAt);
+    return result.changes ? this.readAssetRegistrationOperation(ownerId, uploadId) : null;
+  }
+
+  listAssetRegistrationOperations(ownerId: string, limit = 100) {
+    return (this.database.prepare("SELECT * FROM asset_registration_operations WHERE owner_id = ? AND status != 'failed' ORDER BY updated_at ASC LIMIT ?").all(ownerId, limit) as AssetRegistrationOperationRow[])
+      .map((row) => mapAssetRegistrationOperation(row)!);
   }
 
   /**
