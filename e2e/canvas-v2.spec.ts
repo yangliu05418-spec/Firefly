@@ -16,6 +16,7 @@ async function mockAuthenticatedApi(page: Page) {
     if (path === "/api/models") return json(route, videoModels);
     if (path === "/api/image-models") return json(route, { Items: imageModels, Ratios: ["16:9", "1:1", "9:16"], DefaultModel: imageModels[0].id });
     if (path === "/api/generations") return json(route, []);
+    if (path === "/api/assets") return json(route, { Items: [], HasMore: false });
     if (path === "/api/canvas/config") return json(route, { enabled: true });
     if (path === "/api/canvases/canvas-e2e/lease" && request.method() === "POST") return json(route, { acquired: true, token: "e".repeat(64), ttlMs: 30_000 });
     if (path === "/api/canvases/canvas-e2e/lease") return route.fulfill({ status: 204 });
@@ -40,11 +41,24 @@ test("landing keeps the restrained Firefly entrance", async ({ page }) => {
 });
 
 test("authenticated Canvas V2 opens, creates a node and preserves the app shell", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
   await mockAuthenticatedApi(page);
   await page.goto("/studio/canvas/canvas-e2e");
-  await expect(page.getByTitle("回到全部项目")).toContainText("Firefly");
+  await expect(page.getByRole("button", { name: "Firefly 画布导航" })).toContainText("Firefly");
   await expect(page.getByText("让片段彼此照亮")).toBeVisible();
+  await page.getByRole("button", { name: "资产库" }).click();
+  await expect(page.getByLabel("画布资产").getByRole("button", { name: "角色", exact: true })).toBeVisible();
+  await page.locator(".canvas-v2-assets>header button").click();
+  await page.getByRole("button", { name: "帮助" }).hover();
+  await page.getByRole("button", { name: "快捷键" }).click();
+  await expect(page.getByRole("heading", { name: "画布快捷键" })).toBeVisible();
+  await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "文本", exact: true }).click();
+  await expect.poll(() => pageErrors).toEqual([]);
   await expect(page.locator(".canvas-v2-node--text")).toHaveCount(1);
+  await expect(page.getByTitle("H1 标题")).toBeVisible();
+  await page.locator(".canvas-v2-account__avatar").click();
+  await expect(page.getByText("artist@dokuai.tv")).toBeVisible();
   await expect(page.getByText(/已保存|本地草稿|保存中/)).toBeVisible();
 });

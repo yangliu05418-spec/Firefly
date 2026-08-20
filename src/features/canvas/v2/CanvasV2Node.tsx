@@ -43,7 +43,7 @@ function CanvasV2NodeView({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       {status === "failed" && <i title={String(domain.data.error ?? "生成失败")}>!</i>}
     </header>
     <div className="canvas-v2-node__body nodrag nowheel">
-      {domain.type === "text" ? <CanvasRichText value={domain.data.markdown ?? ""} readOnly={readOnly} onChange={(markdown, richText) => data.onChange(id, { markdown, richText })} onSelection={(selectionText) => data.onSelection(id, selectionText)} /> :
+      {domain.type === "text" ? <CanvasRichText value={domain.data.markdown ?? ""} richText={domain.data.richText} readOnly={readOnly} onChange={(markdown, richText) => data.onChange(id, { markdown, richText })} onSelection={(selectionText) => data.onSelection(id, selectionText)} /> :
         domain.type === "group" ? <div className="canvas-v2-node__group"><Users /><span>内容分组</span><small>拖动节点到这里整理镜头关系</small></div> :
         domain.type === "legacy-audio" ? mediaUrl ? <audio className="canvas-v2-node__media canvas-v2-node__audio" src={mediaUrl} controls preload="metadata" /> : <div className="canvas-v2-node__empty"><Icon /><span>{emptyCopy[domain.type]}</span></div> :
         domain.type === "video" ? mediaUrl ? <video className="canvas-v2-node__media" style={mediaStyle} src={mediaUrl} controls playsInline preload="metadata" /> : <div className="canvas-v2-node__empty"><Icon /><span>{emptyCopy[domain.type]}</span></div> :
