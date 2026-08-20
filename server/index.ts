@@ -15,7 +15,7 @@ import { users } from "./store.js";
 import { canvasDocumentSchema, DEFAULT_CANVAS_DOCUMENT } from "./canvas-document.js";
 import { publicCanvasProject, publicCanvasProjectDetail } from "./canvas-public.js";
 import { consumeFeishuAuthorization, createFeishuAuthorization, exchangeFeishuCode } from "./feishu.js";
-import { generationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, readTask, redis, saveTask, type StoredTask } from "./redis.js";
+import { assetQueue, generationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, readTask, redis, saveTask, type StoredTask } from "./redis.js";
 import { canAccessTask } from "./task-access.js";
 import { publicTask } from "./task-public.js";
 import { validateGeneration } from "./provider.js";
@@ -25,13 +25,14 @@ import { previewRedirectCacheControl } from "./media-cache.js";
 import { stablePreviewUrl } from "./preview-url-cache.js";
 import { abortMultipartUpload, completeMultipartUpload, createMultipartUpload, deleteObject, headObject, inputObjectKey, inspectMediaObject, signUploadPart, signedObjectUrl, tosConfigured, tosEnabled, tosHealth } from "./tos.js";
 import { canonicalUploadContentType, tosMediaInfoViolation, uploadKindFromContentType } from "./upload-policy.js";
-import { acquireAssetCreationLock, acquireUploadCompletionLock, claimUploadSlot, releaseAssetCreationLock, releaseUploadCompletionLock, releaseUploadSlot, UPLOAD_SESSION_TTL_SECONDS } from "./upload-slots.js";
+import { acquireUploadCompletionLock, claimUploadSlot, releaseUploadCompletionLock, releaseUploadSlot, UPLOAD_SESSION_TTL_SECONDS } from "./upload-slots.js";
 import { createCanvasAssetFromUpload } from "./canvas-assets.js";
 import { createCanvasMediaHandler } from "./canvas-media-route.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
 import { IMAGE_MODELS, IMAGE_RATIOS, imageModelById, computeImageSize, DEFAULT_IMAGE_MODEL } from "./image-models.js";
 import { acquireImageSlot, downloadImageBuffer, generateSingleImage, openRouterPool, OpenRouterError, releaseImageSlot } from "./openrouter.js";
 import { storeGeneratedImage } from "./generated-media.js";
+import { providerAssetName } from "./asset-name.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -547,25 +548,7 @@ app.post("/api/media-events", requireAuth, async (req, res) => {
 type ProviderAssetRecord = { Id: string; Name?: string; AssetType?: UserAsset["assetType"]; Status?: UserAsset["status"]; URL?: string; GroupId?: string };
 const assetCategories = ["character", "scene", "prop", "material"] as const satisfies readonly AssetCategory[];
 const assetCategorySchema = z.enum(assetCategories);
-const publicUserAsset = (asset: UserAsset) => ({ Id: asset.id, Name: asset.name, AssetType: asset.assetType, Status: asset.status, URL: asset.url, GroupId: asset.groupId, UploadId: asset.uploadId, Category: asset.category });
-const refreshUserAsset = async (asset: UserAsset) => {
-  if (asset.status === "Active" && asset.url) return asset;
-  try {
-    const provider = await callAssetApi<ProviderAssetRecord>("GetAsset", { Id: asset.id });
-    const updated: UserAsset = { ...asset, name: provider.Name ?? asset.name, assetType: provider.AssetType ?? asset.assetType, status: provider.Status ?? asset.status, url: provider.URL ?? asset.url, groupId: provider.GroupId ?? asset.groupId, updatedAt: Date.now() };
-    users.upsertUserAsset(updated);
-    return updated;
-  } catch (error) {
-    console.warn(JSON.stringify({ type: "user_asset_refresh_failed", at: new Date().toISOString(), assetId: asset.id, ownerId: asset.ownerId, code: (error as { code?: string }).code ?? "unknown" }));
-    return asset;
-  }
-};
-const refreshUserAssetList = async (assets: UserAsset[]) => {
-  const refreshed = new Array<UserAsset>(assets.length); let cursor = 0;
-  const next = async () => { while (cursor < assets.length) { const index = cursor++; const asset = assets[index]; if (asset) refreshed[index] = await refreshUserAsset(asset); } };
-  await Promise.all(Array.from({ length: Math.min(6, Math.max(1, assets.length)) }, next));
-  return refreshed;
-};
+const publicUserAsset = (asset: UserAsset) => ({ Id: asset.id, Name: asset.name, AssetType: asset.assetType, Status: asset.status, URL: asset.url ?? (asset.uploadId ? `/api/assets/${asset.id}/source` : undefined), GroupId: asset.groupId, UploadId: asset.uploadId, Category: asset.category, Error: asset.lastError });
 const ownedUserAsset = (assetId: string, ownerId: string) => { const asset = users.readUserAsset(assetId); return asset?.ownerId === ownerId ? asset : null; };
 
 app.get("/api/assets/groups", requireAuth, async (_req, res) => {
@@ -580,37 +563,48 @@ app.get("/api/assets", requireAuth, async (req, res) => {
     const user = res.locals.user as SessionUser;
     const assets = users.listUserAssets(user.id, query.q ?? "", query.pageSize + 1, query.type, (query.page - 1) * query.pageSize, query.category);
     const hasMore = assets.length > query.pageSize;
-    res.json({ Items: (await refreshUserAssetList(assets.slice(0, query.pageSize))).map(publicUserAsset), PageNumber: query.page, PageSize: query.pageSize, HasMore: hasMore });
+    res.json({ Items: assets.slice(0, query.pageSize).map(publicUserAsset), PageNumber: query.page, PageSize: query.pageSize, HasMore: hasMore });
   } catch (error) { respondError(res, error, 502); }
 });
 app.post("/api/assets", requireAuth, async (req, res) => {
   let auditUserId: string | null = null;
   let auditUploadId: string | null = null;
-  let creationLock: { key: string; token: string } | null = null;
   try {
     const body = z.object({ groupId: z.string().startsWith("group-").optional(), url: z.string().url().optional(), uploadId: z.string().min(20).optional(), type: z.enum(["Image", "Video", "Audio"]), name: z.string().min(1).max(180), category: assetCategorySchema.default("material") }).refine((value) => Boolean(value.url || value.uploadId), "素材缺少可用地址").parse(req.body);
     const user = res.locals.user as SessionUser;
     auditUserId = user.id;
     auditUploadId = body.uploadId ?? null;
-    const groupId = await ensureAutoReferenceGroup();
+    let groupId = body.groupId ?? "";
     let url = body.url;
     let assetType = body.type;
-    let providerName = body.name.slice(0, 80);
+    let providerName = providerAssetName(body.name);
     if (body.uploadId) {
-      creationLock = await acquireAssetCreationLock(redis, user.id, body.uploadId);
-      if (!creationLock) return res.status(409).json({ error: "该素材正在注册，请稍后刷新素材库", code: "ASSET_REGISTRATION_IN_PROGRESS", requestId: res.locals.requestId });
       const existing = users.readUserAssetByUpload(user.id, body.uploadId);
-      if (existing) return res.status(201).json(publicUserAsset(existing));
+      if (existing) return res.status(202).json(publicUserAsset(existing));
       const media = users.readUpload(body.uploadId);
-      if (!media || media.ownerId !== user.id) return res.status(404).json({ error: "引用素材不存在或已过期" });
-      url = await resolveUploadMediaUrl(media);
+      if (!media || media.ownerId !== user.id || media.status !== "ready") return res.status(404).json({ error: "引用素材不存在或尚未上传完成" });
       assetType = media.contentType.startsWith("video/") ? "Video" : media.contentType.startsWith("audio/") ? "Audio" : "Image";
-      providerName = body.name.slice(0, 80);
+      providerName = providerAssetName(body.name);
+      const now = Date.now();
+      const asset: UserAsset = { id: `asset-local-${crypto.randomUUID()}`, ownerId: user.id, groupId, uploadId: body.uploadId, name: body.name, assetType, status: "Processing", category: body.category, createdAt: now, updatedAt: now };
+      users.upsertUserAsset(asset);
+      const stored = users.readUserAssetByUpload(user.id, body.uploadId);
+      if (!stored) throw new Error("素材上传记录未能持久化");
+      if (stored.id !== asset.id) return res.status(202).json(publicUserAsset(stored));
+      try {
+        await assetQueue.add("register", { assetId: asset.id }, { jobId: asset.id, attempts: 3, backoff: { type: "exponential", delay: 15_000 }, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } });
+      } catch (error) {
+        users.upsertUserAsset({ ...asset, lastError: "素材已上传，生成引用将在后台继续准备", updatedAt: Date.now() });
+        console.warn(JSON.stringify({ type: "asset_ingest_enqueue_failed", at: new Date().toISOString(), assetId: asset.id, userId: user.id, code: (error as { code?: string }).code ?? "unknown" }));
+      }
+      console.info(JSON.stringify({ type: "user_asset_mutation", action: "queue_asset", userId: user.id, assetId: asset.id, at: new Date().toISOString() }));
+      return res.status(202).json(publicUserAsset(users.readUserAsset(asset.id)!));
     }
+    groupId ||= await ensureAutoReferenceGroup();
     const created = await callAssetApi<ProviderAssetRecord>("CreateAsset", { GroupId: groupId, URL: url, AssetType: assetType, Name: providerName });
     if (!created.Id?.startsWith("asset-")) throw new Error("素材服务未返回有效资产 ID");
     const now = Date.now();
-    const asset: UserAsset = { id: created.Id, ownerId: user.id, groupId, uploadId: body.uploadId, name: created.Name ?? providerName, assetType: created.AssetType ?? assetType, status: created.Status ?? "Processing", category: body.category, url: created.URL, createdAt: now, updatedAt: now };
+    const asset: UserAsset = { id: created.Id, providerAssetId: created.Id, ownerId: user.id, groupId, name: created.Name ?? providerName, assetType: created.AssetType ?? assetType, status: created.Status ?? "Processing", category: body.category, url: created.URL, createdAt: now, updatedAt: now };
     users.upsertUserAsset(asset);
     console.info(JSON.stringify({ type: "user_asset_mutation", action: "create_asset", userId: user.id, assetId: asset.id, at: new Date().toISOString() }));
     res.status(201).json(publicUserAsset(asset));
@@ -622,7 +616,7 @@ app.post("/api/assets", requireAuth, async (req, res) => {
     }
     console.warn(JSON.stringify({ type: "asset_create_failed", at: new Date().toISOString(), userId: auditUserId, uploadId: auditUploadId, message: message.slice(0, 300) }));
     respondError(res, error, 502);
-  } finally { if (creationLock) await releaseAssetCreationLock(redis, creationLock).catch(() => undefined); }
+  }
 });
 app.post("/api/assets/bulk-delete", requireAuth, async (req, res) => {
   try {
@@ -632,28 +626,40 @@ app.post("/api/assets/bulk-delete", requireAuth, async (req, res) => {
     if (owned.some((asset) => !asset)) return res.status(404).json({ error: "素材不存在", requestId: res.locals.requestId });
     const blocked = new Set(ids.filter((id) => users.isUserAssetInActiveTask(id, user.id)));
     const deleted: string[] = []; const failed: string[] = [...blocked]; const deletable = ids.filter((id) => !blocked.has(id)); let cursor = 0;
-    const next = async () => { while (cursor < deletable.length) { const id = deletable[cursor++]; if (!id) continue; try { await callAssetApi("DeleteAsset", { Id: id }); users.deleteUserAsset(id, user.id); deleted.push(id); } catch { failed.push(id); } } };
+    const next = async () => { while (cursor < deletable.length) { const id = deletable[cursor++]; if (!id) continue; try { const asset = ownedUserAsset(id, user.id); if (!asset) { failed.push(id); continue; } if (asset.providerAssetId) await callAssetApi("DeleteAsset", { Id: asset.providerAssetId }); else await assetQueue.getJob(id).then((job) => job?.remove()).catch(() => undefined); users.deleteUserAsset(id, user.id); deleted.push(id); } catch { failed.push(id); } } };
     await Promise.all(Array.from({ length: Math.min(4, deletable.length) }, next));
     console.info(JSON.stringify({ type: "user_asset_mutation", action: "bulk_delete", userId: user.id, deleted: deleted.length, failed: failed.length, at: new Date().toISOString() }));
     res.json({ deleted, failed });
   } catch (error) { respondError(res, error, 502); }
 });
+app.get("/api/assets/:id/source", requireAuth, async (req, res) => {
+  try {
+    const user = res.locals.user as SessionUser;
+    const asset = ownedUserAsset(param(req.params.id), user.id);
+    if (!asset?.uploadId) return res.status(404).json({ error: "素材源文件不存在" });
+    const media = users.readUpload(asset.uploadId);
+    if (!media || media.ownerId !== user.id || media.status !== "ready") return res.status(404).json({ error: "素材源文件不存在" });
+    res.setHeader("Cache-Control", "private, no-store");
+    res.redirect(302, signedObjectUrl(media.objectKey, { expires: 3600, fileName: media.fileName }));
+  } catch (error) { respondError(res, error, 502); }
+});
 app.get("/api/assets/:id", requireAuth, async (req, res) => {
-  try { const user = res.locals.user as SessionUser; const asset = ownedUserAsset(param(req.params.id), user.id); if (!asset) return res.status(404).json({ error: "素材不存在" }); res.json(publicUserAsset(await refreshUserAsset(asset))); } catch (error) { respondError(res, error, 502); }
+  try { const user = res.locals.user as SessionUser; const asset = ownedUserAsset(param(req.params.id), user.id); if (!asset) return res.status(404).json({ error: "素材不存在" }); res.json(publicUserAsset(asset)); } catch (error) { respondError(res, error, 502); }
 });
 app.patch("/api/assets/:id", requireAuth, async (req, res) => {
   try {
     const body = z.object({ name: z.string().trim().min(1).max(80).optional(), category: assetCategorySchema.optional() }).refine((value) => value.name !== undefined || value.category !== undefined, "没有需要更新的字段").parse(req.body);
     const user = res.locals.user as SessionUser; const id = param(req.params.id);
-    if (!ownedUserAsset(id, user.id)) return res.status(404).json({ error: "素材不存在" });
-    if (body.name !== undefined) { await callAssetApi("UpdateAsset", { Id: id, Name: body.name }); users.renameUserAsset(id, user.id, body.name); }
+    const asset = ownedUserAsset(id, user.id);
+    if (!asset) return res.status(404).json({ error: "素材不存在" });
+    if (body.name !== undefined) { if (asset.providerAssetId) await callAssetApi("UpdateAsset", { Id: asset.providerAssetId, Name: providerAssetName(body.name) }); users.renameUserAsset(id, user.id, body.name); }
     if (body.category !== undefined) users.updateUserAssetCategory(id, user.id, body.category);
     console.info(JSON.stringify({ type: "user_asset_mutation", action: body.name !== undefined ? body.category !== undefined ? "update_asset" : "rename_asset" : "categorize_asset", userId: user.id, assetId: id, at: new Date().toISOString() }));
     res.json(publicUserAsset(users.readUserAsset(id)!));
   } catch (error) { respondError(res, error, 502); }
 });
 app.delete("/api/assets/:id", requireAuth, async (req, res) => {
-  try { const user = res.locals.user as SessionUser; const id = param(req.params.id); if (!ownedUserAsset(id, user.id)) return res.status(404).json({ error: "素材不存在" }); if (users.isUserAssetInActiveTask(id, user.id)) return res.status(409).json({ error: "素材正被运行中的任务引用，任务结束后即可删除" }); await callAssetApi("DeleteAsset", { Id: id }); users.deleteUserAsset(id, user.id); console.info(JSON.stringify({ type: "user_asset_mutation", action: "delete_asset", userId: user.id, assetId: id, at: new Date().toISOString() })); res.status(204).end(); } catch (error) { respondError(res, error, 502); }
+  try { const user = res.locals.user as SessionUser; const id = param(req.params.id); const asset = ownedUserAsset(id, user.id); if (!asset) return res.status(404).json({ error: "素材不存在" }); if (users.isUserAssetInActiveTask(id, user.id)) return res.status(409).json({ error: "素材正被运行中的任务引用，任务结束后即可删除" }); if (asset.providerAssetId) await callAssetApi("DeleteAsset", { Id: asset.providerAssetId }); else await assetQueue.getJob(id).then((job) => job?.remove()).catch(() => undefined); users.deleteUserAsset(id, user.id); console.info(JSON.stringify({ type: "user_asset_mutation", action: "delete_asset", userId: user.id, assetId: id, at: new Date().toISOString() })); res.status(204).end(); } catch (error) { respondError(res, error, 502); }
 });
 
 
@@ -886,7 +892,7 @@ app.get("/api/health/ready", async (_req, res) => {
   try {
     await redis.ping();
     if (!users.healthCheck()) throw new Error("database unavailable");
-    await Promise.all([generationQueue.getJobCounts("wait", "active"), mediaQueue.getJobCounts("wait", "active")]);
+    await Promise.all([generationQueue.getJobCounts("wait", "active"), mediaQueue.getJobCounts("wait", "active"), assetQueue.getJobCounts("wait", "active")]);
     if (tosEnabled()) {
       const checkedAt = latestTosHealth.checkedAt ? Date.parse(latestTosHealth.checkedAt) : 0;
       if (!checkedAt || checkedAt < Date.now() - 30_000) await probeTos();

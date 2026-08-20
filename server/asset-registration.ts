@@ -4,6 +4,7 @@ import { users } from "./store.js";
 import { redis } from "./redis.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
 import { acquireAssetCreationLock, releaseAssetCreationLock } from "./upload-slots.js";
+import { providerAssetName } from "./asset-name.js";
 
 import type { GenerationInput } from "./provider.js";
 
@@ -36,11 +37,11 @@ type RegistrationDeps = {
   resolveMediaUrl: (media: { objectKey: string; uploadId?: string; fileName: string }) => Promise<string>;
   sleep: (ms: number) => Promise<unknown>;
   now: () => number;
-  readOwnedAsset?: (assetId: string, ownerId: string) => boolean;
-  readRegisteredAsset?: (ownerId: string, uploadId: string) => { id: string } | undefined;
+  readOwnedAsset?: (assetId: string, ownerId: string) => { providerAssetId?: string; status: "Active" | "Processing" | "Failed" } | null;
+  readRegisteredAsset?: (ownerId: string, uploadId: string) => { id: string; providerAssetId?: string } | undefined;
   acquireAssetLock?: (ownerId: string, uploadId: string) => Promise<{ key: string; token: string } | null>;
   releaseAssetLock?: (lock: { key: string; token: string }) => Promise<unknown>;
-  saveAsset?: (asset: { id: string; ownerId: string; groupId: string; uploadId?: string; name: string; assetType: "Image" | "Video" | "Audio"; status: "Active" | "Processing" | "Failed"; url?: string; createdAt: number; updatedAt: number }) => unknown;
+  saveAsset?: (asset: { id: string; providerAssetId?: string; ownerId: string; groupId: string; uploadId?: string; name: string; assetType: "Image" | "Video" | "Audio"; status: "Active" | "Processing" | "Failed"; url?: string; createdAt: number; updatedAt: number }) => unknown;
 };
 
 let productionDeps: RegistrationDeps | undefined;
@@ -52,7 +53,7 @@ const defaultDeps = () => productionDeps ??= {
   resolveMediaUrl: (media) => resolveUploadMediaUrl(media),
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now: Date.now,
-  readOwnedAsset: (assetId, ownerId) => users.readUserAsset(assetId)?.ownerId === ownerId,
+  readOwnedAsset: (assetId, ownerId) => { const asset = users.readUserAsset(assetId); return asset?.ownerId === ownerId ? asset : null; },
   readRegisteredAsset: (ownerId, uploadId) => users.readUserAssetByUpload(ownerId, uploadId) ?? undefined,
   acquireAssetLock: (ownerId, uploadId) => acquireAssetCreationLock(redis, ownerId, uploadId),
   releaseAssetLock: (lock) => releaseAssetCreationLock(redis, lock),
@@ -96,16 +97,20 @@ const registerUpload = async (uploadId: string, ownerId: string, name: string, i
   const cacheKey = `provider-asset:${ownerId}:${uploadId}`;
   let assetId = await deps.cacheGet(cacheKey);
   let creationLock: { key: string; token: string } | null = null;
+  let registrationPending = false;
   let groupId = "";
   let assetType: "Image" | "Video" | "Audio" = inputType === "video" ? "Video" : inputType === "audio" ? "Audio" : "Image";
   if (!assetId) {
     if (deps.acquireAssetLock) {
       creationLock = await deps.acquireAssetLock(ownerId, uploadId);
       if (!creationLock) throw new AssetRegistrationRejected(`参考素材「${name}」正在可信资产注册中，请稍后重试`, "ASSET_PROCESSING_TIMEOUT");
-      assetId = deps.readRegisteredAsset?.(ownerId, uploadId)?.id ?? await deps.cacheGet(cacheKey) ?? null;
+      const registered = deps.readRegisteredAsset?.(ownerId, uploadId);
+      assetId = registered?.providerAssetId ?? (registered && !registered.id.startsWith("asset-local-") ? registered.id : undefined) ?? await deps.cacheGet(cacheKey) ?? null;
+      registrationPending = Boolean(registered && !assetId);
     }
   }
   try {
+  if (registrationPending) throw new AssetRegistrationRejected(`参考素材「${name}」正在可信资产注册中，请稍后重试`, "ASSET_PROCESSING_TIMEOUT");
   if (!assetId) {
     const media = deps.readUpload(uploadId);
     if (!media || media.ownerId !== ownerId || media.status !== "ready") throw new Error(`参考素材「${name}」不存在或尚未完成上传`);
@@ -117,7 +122,7 @@ const registerUpload = async (uploadId: string, ownerId: string, name: string, i
         GroupId: groupId,
         URL: await deps.resolveMediaUrl(media),
         AssetType: assetType,
-        Name: name.slice(0, 80)
+        Name: providerAssetName(name)
       });
     } catch (error) {
       if (/real[ -]?person|real human|真人|人脸/i.test(error instanceof Error ? error.message : String(error))) {
@@ -127,12 +132,12 @@ const registerUpload = async (uploadId: string, ownerId: string, name: string, i
     }
     assetId = created.Id;
     await deps.cacheSet(cacheKey, assetId);
-    deps.saveAsset?.({ id: assetId, ownerId, groupId, uploadId, name, assetType, status: "Processing", createdAt: deps.now(), updatedAt: deps.now() });
+    deps.saveAsset?.({ id: assetId, providerAssetId: assetId, ownerId, groupId, uploadId, name, assetType, status: "Processing", createdAt: deps.now(), updatedAt: deps.now() });
     console.info(JSON.stringify({ type: "provider_asset_created", at: new Date().toISOString(), ownerId, uploadId, assetId, groupId }));
   }
   } finally { if (creationLock && deps.releaseAssetLock) await deps.releaseAssetLock(creationLock).catch(() => undefined); }
   const active = await waitForActive(assetId, name, deps);
-  deps.saveAsset?.({ id: assetId, ownerId, groupId: active.GroupId ?? groupId, uploadId, name: active.Name ?? name, assetType: active.AssetType ?? assetType, status: "Active", url: active.URL, createdAt: deps.now(), updatedAt: deps.now() });
+  deps.saveAsset?.({ id: assetId, providerAssetId: assetId, ownerId, groupId: active.GroupId ?? groupId, uploadId, name, assetType: active.AssetType ?? assetType, status: "Active", url: active.URL, createdAt: deps.now(), updatedAt: deps.now() });
   console.info(JSON.stringify({ type: "provider_asset_active", at: new Date().toISOString(), ownerId, uploadId, assetId }));
   return assetId;
 };
@@ -147,10 +152,13 @@ export const prepareProviderAssets = async (input: GenerationInput, ownerId: str
       const asset = input.assets[index];
       if (!asset) continue;
       if (asset.assetId) {
-        if (deps.readOwnedAsset && !deps.readOwnedAsset(asset.assetId, ownerId)) throw new AssetRegistrationRejected(`参考素材「${asset.name}」不属于当前用户`, "ASSET_NOT_OWNED");
-        const active = await waitForActive(asset.assetId, asset.name, deps);
-        deps.saveAsset?.({ id: asset.assetId, ownerId, groupId: active.GroupId ?? "", name: active.Name ?? asset.name, assetType: active.AssetType ?? (asset.type === "video" ? "Video" : asset.type === "audio" ? "Audio" : "Image"), status: "Active", url: active.URL, createdAt: deps.now(), updatedAt: deps.now() });
-        assets[index] = asset;
+        const owned = deps.readOwnedAsset?.(asset.assetId, ownerId);
+        if (deps.readOwnedAsset && !owned) throw new AssetRegistrationRejected(`参考素材「${asset.name}」不属于当前用户`, "ASSET_NOT_OWNED");
+        const providerAssetId = owned?.providerAssetId ?? (!asset.assetId.startsWith("asset-local-") ? asset.assetId : undefined);
+        if (!providerAssetId) throw new AssetRegistrationRejected(`参考素材「${asset.name}」正在可信资产注册中，请稍后重试`, "ASSET_PROCESSING_TIMEOUT");
+        const active = await waitForActive(providerAssetId, asset.name, deps);
+        deps.saveAsset?.({ id: asset.assetId, providerAssetId, ownerId, groupId: active.GroupId ?? "", name: asset.name, assetType: active.AssetType ?? (asset.type === "video" ? "Video" : asset.type === "audio" ? "Audio" : "Image"), status: "Active", url: active.URL, createdAt: deps.now(), updatedAt: deps.now() });
+        assets[index] = { ...asset, assetId: providerAssetId };
       } else if (asset.uploadId) {
         const assetId = await registerUpload(asset.uploadId, ownerId, asset.name, asset.type, deps);
         assets[index] = { ...asset, assetId, url: undefined };

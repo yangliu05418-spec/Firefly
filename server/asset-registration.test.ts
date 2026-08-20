@@ -59,6 +59,22 @@ describe("trusted asset registration", () => {
     expect(callAsset).toHaveBeenCalledTimes(2);
   });
 
+  it("resolves a stable local library id to the provider asset id before submission", async () => {
+    const selected = input();
+    selected.assets[0] = { ...selected.assets[0]!, uploadId: undefined, assetId: "asset-local-stable" };
+    const saveAsset = vi.fn();
+    const result = await prepareProviderAssets(selected, "owner-1", {
+      readUpload: vi.fn() as never,
+      readOwnedAsset: vi.fn(() => ({ providerAssetId: "asset-provider-ready", status: "Active" as const })),
+      cacheGet: vi.fn(async () => null), cacheSet: vi.fn(async () => undefined),
+      callAsset: vi.fn(async () => ({ Id: "asset-provider-ready", Status: "Active" })) as never,
+      resolveMediaUrl: vi.fn(async () => "https://tos.example/asset") as never,
+      sleep: vi.fn(async () => undefined), now: vi.fn(() => 1), saveAsset
+    });
+    expect(result.assets[0]?.assetId).toBe("asset-provider-ready");
+    expect(saveAsset).toHaveBeenCalledWith(expect.objectContaining({ id: "asset-local-stable", providerAssetId: "asset-provider-ready", status: "Active" }));
+  });
+
   it("rejects a selected asset whose provider status is Failed", async () => {
     const selected = input();
     selected.assets[0] = { ...selected.assets[0]!, uploadId: undefined, assetId: "asset-failed" };
@@ -73,7 +89,7 @@ describe("trusted asset registration", () => {
     const selected = input();
     selected.assets[0] = { ...selected.assets[0]!, uploadId: undefined, assetId: "asset-other-user" };
     await expect(prepareProviderAssets(selected, "owner-1", {
-      readUpload: vi.fn() as never, readOwnedAsset: vi.fn(() => false), cacheGet: vi.fn(async () => null), cacheSet: vi.fn(async () => undefined),
+      readUpload: vi.fn() as never, readOwnedAsset: vi.fn(() => null), cacheGet: vi.fn(async () => null), cacheSet: vi.fn(async () => undefined),
       callAsset: vi.fn() as never, resolveMediaUrl: vi.fn(async () => "https://tos.example/asset") as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 1)
     })).rejects.toThrow("不属于当前用户");
   });

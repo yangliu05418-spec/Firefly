@@ -185,6 +185,18 @@ describe("enterprise identity and isolation", () => {
     store.close();
   });
 
+  it("keeps the first local asset when concurrent requests reuse one upload id", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-asset-idempotency-")); directories.push(directory);
+    const store = openStore(path.join(directory, "assets.db"));
+    const owner = store.upsertFromFeishu({ openId: "ou_asset_race", unionId: "on_asset_race", tenantKey: "tenant-dokuai", email: "asset-race@dokuai.tv", name: "Owner", avatarUrl: "" });
+    const first = { id: "asset-local-first", ownerId: owner.id, groupId: "group-1", uploadId: "upload-shared", name: "first.png", assetType: "Image" as const, status: "Processing" as const, category: "material" as const, createdAt: 1, updatedAt: 1 };
+    store.upsertUserAsset(first);
+    const reused = store.upsertUserAsset({ ...first, id: "asset-local-second", name: "second.png", updatedAt: 2 });
+    expect(reused.id).toBe(first.id);
+    expect(store.readUserAssetByUpload(owner.id, first.uploadId)?.name).toBe("first.png");
+    store.close();
+  });
+
   it("allows the owner to delete their own shared tasks (read-only for others)", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-shared-delete-")); directories.push(directory);
     const store = openStore(path.join(directory, "shared.db"));

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 export const MAX_SUPPORTED_SCHEMA_VERSION = 3;
 
 const baseSchema = `
@@ -70,6 +70,7 @@ const baseSchema = `
   CREATE INDEX IF NOT EXISTS media_objects_delete_idx ON media_objects(status, updated_at);
   CREATE TABLE IF NOT EXISTS user_assets (
     id TEXT PRIMARY KEY,
+    provider_asset_id TEXT,
     owner_id TEXT NOT NULL,
     group_id TEXT NOT NULL,
     upload_id TEXT,
@@ -78,12 +79,14 @@ const baseSchema = `
     status TEXT NOT NULL CHECK (status IN ('Active', 'Processing', 'Failed')),
     category TEXT NOT NULL DEFAULT 'material' CHECK (category IN ('character', 'scene', 'prop', 'material')),
     url TEXT,
+    last_error TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     deleted_at INTEGER,
     FOREIGN KEY (owner_id) REFERENCES users(id)
   );
   CREATE INDEX IF NOT EXISTS user_assets_owner_updated_idx ON user_assets(owner_id, updated_at DESC);
+  CREATE UNIQUE INDEX IF NOT EXISTS user_assets_provider_id_idx ON user_assets(provider_asset_id) WHERE provider_asset_id IS NOT NULL AND deleted_at IS NULL;
   CREATE UNIQUE INDEX IF NOT EXISTS user_assets_owner_upload_idx ON user_assets(owner_id, upload_id) WHERE upload_id IS NOT NULL AND deleted_at IS NULL;
   CREATE TABLE IF NOT EXISTS canvas_projects (
     id TEXT PRIMARY KEY,
@@ -161,6 +164,14 @@ const addAssetCategories = (database: Database.Database) => {
   database.exec("CREATE INDEX IF NOT EXISTS user_assets_owner_category_updated_idx ON user_assets(owner_id, category, updated_at DESC)");
 };
 
+const separateProviderAssetIdentity = (database: Database.Database) => {
+  const columns = new Set((database.prepare("PRAGMA table_info(user_assets)").all() as { name: string }[]).map((column) => column.name));
+  if (!columns.has("provider_asset_id")) database.exec("ALTER TABLE user_assets ADD COLUMN provider_asset_id TEXT");
+  if (!columns.has("last_error")) database.exec("ALTER TABLE user_assets ADD COLUMN last_error TEXT");
+  database.exec("UPDATE user_assets SET provider_asset_id = id WHERE provider_asset_id IS NULL AND id LIKE 'asset-%' AND id NOT LIKE 'asset-local-%'");
+  database.exec("CREATE UNIQUE INDEX IF NOT EXISTS user_assets_provider_id_idx ON user_assets(provider_asset_id) WHERE provider_asset_id IS NOT NULL AND deleted_at IS NULL");
+};
+
 export const migrateDatabase = (databasePath: string) => {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const database = new Database(databasePath);
@@ -179,6 +190,10 @@ export const migrateDatabase = (databasePath: string) => {
       if (version < 2) {
         addAssetCategories(database);
         database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(2, "add-user-asset-categories", Date.now());
+      }
+      if (version < 3) {
+        separateProviderAssetIdentity(database);
+        database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(3, "separate-provider-asset-identity", Date.now());
       }
       assertSchemaVersion(database);
     }).exclusive();

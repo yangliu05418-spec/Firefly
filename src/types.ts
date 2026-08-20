@@ -18,4 +18,4 @@ export type ImageResultBundle = {
 };
 export type LibraryGroup = { Id: string; Name: string; Description?: string };
 export type AssetCategory = "character" | "scene" | "prop" | "material";
-export type LibraryAsset = { Id: string; Name: string; AssetType: "Image" | "Video" | "Audio"; Status: "Active" | "Processing" | "Failed"; URL?: string; GroupId: string; UploadId?: string; Category: AssetCategory };
+export type LibraryAsset = { Id: string; Name: string; AssetType: "Image" | "Video" | "Audio"; Status: "Active" | "Processing" | "Failed"; URL?: string; GroupId: string; UploadId?: string; Category: AssetCategory; Error?: string };
