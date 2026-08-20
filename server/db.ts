@@ -655,6 +655,58 @@ export class UserStore {
     return result.changes > 0;
   }
 
+  referencedObjectKeys() {
+    const rows = this.database.prepare(`
+      SELECT object_key FROM media_objects WHERE status != 'deleted'
+      UNION
+      SELECT object_key FROM canvas_assets WHERE deleted_at IS NULL
+    `).all() as { object_key: string }[];
+    return new Set(rows.map((row) => row.object_key));
+  }
+
+  purgeTombstones(cutoff: number, apply = false) {
+    return this.database.transaction(() => {
+      const taskIds = (this.database.prepare(`
+        SELECT task.id FROM generation_tasks task
+        WHERE task.deleted_at IS NOT NULL AND task.deleted_at < ?
+          AND NOT EXISTS (
+            SELECT 1 FROM media_objects media
+            WHERE media.task_id = task.id
+              AND (media.status != 'deleted' OR COALESCE(media.deleted_at, media.updated_at) >= ?)
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM canvas_projects canvas
+            WHERE canvas.deleted_at IS NULL AND instr(canvas.document_json, task.id) > 0
+          )
+      `).all(cutoff, cutoff) as { id: string }[]).map((row) => row.id);
+      const canvasIds = (this.database.prepare(`
+        SELECT canvas.id FROM canvas_projects canvas
+        WHERE canvas.deleted_at IS NOT NULL AND canvas.deleted_at < ?
+          AND NOT EXISTS (
+            SELECT 1 FROM canvas_assets asset
+            WHERE asset.canvas_id = canvas.id
+              AND (asset.deleted_at IS NULL OR asset.deleted_at >= ?)
+          )
+      `).all(cutoff, cutoff) as { id: string }[]).map((row) => row.id);
+      const mediaIds = (this.database.prepare("SELECT id FROM media_objects WHERE status = 'deleted' AND COALESCE(deleted_at, updated_at) < ?").all(cutoff) as { id: string }[]).map((row) => row.id);
+      const result = { tasks: taskIds.length, canvases: canvasIds.length, media: mediaIds.length };
+      if (!apply) return result;
+      const deleteIds = (table: string, ids: string[]) => {
+        if (!ids.length) return;
+        const placeholders = ids.map(() => "?").join(",");
+        this.database.prepare(`DELETE FROM ${table} WHERE id IN (${placeholders})`).run(...ids);
+      };
+      deleteIds("media_objects", mediaIds);
+      deleteIds("generation_tasks", taskIds);
+      if (canvasIds.length) {
+        const placeholders = canvasIds.map(() => "?").join(",");
+        this.database.prepare(`DELETE FROM canvas_assets WHERE canvas_id IN (${placeholders})`).run(...canvasIds);
+      }
+      deleteIds("canvas_projects", canvasIds);
+      return result;
+    }).immediate();
+  }
+
   clearGenerationHistory() {
     return this.database.transaction(() => {
       this.database.prepare("DELETE FROM media_objects").run();
