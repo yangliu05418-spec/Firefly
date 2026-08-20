@@ -302,7 +302,7 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
       const role: UploadAsset["role"] = mode === "first_frame" ? "first_frame" : mode === "first_last" ? (plannedAssets.some((a) => a.role === "first_frame") ? "last_frame" : "first_frame") : type === "image" ? "reference_image" : type === "video" ? "reference_video" : "reference_audio";
       const preview = type === "image" ? URL.createObjectURL(file) : undefined;
       if (preview) localPreviewUrls.current.add(preview);
-      const pending = { id: tempId, name: file.name, size: file.size, type, role, progress: 0, preview } satisfies UploadAsset;
+      const pending = { id: tempId, name: file.name, size: file.size, type, role, progress: 0, phase: type === "image" ? "preparing" : "uploading", preview } satisfies UploadAsset;
       plannedAssets.push(pending);
       const controller = new AbortController();
       uploadControllers.current.set(tempId, controller);
@@ -318,8 +318,8 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
         const tempId = pending.id;
         const role = pending.role;
       try {
-        const uploaded = await uploadFile(file, pending.type, (progress) => setAssets((old) => old.map((a) => a.id === tempId ? { ...a, progress } : a)), { signal: controller.signal });
-        setAssets((old) => old.map((a) => a.id === tempId ? { ...a, ...uploaded, uploadId: uploaded.uploadId ?? uploaded.id, role, progress: 100 } : a));
+        const uploaded = await uploadFile(file, pending.type, (progress, phase) => setAssets((old) => old.map((a) => a.id === tempId ? { ...a, progress, phase } : a)), { signal: controller.signal });
+        setAssets((old) => old.map((a) => a.id === tempId ? { ...a, ...uploaded, uploadId: uploaded.uploadId ?? uploaded.id, role, progress: 100, phase: "ready" } : a));
         } catch (e) {
           releaseLocalPreview(pending.preview);
           setAssets((old) => old.filter((a) => a.id !== tempId));
@@ -376,7 +376,7 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
   return <div className={`composer ${compact ? "composer--compact" : ""}`} onClick={(e) => e.stopPropagation()}>
     {!compact && <h1>今晚，想创造什么？</h1>}
     <div className="composer-shell">
-      {!!assets.length && <div className="asset-strip">{assets.map((asset, index) => <div className="asset-chip" key={asset.id}>{asset.preview ? <img src={asset.preview} /> : asset.type === "video" ? <Video /> : <AudioLines />}<span><b>{asset.role === "first_frame" ? "首帧" : asset.role === "last_frame" ? "尾帧" : `${asset.type === "image" ? "图片" : asset.type === "video" ? "视频" : "音频"} ${index + 1}`}</b><small>{asset.progress === 100 ? `${asset.name}${asset.normalized ? " · 已自动补白" : ""}` : `上传 ${asset.progress ?? 0}%`}</small></span>{asset.progress !== 100 && <i style={{ width: `${asset.progress ?? 0}%` }} />}<button onClick={() => removeAttachedAsset(asset.id)}><X /></button></div>)}</div>}
+      {!!assets.length && <div className="asset-strip">{assets.map((asset, index) => <div className="asset-chip" key={asset.id}>{asset.preview ? <img src={asset.preview} /> : asset.type === "video" ? <Video /> : <AudioLines />}<span><b>{asset.role === "first_frame" ? "首帧" : asset.role === "last_frame" ? "尾帧" : `${asset.type === "image" ? "图片" : asset.type === "video" ? "视频" : "音频"} ${index + 1}`}</b><small>{asset.phase === "preparing" ? "正在检查图片" : asset.phase === "verifying" ? "上传完成 · 正在确认" : asset.progress === 100 ? `${asset.name}${asset.normalized ? " · 已自动补白" : ""}` : `上传 ${asset.progress ?? 0}%`}</small></span>{asset.progress !== 100 && <i style={{ width: `${asset.progress ?? 0}%` }} />}<button onClick={() => removeAttachedAsset(asset.id)}><X /></button></div>)}</div>}
       <div className={`prompt-row ${referenceSlots.length > 1 ? "prompt-row--dual" : ""} ${!referenceSlots.length ? "prompt-row--text" : ""}`}>
         {!!referenceSlots.length && <div className="reference-slots">{referenceSlots.map((label, index) => <button className="add-reference" key={label} onClick={() => fileInput.current?.click()} disabled={(mode === "first_frame" && assets.length >= 1) || (mode === "first_last" && assets.length > index)}><Plus /><span>{label}</span></button>)}</div>}
         <PromptEditor value={prompt} change={setPrompt} placeholder={engine === "image" ? "描述你想生成的画面；上传参考图即可进行图生图……" : modePlaceholders[mode]} assets={assets} disabled={mode === "text" && engine === "video"} attach={attachMentionAsset} />

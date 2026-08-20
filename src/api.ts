@@ -137,6 +137,7 @@ async function uploadTosPart(uploadId: string, initial: SignedPart, blob: Blob, 
 }
 
 type UploadedFile = { id: string; uploadId?: string; name: string; type: UploadKind; size: number; url?: string; normalized?: boolean };
+export type UploadProgressPhase = "preparing" | "uploading" | "verifying" | "ready";
 
 const finalizeUpload = async (uploadId: string, body: unknown, signal?: AbortSignal): Promise<UploadedFile> => {
   const deadline = Date.now() + 240_000;
@@ -158,10 +159,12 @@ const finalizeUpload = async (uploadId: string, body: unknown, signal?: AbortSig
   throw lastError instanceof Error ? lastError : new Error("素材完成校验失败，请稍后重试");
 };
 
-export async function uploadFile(file: File, type: UploadKind, onProgress: (value: number) => void, options: { signal?: AbortSignal } = {}) {
+export async function uploadFile(file: File, type: UploadKind, onProgress: (value: number, phase: UploadProgressPhase) => void, options: { signal?: AbortSignal } = {}) {
   const signal = options.signal;
+  onProgress(0, type === "image" ? "preparing" : "uploading");
   const prepared = type === "image" ? await prepareImageForUpload(file, signal) : { file, normalized: false };
   const upload = prepared.file;
+  onProgress(0, "uploading");
   const init = await api.post<{ id: string; chunkSize: number; direct?: boolean; concurrency?: number; parts?: SignedPart[] }>("/api/uploads", { name: upload.name, size: upload.size, type, mime: upload.type });
   const heartbeat = globalThis.setInterval(() => { void api.post(`/api/uploads/${init.id}/heartbeat`).catch(() => undefined); }, 60_000);
   try {
@@ -176,18 +179,24 @@ export async function uploadFile(file: File, type: UploadKind, onProgress: (valu
         const blob = upload.slice(start, Math.min(upload.size, start + init.chunkSize));
         results.push(await uploadTosPart(init.id, part, blob, signal));
         completedBytes += blob.size;
-        onProgress(Math.min(100, Math.round(completedBytes / upload.size * 100)));
+        onProgress(Math.min(100, Math.round(completedBytes / upload.size * 100)), "uploading");
       }
     };
     await Promise.all(Array.from({ length: Math.min(init.concurrency ?? 3, parts.length) }, worker));
-    return { ...(await finalizeUpload(init.id, { parts: results.sort((a, b) => a.partNumber - b.partNumber) }, signal)), name: file.name, normalized: prepared.normalized };
+    onProgress(100, "verifying");
+    const completed = { ...(await finalizeUpload(init.id, { parts: results.sort((a, b) => a.partNumber - b.partNumber) }, signal)), name: file.name, normalized: prepared.normalized };
+    onProgress(100, "ready");
+    return completed;
   }
   let offset = 0;
   while (offset < upload.size) {
     offset = await uploadChunk(init.id, upload, offset, init.chunkSize, signal);
-    onProgress(Math.round(offset / upload.size * 100));
+    onProgress(Math.round(offset / upload.size * 100), "uploading");
   }
-  return { ...(await finalizeUpload(init.id, {}, signal)), name: file.name, normalized: prepared.normalized };
+  onProgress(100, "verifying");
+  const completed = { ...(await finalizeUpload(init.id, {}, signal)), name: file.name, normalized: prepared.normalized };
+  onProgress(100, "ready");
+  return completed;
   } catch (error) {
     // Cancellation is completion-lock-aware: it cannot delete an object that the server is finalizing
     // or has already committed to the durable media database.
