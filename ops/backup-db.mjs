@@ -19,6 +19,8 @@ const verifySqlite = (filePath) => {
   } finally { database.close(); }
 };
 
+const logStage = (stage, details = {}) => process.stdout.write(`${JSON.stringify({ type: "database_backup_stage", at: new Date().toISOString(), stage, ...details })}\n`);
+
 const notifyFailure = async (message) => {
   if (!process.env.FEISHU_WEBHOOK_URL) return;
   const response = await fetch(process.env.FEISHU_WEBHOOK_URL, {
@@ -36,6 +38,7 @@ const main = async () => {
   if (!target) throw new Error("BACKUP_PATH is required");
 
   await fsPromises.mkdir(path.dirname(target), { recursive: true });
+  logStage("sqlite_copy_started");
   const sourceDatabase = new Database(source, { readonly: true, fileMustExist: true });
   try {
     await sourceDatabase.backup(target);
@@ -44,6 +47,7 @@ const main = async () => {
   verifySqlite(target);
   const stat = await fsPromises.stat(target);
   const hash = await hashFile(target);
+  logStage("sqlite_copy_verified", { size: stat.size, sha256: hash });
   let objectKey;
   let requestId;
   const tosConfigured = Boolean(process.env.TOS_ACCESS_KEY_ID && process.env.TOS_SECRET_ACCESS_KEY && process.env.TOS_BUCKET);
@@ -52,26 +56,32 @@ const main = async () => {
   const restorePath = `${target}.restore-${crypto.randomUUID()}`;
   try {
     if (tosConfigured) {
+      const configuredTimeout = Number(process.env.TOS_BACKUP_REQUEST_TIMEOUT_MS || 300_000);
+      const requestTimeout = Number.isFinite(configuredTimeout) && configuredTimeout >= 60_000 ? configuredTimeout : 300_000;
       const client = new TosClient({
         accessKeyId: process.env.TOS_ACCESS_KEY_ID,
         accessKeySecret: process.env.TOS_SECRET_ACCESS_KEY,
         region: process.env.TOS_REGION || "cn-beijing",
         endpoint: process.env.TOS_ENDPOINT || "tos-cn-beijing.bytepluses.com.cn",
-        requestTimeout: 60_000,
-        connectionTimeout: 10_000,
-        maxRetryCount: 2
+        requestTimeout,
+        connectionTimeout: 15_000,
+        maxRetryCount: 3
       });
       const date = new Date();
       objectKey = `backups/sqlite/${date.getUTCFullYear()}/${String(date.getUTCMonth() + 1).padStart(2, "0")}/${path.basename(target)}`;
-      const put = await client.putObject({ bucket: process.env.TOS_BUCKET, key: objectKey, body: fs.createReadStream(target), contentType: "application/x-sqlite3", meta: { sha256: hash } });
+      logStage("tos_upload_started", { objectKey, size: stat.size, requestTimeout });
+      const put = await client.uploadFile({ bucket: process.env.TOS_BUCKET, key: objectKey, file: target, partSize: 16 * 1024 * 1024, taskNum: 2, contentType: "application/x-sqlite3", meta: { sha256: hash } });
       requestId = put.requestId;
+      logStage("tos_upload_completed", { objectKey, requestId });
       const head = await client.headObject({ bucket: process.env.TOS_BUCKET, key: objectKey });
       const remoteSize = Number(head.data["content-length"]);
       const remoteHash = String(head.data["x-tos-meta-sha256"] ?? "");
       if (remoteSize !== stat.size) throw new Error(`TOS Head size mismatch: expected ${stat.size}, received ${remoteSize}`);
       if (remoteHash && remoteHash !== hash) throw new Error("TOS Head SHA256 metadata mismatch");
 
+      logStage("restore_download_started", { objectKey, size: stat.size });
       await client.getObjectToFile({ bucket: process.env.TOS_BUCKET, key: objectKey, filePath: restorePath });
+      logStage("restore_download_completed", { objectKey });
     } else {
       await fsPromises.copyFile(target, restorePath);
     }
