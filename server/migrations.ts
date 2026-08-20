@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 const baseSchema = `
   CREATE TABLE IF NOT EXISTS users (
@@ -124,6 +124,26 @@ const migrationTable = `
   )
 `;
 
+const assetRegistrationOperationsSchema = `
+  CREATE TABLE IF NOT EXISTS asset_registration_operations (
+    owner_id TEXT NOT NULL,
+    upload_id TEXT NOT NULL,
+    deterministic_name TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    provider_asset_id TEXT,
+    asset_type TEXT NOT NULL CHECK (asset_type IN ('Image', 'Video', 'Audio')),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'created', 'unknown', 'failed')),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (owner_id, upload_id),
+    FOREIGN KEY (owner_id) REFERENCES users(id)
+  );
+  CREATE INDEX IF NOT EXISTS asset_registration_operations_status_idx
+    ON asset_registration_operations(status, updated_at);
+`;
+
 const tableExists = (database: Database.Database, name: string) => Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
 
 export const schemaVersion = (database: Database.Database) => {
@@ -167,6 +187,10 @@ export const migrateDatabase = (databasePath: string) => {
       if (version < 1) {
         applyBaseline(database);
         database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(1, "baseline-current-schema", Date.now());
+      }
+      if (schemaVersion(database) < 2) {
+        database.exec(assetRegistrationOperationsSchema);
+        database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(2, "asset-registration-operations", Date.now());
       }
       assertSchemaVersion(database);
     }).exclusive();

@@ -1,4 +1,4 @@
-import { UnrecoverableError, Worker } from "bullmq";
+import { DelayedError, UnrecoverableError, Worker } from "bullmq";
 import { Redis } from "ioredis";
 import { config } from "./config.js";
 import { shouldRecoverArchiveHandoff } from "./archive-state.js";
@@ -24,7 +24,15 @@ const worker = new Worker("generation", async (job) => {
     console.info(JSON.stringify({ type: "generation_submitting", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt: job.attemptsMade + 1 }));
     if (!task.ownerId) throw new UnrecoverableError("任务缺少素材所有者信息");
     try { input = await prepareProviderAssets(input, task.ownerId); }
-    catch (error) { if (error instanceof AssetRegistrationRejected) throw new UnrecoverableError(error.message); throw error; }
+    catch (error) {
+      if (error instanceof AssetRegistrationRejected && error.code === "ASSET_REGISTRATION_PENDING" && job.token) {
+        await job.moveToDelayed(Date.now() + 60_000, job.token);
+        console.info(JSON.stringify({ type: "generation_waiting_for_asset_reconciliation", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId }));
+        throw new DelayedError();
+      }
+      if (error instanceof AssetRegistrationRejected) throw new UnrecoverableError(error.message);
+      throw error;
+    }
     task = { ...task, request: input, updatedAt: Date.now() };
     await saveTask(task);
     const created = await createProviderTask(input);
