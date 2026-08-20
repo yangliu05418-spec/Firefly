@@ -22,6 +22,7 @@ current_slot=legacy
 current_port=8090
 switched=0
 old_workers_file="/run/firefly-old-workers-$case_id"
+diagnostics_dir="/var/lib/firefly/deployments/$case_id"
 : > "$old_workers_file"
 if [ -r "$release_env" ]; then
   # shellcheck disable=SC1090
@@ -32,6 +33,26 @@ fi
 if [ "$current_port" = "8090" ]; then next_port=8091; next_slot=green; else next_port=8090; next_slot=blue; fi
 
 notify() { /usr/local/sbin/firefly-notify "$1" "$revision" "$case_id" "$(( $(date +%s) - started_at ))" || true; }
+capture_candidate_diagnostics() {
+  install -d -o root -g root -m 0700 "$diagnostics_dir"
+  diagnostics_file="$diagnostics_dir/candidate.log"
+  {
+    printf 'case_id=%s\nrevision=%s\nslot=%s\nport=%s\ncaptured_at=%s\n' \
+      "$case_id" "$revision" "$next_slot" "$next_port" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '\nREADY\n'
+    curl --silent --show-error --max-time 5 --write-out '\nhttp_status=%{http_code}\n' \
+      "http://127.0.0.1:$next_port/api/health/ready" || true
+    for role in web worker media-worker canvas-worker; do
+      container="firefly-$role-$next_slot"
+      printf '\nCONTAINER %s\n' "$container"
+      /usr/bin/docker inspect --format '{{json .State}}' "$container" 2>&1 || true
+      /usr/bin/docker logs --tail 200 "$container" 2>&1 || true
+    done
+  } > "$diagnostics_file" 2>&1
+  chown root:root "$diagnostics_file"
+  chmod 0600 "$diagnostics_file"
+  echo "candidate diagnostics stored at $diagnostics_file" >&2
+}
 failure_event=failed
 restart_old_workers() {
   while IFS= read -r container; do
@@ -43,6 +64,7 @@ on_exit() {
   code=$?
   trap - EXIT
   if [ "$code" -ne 0 ]; then
+    capture_candidate_diagnostics || true
     if [ "$switched" -eq 1 ]; then
       restart_old_workers
       # Only retire the candidate after Nginx is certainly back on the old
