@@ -1,0 +1,13 @@
+export function FireflyGlyph({ compact = false }: { compact?: boolean }) {
+  return <svg className={`firefly-glyph ${compact ? "firefly-glyph--compact" : ""}`} viewBox="0 0 1024 1024" role="img" aria-label="Firefly 萤火虫标志">
+    <path d="M467 397C394 330 311 259 228 197C159 146 102 108 76 115C49 123 55 178 76 226C105 292 160 345 224 371C288 397 360 399 467 397Z" />
+    <path d="M535 397C608 330 691 259 774 197C843 146 900 108 926 115C953 123 947 178 926 226C897 292 842 345 778 371C714 397 642 399 535 397Z" />
+    <path d="M458 417C383 422 312 430 250 446C198 459 168 479 171 508C174 545 199 574 236 581C281 590 322 572 354 539C388 504 419 462 458 417Z" />
+    <path d="M544 417C619 422 690 430 752 446C804 459 834 479 831 508C828 545 803 574 766 581C721 590 680 572 648 539C614 504 583 462 544 417Z" />
+    <path d="M501 425C466 477 438 533 422 596C405 662 405 735 422 799C437 855 466 887 501 887C536 887 565 855 580 799C597 735 597 662 580 596C564 533 536 477 501 425Z" />
+  </svg>;
+}
+
+export function FireflyMark({ compact = false }: { compact?: boolean }) {
+  return <div className={`brand ${compact ? "brand--compact" : ""}`}><span className="brand__glyph"><FireflyGlyph compact={compact} /></span><span>Firefly</span></div>;
+}
