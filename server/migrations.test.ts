@@ -56,6 +56,18 @@ describe("versioned database migrations", () => {
     store.close();
   });
 
+  it("keeps the rollback image operable after the next expand-only migration", () => {
+    const target = databasePath();
+    migrateDatabase(target);
+    const database = new Database(target);
+    database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (3, 'future-expand-only', ?)").run(Date.now());
+    database.close();
+    expect(migrateDatabase(target)).toBe(3);
+    const compatible = new Database(target, { readonly: true });
+    expect(assertSchemaVersion(compatible)).toBe(3);
+    compatible.close();
+  });
+
   it("adopts the current production schema without rebuilding tables", () => {
     const target = databasePath();
     migrateDatabase(target);
