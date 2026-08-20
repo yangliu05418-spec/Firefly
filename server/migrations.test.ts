@@ -23,8 +23,28 @@ describe("versioned database migrations", () => {
     const database = new Database(target, { readonly: true });
     expect(schemaVersion(database)).toBe(CURRENT_SCHEMA_VERSION);
     expect(assertSchemaVersion(database)).toBe(CURRENT_SCHEMA_VERSION);
-    expect((database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number }).count).toBe(1);
+    expect((database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number }).count).toBe(2);
+    expect((database.prepare("PRAGMA table_info(user_assets)").all() as { name: string }[]).some((column) => column.name === "category")).toBe(true);
     database.close();
+  });
+
+  it("expands a version-one asset table with a safe default category", () => {
+    const target = databasePath();
+    const database = new Database(target);
+    database.exec(`
+      CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, applied_at INTEGER NOT NULL);
+      INSERT INTO schema_migrations VALUES (1, 'baseline-current-schema', 1);
+      CREATE TABLE user_assets (
+        id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, group_id TEXT NOT NULL, upload_id TEXT, name TEXT NOT NULL,
+        asset_type TEXT NOT NULL, status TEXT NOT NULL, url TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER
+      );
+      INSERT INTO user_assets VALUES ('asset-1', 'user-1', 'group-1', NULL, '旧素材', 'Image', 'Active', NULL, 1, 1, NULL);
+    `);
+    database.close();
+    expect(migrateDatabase(target)).toBe(2);
+    const migrated = new Database(target, { readonly: true });
+    expect((migrated.prepare("SELECT category FROM user_assets WHERE id = 'asset-1'").get() as { category: string }).category).toBe("material");
+    migrated.close();
   });
 
   it("requires an explicit migration before opening an application store", () => {

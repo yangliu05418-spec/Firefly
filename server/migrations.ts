@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 const baseSchema = `
   CREATE TABLE IF NOT EXISTS users (
@@ -75,6 +75,7 @@ const baseSchema = `
     name TEXT NOT NULL,
     asset_type TEXT NOT NULL CHECK (asset_type IN ('Image', 'Video', 'Audio')),
     status TEXT NOT NULL CHECK (status IN ('Active', 'Processing', 'Failed')),
+    category TEXT NOT NULL DEFAULT 'material' CHECK (category IN ('character', 'scene', 'prop', 'material')),
     url TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
@@ -153,6 +154,12 @@ const applyBaseline = (database: Database.Database) => {
   }
 };
 
+const addAssetCategories = (database: Database.Database) => {
+  const columns = new Set((database.prepare("PRAGMA table_info(user_assets)").all() as { name: string }[]).map((column) => column.name));
+  if (!columns.has("category")) database.exec("ALTER TABLE user_assets ADD COLUMN category TEXT NOT NULL DEFAULT 'material' CHECK (category IN ('character', 'scene', 'prop', 'material'))");
+  database.exec("CREATE INDEX IF NOT EXISTS user_assets_owner_category_updated_idx ON user_assets(owner_id, category, updated_at DESC)");
+};
+
 export const migrateDatabase = (databasePath: string) => {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const database = new Database(databasePath);
@@ -167,6 +174,10 @@ export const migrateDatabase = (databasePath: string) => {
       if (version < 1) {
         applyBaseline(database);
         database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(1, "baseline-current-schema", Date.now());
+      }
+      if (version < 2) {
+        addAssetCategories(database);
+        database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(2, "add-user-asset-categories", Date.now());
       }
       assertSchemaVersion(database);
     }).exclusive();

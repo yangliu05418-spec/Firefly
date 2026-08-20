@@ -68,6 +68,8 @@ export type MediaObject = {
   deletedAt?: number;
 };
 
+export type AssetCategory = "character" | "scene" | "prop" | "material";
+
 export type UserAsset = {
   id: string;
   ownerId: string;
@@ -76,6 +78,7 @@ export type UserAsset = {
   name: string;
   assetType: "Image" | "Video" | "Audio";
   status: "Active" | "Processing" | "Failed";
+  category: AssetCategory;
   url?: string;
   createdAt: number;
   updatedAt: number;
@@ -138,7 +141,7 @@ type MediaRow = {
 
 type UserAssetRow = {
   id: string; owner_id: string; group_id: string; upload_id: string | null; name: string;
-  asset_type: UserAsset["assetType"]; status: UserAsset["status"]; url: string | null;
+  asset_type: UserAsset["assetType"]; status: UserAsset["status"]; category: AssetCategory; url: string | null;
   created_at: number; updated_at: number; deleted_at: number | null;
 };
 
@@ -179,7 +182,7 @@ const mapMedia = (row?: MediaRow): MediaObject | null => row ? ({
 
 const mapUserAsset = (row?: UserAssetRow): UserAsset | null => row ? ({
   id: row.id, ownerId: row.owner_id, groupId: row.group_id, uploadId: row.upload_id ?? undefined,
-  name: row.name, assetType: row.asset_type, status: row.status, url: row.url ?? undefined,
+  name: row.name, assetType: row.asset_type, status: row.status, category: row.category, url: row.url ?? undefined,
   createdAt: row.created_at, updatedAt: row.updated_at, deletedAt: row.deleted_at ?? undefined
 }) : null;
 
@@ -375,19 +378,19 @@ export class UserStore {
   upsertUserAsset(asset: UserAsset) {
     try {
       this.database.prepare(`
-        INSERT INTO user_assets (id, owner_id, group_id, upload_id, name, asset_type, status, url, created_at, updated_at, deleted_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO user_assets (id, owner_id, group_id, upload_id, name, asset_type, status, category, url, created_at, updated_at, deleted_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET owner_id=excluded.owner_id, group_id=excluded.group_id,
           upload_id=COALESCE(excluded.upload_id, user_assets.upload_id), name=excluded.name,
-          asset_type=excluded.asset_type, status=excluded.status, url=COALESCE(excluded.url, user_assets.url),
+          asset_type=excluded.asset_type, status=excluded.status, category=excluded.category, url=COALESCE(excluded.url, user_assets.url),
           updated_at=excluded.updated_at, deleted_at=excluded.deleted_at
-      `).run(asset.id, asset.ownerId, asset.groupId, asset.uploadId ?? null, asset.name, asset.assetType, asset.status,
+      `).run(asset.id, asset.ownerId, asset.groupId, asset.uploadId ?? null, asset.name, asset.assetType, asset.status, asset.category,
         asset.url ?? null, asset.createdAt, asset.updatedAt, asset.deletedAt ?? null);
       return asset;
     } catch (error) {
       // 同一 (owner_id, upload_id) 已被登记（唯一索引）：按上传 ID 更新既有资产，保持幂等
       if ((error as { code?: string }).code === "SQLITE_CONSTRAINT_UNIQUE") {
-        this.database.prepare("UPDATE user_assets SET name = ?, asset_type = ?, status = ?, url = COALESCE(?, url), updated_at = ?, deleted_at = COALESCE(?, deleted_at) WHERE owner_id = ? AND upload_id = ? AND deleted_at IS NULL").run(asset.name, asset.assetType, asset.status, asset.url ?? null, asset.updatedAt, asset.deletedAt ?? null, asset.ownerId, asset.uploadId ?? null);
+        this.database.prepare("UPDATE user_assets SET name = ?, asset_type = ?, status = ?, category = ?, url = COALESCE(?, url), updated_at = ?, deleted_at = COALESCE(?, deleted_at) WHERE owner_id = ? AND upload_id = ? AND deleted_at IS NULL").run(asset.name, asset.assetType, asset.status, asset.category, asset.url ?? null, asset.updatedAt, asset.deletedAt ?? null, asset.ownerId, asset.uploadId ?? null);
         return asset;
       }
       throw error;
@@ -403,18 +406,23 @@ export class UserStore {
     return mapUserAsset(this.database.prepare("SELECT * FROM user_assets WHERE owner_id = ? AND upload_id = ? AND deleted_at IS NULL").get(ownerId, uploadId) as UserAssetRow | undefined);
   }
 
-  listUserAssets(ownerId: string, query = "", limit = 100, assetType?: UserAsset["assetType"], offset = 0) {
+  listUserAssets(ownerId: string, query = "", limit = 100, assetType?: UserAsset["assetType"], offset = 0, category?: AssetCategory) {
     const pattern = `%${query.trim().replace(/[\\%_]/g, "\\$&")}%`;
     const rows = this.database.prepare(`
       SELECT * FROM user_assets
-      WHERE owner_id = ? AND deleted_at IS NULL AND name LIKE ? ESCAPE '\\' AND (? IS NULL OR asset_type = ?)
+      WHERE owner_id = ? AND deleted_at IS NULL AND name LIKE ? ESCAPE '\\' AND (? IS NULL OR asset_type = ?) AND (? IS NULL OR category = ?)
       ORDER BY created_at DESC LIMIT ? OFFSET ?
-    `).all(ownerId, pattern, assetType ?? null, assetType ?? null, limit, offset) as UserAssetRow[];
+    `).all(ownerId, pattern, assetType ?? null, assetType ?? null, category ?? null, category ?? null, limit, offset) as UserAssetRow[];
     return rows.map((row) => mapUserAsset(row)!);
   }
 
   renameUserAsset(id: string, ownerId: string, name: string) {
     const result = this.database.prepare("UPDATE user_assets SET name = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").run(name, Date.now(), id, ownerId);
+    return result.changes > 0;
+  }
+
+  updateUserAssetCategory(id: string, ownerId: string, category: AssetCategory) {
+    const result = this.database.prepare("UPDATE user_assets SET category = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").run(category, Date.now(), id, ownerId);
     return result.changes > 0;
   }
 

@@ -164,7 +164,7 @@ jobs:
           format: table
           severity: CRITICAL
           ignore-unfixed: true
-          exit-code: '1'
+          exit-code: "1"
           scanners: vuln
       - name: Produce vulnerability report
         if: always()
@@ -175,7 +175,7 @@ jobs:
           output: trivy-results.sarif
           severity: CRITICAL
           ignore-unfixed: true
-          exit-code: '0'
+          exit-code: "0"
           scanners: vuln
       - name: Upload vulnerability report
         if: always() && hashFiles('trivy-results.sarif') != ''
@@ -235,6 +235,7 @@ jobs:
     environment: production
     permissions:
       contents: read
+      packages: read
     steps:
       - name: Validate deployment inputs
         id: release
@@ -263,11 +264,18 @@ jobs:
           IMAGE: ${{ steps.release.outputs.image }}
           PROD_HOST: ${{ vars.PROD_HOST }}
           PROD_USER: ${{ vars.PROD_USER }}
-          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+          GHCR_PULL_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
           GHCR_USER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
-          printf '%s\n%s\n' "$GHCR_PULL_TOKEN" "$FEISHU_WEBHOOK_URL" | \
+          printf '%s\n' "$GHCR_PULL_TOKEN" | \
             ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$PROD_USER@$PROD_HOST" \
-              "sudo /usr/local/sbin/firefly-ghcr-login '$GHCR_USER' && sudo /usr/local/sbin/firefly-alerts-configure && sudo /usr/local/sbin/firefly-deploy '$IMAGE' '${{ github.sha }}'"
+              "sudo /usr/local/sbin/firefly-ghcr-login '$GHCR_USER'"
+          if [ -n "$FEISHU_WEBHOOK_URL" ]; then
+            printf '%s\n' "$FEISHU_WEBHOOK_URL" | \
+              ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$PROD_USER@$PROD_HOST" \
+                "sudo /usr/local/sbin/firefly-alerts-configure"
+          fi
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$PROD_USER@$PROD_HOST" \
+            "sudo /usr/local/sbin/firefly-deploy '$IMAGE' '${{ github.sha }}'"

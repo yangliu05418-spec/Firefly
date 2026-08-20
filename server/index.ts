@@ -10,7 +10,7 @@ import { z } from "zod";
 import { config } from "./config.js";
 import { MODELS } from "./capabilities.js";
 import { clearSession, createSession, getSessionUser, publicUser, requireAuth, type SessionUser } from "./auth.js";
-import type { CanvasProject, UserAsset } from "./db.js";
+import type { AssetCategory, CanvasProject, UserAsset } from "./db.js";
 import { users } from "./store.js";
 import { canvasDocumentSchema, DEFAULT_CANVAS_DOCUMENT } from "./canvas-document.js";
 import { publicCanvasProject, publicCanvasProjectDetail } from "./canvas-public.js";
@@ -545,7 +545,9 @@ app.post("/api/media-events", requireAuth, async (req, res) => {
 });
 
 type ProviderAssetRecord = { Id: string; Name?: string; AssetType?: UserAsset["assetType"]; Status?: UserAsset["status"]; URL?: string; GroupId?: string };
-const publicUserAsset = (asset: UserAsset) => ({ Id: asset.id, Name: asset.name, AssetType: asset.assetType, Status: asset.status, URL: asset.url, GroupId: asset.groupId, UploadId: asset.uploadId });
+const assetCategories = ["character", "scene", "prop", "material"] as const satisfies readonly AssetCategory[];
+const assetCategorySchema = z.enum(assetCategories);
+const publicUserAsset = (asset: UserAsset) => ({ Id: asset.id, Name: asset.name, AssetType: asset.assetType, Status: asset.status, URL: asset.url, GroupId: asset.groupId, UploadId: asset.uploadId, Category: asset.category });
 const refreshUserAsset = async (asset: UserAsset) => {
   if (asset.status === "Active" && asset.url) return asset;
   try {
@@ -574,9 +576,9 @@ app.post("/api/assets/groups", requireAuth, async (req, res) => {
 });
 app.get("/api/assets", requireAuth, async (req, res) => {
   try {
-    const query = z.object({ q: z.string().max(80).optional(), type: z.enum(["Image", "Video", "Audio"]).optional(), page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(100) }).parse(req.query);
+    const query = z.object({ q: z.string().max(80).optional(), type: z.enum(["Image", "Video", "Audio"]).optional(), category: assetCategorySchema.optional(), page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(100) }).parse(req.query);
     const user = res.locals.user as SessionUser;
-    const assets = users.listUserAssets(user.id, query.q ?? "", query.pageSize + 1, query.type, (query.page - 1) * query.pageSize);
+    const assets = users.listUserAssets(user.id, query.q ?? "", query.pageSize + 1, query.type, (query.page - 1) * query.pageSize, query.category);
     const hasMore = assets.length > query.pageSize;
     res.json({ Items: (await refreshUserAssetList(assets.slice(0, query.pageSize))).map(publicUserAsset), PageNumber: query.page, PageSize: query.pageSize, HasMore: hasMore });
   } catch (error) { respondError(res, error, 502); }
@@ -586,7 +588,7 @@ app.post("/api/assets", requireAuth, async (req, res) => {
   let auditUploadId: string | null = null;
   let creationLock: { key: string; token: string } | null = null;
   try {
-    const body = z.object({ groupId: z.string().startsWith("group-").optional(), url: z.string().url().optional(), uploadId: z.string().min(20).optional(), type: z.enum(["Image", "Video", "Audio"]), name: z.string().min(1).max(180) }).refine((value) => Boolean(value.url || value.uploadId), "素材缺少可用地址").parse(req.body);
+    const body = z.object({ groupId: z.string().startsWith("group-").optional(), url: z.string().url().optional(), uploadId: z.string().min(20).optional(), type: z.enum(["Image", "Video", "Audio"]), name: z.string().min(1).max(180), category: assetCategorySchema.default("material") }).refine((value) => Boolean(value.url || value.uploadId), "素材缺少可用地址").parse(req.body);
     const user = res.locals.user as SessionUser;
     auditUserId = user.id;
     auditUploadId = body.uploadId ?? null;
@@ -603,12 +605,12 @@ app.post("/api/assets", requireAuth, async (req, res) => {
       if (!media || media.ownerId !== user.id) return res.status(404).json({ error: "引用素材不存在或已过期" });
       url = await resolveUploadMediaUrl(media);
       assetType = media.contentType.startsWith("video/") ? "Video" : media.contentType.startsWith("audio/") ? "Audio" : "Image";
-      providerName = media.fileName.slice(0, 80);
+      providerName = body.name.slice(0, 80);
     }
     const created = await callAssetApi<ProviderAssetRecord>("CreateAsset", { GroupId: groupId, URL: url, AssetType: assetType, Name: providerName });
     if (!created.Id?.startsWith("asset-")) throw new Error("素材服务未返回有效资产 ID");
     const now = Date.now();
-    const asset: UserAsset = { id: created.Id, ownerId: user.id, groupId, uploadId: body.uploadId, name: created.Name ?? providerName, assetType: created.AssetType ?? assetType, status: created.Status ?? "Processing", url: created.URL, createdAt: now, updatedAt: now };
+    const asset: UserAsset = { id: created.Id, ownerId: user.id, groupId, uploadId: body.uploadId, name: created.Name ?? providerName, assetType: created.AssetType ?? assetType, status: created.Status ?? "Processing", category: body.category, url: created.URL, createdAt: now, updatedAt: now };
     users.upsertUserAsset(asset);
     console.info(JSON.stringify({ type: "user_asset_mutation", action: "create_asset", userId: user.id, assetId: asset.id, at: new Date().toISOString() }));
     res.status(201).json(publicUserAsset(asset));
@@ -640,7 +642,15 @@ app.get("/api/assets/:id", requireAuth, async (req, res) => {
   try { const user = res.locals.user as SessionUser; const asset = ownedUserAsset(param(req.params.id), user.id); if (!asset) return res.status(404).json({ error: "素材不存在" }); res.json(publicUserAsset(await refreshUserAsset(asset))); } catch (error) { respondError(res, error, 502); }
 });
 app.patch("/api/assets/:id", requireAuth, async (req, res) => {
-  try { const body = z.object({ name: z.string().trim().min(1).max(80) }).parse(req.body); const user = res.locals.user as SessionUser; const id = param(req.params.id); if (!ownedUserAsset(id, user.id)) return res.status(404).json({ error: "素材不存在" }); await callAssetApi("UpdateAsset", { Id: id, Name: body.name }); users.renameUserAsset(id, user.id, body.name); console.info(JSON.stringify({ type: "user_asset_mutation", action: "rename_asset", userId: user.id, assetId: id, at: new Date().toISOString() })); res.json(publicUserAsset(users.readUserAsset(id)!)); } catch (error) { respondError(res, error, 502); }
+  try {
+    const body = z.object({ name: z.string().trim().min(1).max(80).optional(), category: assetCategorySchema.optional() }).refine((value) => value.name !== undefined || value.category !== undefined, "没有需要更新的字段").parse(req.body);
+    const user = res.locals.user as SessionUser; const id = param(req.params.id);
+    if (!ownedUserAsset(id, user.id)) return res.status(404).json({ error: "素材不存在" });
+    if (body.name !== undefined) { await callAssetApi("UpdateAsset", { Id: id, Name: body.name }); users.renameUserAsset(id, user.id, body.name); }
+    if (body.category !== undefined) users.updateUserAssetCategory(id, user.id, body.category);
+    console.info(JSON.stringify({ type: "user_asset_mutation", action: body.name !== undefined ? body.category !== undefined ? "update_asset" : "rename_asset" : "categorize_asset", userId: user.id, assetId: id, at: new Date().toISOString() }));
+    res.json(publicUserAsset(users.readUserAsset(id)!));
+  } catch (error) { respondError(res, error, 502); }
 });
 app.delete("/api/assets/:id", requireAuth, async (req, res) => {
   try { const user = res.locals.user as SessionUser; const id = param(req.params.id); if (!ownedUserAsset(id, user.id)) return res.status(404).json({ error: "素材不存在" }); if (users.isUserAssetInActiveTask(id, user.id)) return res.status(409).json({ error: "素材正被运行中的任务引用，任务结束后即可删除" }); await callAssetApi("DeleteAsset", { Id: id }); users.deleteUserAsset(id, user.id); console.info(JSON.stringify({ type: "user_asset_mutation", action: "delete_asset", userId: user.id, assetId: id, at: new Date().toISOString() })); res.status(204).end(); } catch (error) { respondError(res, error, 502); }
