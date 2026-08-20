@@ -17,6 +17,7 @@ app_env=/opt/firefly/.env
 feishu_env=/opt/firefly/.env.feishu
 alerts_env=/etc/firefly/alerts.env
 network=${FIREFLY_DOCKER_NETWORK:-firefly_default}
+legacy_project=${FIREFLY_LEGACY_COMPOSE_PROJECT:-firefly}
 current_slot=legacy
 current_port=8090
 switched=0
@@ -77,7 +78,9 @@ switch_upstream() {
 stop_old_workers() {
   if [ "$current_slot" = "legacy" ]; then
     for service in worker media-worker; do
-      for container in $(/usr/bin/docker ps -q --filter "label=com.docker.compose.service=$service"); do
+      for container in $(/usr/bin/docker ps -q \
+        --filter "label=com.docker.compose.project=$legacy_project" \
+        --filter "label=com.docker.compose.service=$service"); do
         printf '%s\n' "$container" >> "$old_workers_file"
       done
     done
@@ -103,6 +106,14 @@ notify started
   -v /srv/firefly/data:/data:rw "$image" node dist-server/migrate.js
 
 cleanup_candidate
+if [ "$current_slot" != "legacy" ]; then
+  FIREFLY_LEGACY_COMPOSE_PROJECT="$legacy_project" /usr/local/sbin/firefly-retire-slot legacy
+fi
+if /usr/bin/docker ps -q --filter "publish=$next_port" | grep -q .; then
+  failure_event=failed_standby_port_busy
+  echo "standby port $next_port is still allocated" >&2
+  exit 1
+fi
 /usr/bin/docker run -d --name "firefly-web-$next_slot" --restart unless-stopped --stop-timeout 35 \
   --network "$network" --label com.firefly.role=web --label com.firefly.slot="$next_slot" --security-opt no-new-privileges --cap-drop ALL \
   --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 \

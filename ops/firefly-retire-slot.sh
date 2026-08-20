@@ -5,13 +5,16 @@ slot=${1:-}
 case "$slot" in blue|green|legacy) ;; *) echo "invalid slot" >&2; exit 1 ;; esac
 
 release_env=/etc/firefly/release.env
+legacy_project=${FIREFLY_LEGACY_COMPOSE_PROJECT:-firefly}
 [ -r "$release_env" ] || exit 0
 # shellcheck disable=SC1090
 . "$release_env"
 
 if [ "$slot" = "legacy" ]; then
   for service in web worker media-worker; do
-    for container in $(/usr/bin/docker ps -aq --filter "label=com.docker.compose.service=$service"); do
+    for container in $(/usr/bin/docker ps -aq \
+      --filter "label=com.docker.compose.project=$legacy_project" \
+      --filter "label=com.docker.compose.service=$service"); do
       [ -n "$container" ] || continue
       /usr/bin/docker stop --time 35 "$container" >/dev/null 2>&1 || true
     done

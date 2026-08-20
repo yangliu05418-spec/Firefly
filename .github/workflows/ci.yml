@@ -56,6 +56,18 @@ jobs:
           done < <(git ls-files '*.sh' 'Dockerfile' '*.service' '*.timer' '*.conf' '*.yml' '*.yaml')
           exit "$failed"
 
+      - name: Validate runtime shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r script; do
+            if head -n 1 "$script" | grep -q 'bash'; then
+              bash -n "$script"
+            else
+              sh -n "$script"
+            fi
+          done < <(git ls-files '*.sh')
+
       - name: Reject oversized tracked files
         shell: bash
         env:
