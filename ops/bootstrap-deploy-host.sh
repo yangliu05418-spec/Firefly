@@ -20,6 +20,7 @@ for mapping in \
   'install-nginx-config.sh:firefly-install-nginx' \
   'harden-ssh-host.sh:firefly-harden-ssh' \
   'run-health-audit-host.sh:firefly-health-audit' \
+  'run-maintenance-host.sh:firefly-maintenance' \
   'run-backup-host.sh:firefly-backup'; do
   source_name=${mapping%%:*}; target_name=${mapping#*:}
   install -o root -g root -m 0755 "/opt/firefly/ops/$source_name" "/usr/local/sbin/$target_name"
@@ -40,5 +41,7 @@ install -o root -g root -m 0644 /opt/firefly/ops/firefly-backup.service /etc/sys
 install -o root -g root -m 0644 /opt/firefly/ops/firefly-backup.timer /etc/systemd/system/firefly-backup.timer
 install -o root -g root -m 0644 /opt/firefly/ops/firefly-health-audit.service /etc/systemd/system/firefly-health-audit.service
 install -o root -g root -m 0644 /opt/firefly/ops/firefly-health-audit.timer /etc/systemd/system/firefly-health-audit.timer
+install -o root -g root -m 0644 /opt/firefly/ops/firefly-maintenance.service /etc/systemd/system/firefly-maintenance.service
+install -o root -g root -m 0644 /opt/firefly/ops/firefly-maintenance.timer /etc/systemd/system/firefly-maintenance.timer
 systemctl daemon-reload
-systemctl enable --now firefly-backup.timer firefly-health-audit.timer
+systemctl enable --now firefly-backup.timer firefly-health-audit.timer firefly-maintenance.timer

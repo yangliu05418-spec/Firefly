@@ -21,6 +21,8 @@
     "typecheck": "npm run typecheck:frontend && npm run typecheck:server",
     "db:migrate": "node dist-server/migrate.js",
     "health:audit": "node dist-server/health-audit.js",
+    "admin": "node dist-server/admin-cli.js",
+    "maintenance": "node dist-server/maintenance.js",
     "user:disable": "node dist-server/user-admin.js disable"
   },
   "dependencies": {

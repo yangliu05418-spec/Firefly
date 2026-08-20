@@ -110,4 +110,27 @@ describe("versioned database migrations", () => {
     expect(new Set(second.listImageGenerationTasks(owner.id).map((task) => task.id))).toEqual(new Set(["image-1", "image-2", "image-3"]));
     second.close(); first.close();
   });
+
+  it("purges only old confirmed tombstones and preserves canvas-referenced tasks", () => {
+    const target = databasePath();
+    migrateDatabase(target);
+    const store = new UserStore(target);
+    const owner = store.upsertFromFeishu({ openId: "ou-maintenance", unionId: "on-maintenance", tenantKey: "tenant", email: "maintenance@dokuai.tv", name: "Maintenance", avatarUrl: "" });
+    const deletedTask = (id: string) => ({ id, ownerId: owner.id, visibility: "private" as const, status: "succeeded" as const, mediaStatus: "ready" as const, mediaRevision: 1, prompt: "", model: "model", mode: "text", ratio: "16:9", resolution: "720p", duration: 4, request: {}, createdAt: 1, updatedAt: 10, deletedAt: 10 });
+    store.saveTask(deletedTask("purge-task"));
+    store.saveTask(deletedTask("referenced-task"));
+    for (const taskId of ["purge-task", "referenced-task"]) store.upsertMedia({ id: `${taskId}:output`, ownerId: owner.id, taskId, kind: "output", objectKey: `outputs/${taskId}.mp4`, status: "deleted", fileName: "result.mp4", contentType: "video/mp4", size: 1, etag: "etag", createdAt: 1, updatedAt: 10, deletedAt: 10 });
+    store.createCanvasProject({ id: "active-canvas", ownerId: owner.id, title: "Active", documentJson: JSON.stringify({ nodes: [{ metadata: { mediaRef: { source: "generation", taskId: "referenced-task" } } }] }), revision: 1, createdAt: 1, updatedAt: 10 });
+    store.createCanvasProject({ id: "purge-canvas", ownerId: owner.id, title: "Deleted", documentJson: "{}", revision: 1, createdAt: 1, updatedAt: 10, deletedAt: 10 });
+    store.createCanvasAsset({ id: "purge-canvas-asset", ownerId: owner.id, canvasId: "purge-canvas", objectKey: "canvas/deleted.png", fileName: "deleted.png", contentType: "image/png", size: 1, etag: "etag", status: "ready", createdAt: 1, updatedAt: 10, deletedAt: 10 });
+    store.upsertMedia({ id: "ready-input", ownerId: owner.id, uploadId: "ready-upload", kind: "input", objectKey: "inputs/ready.png", status: "ready", fileName: "ready.png", contentType: "image/png", size: 1, etag: "etag", createdAt: 1, updatedAt: 10 });
+    expect(store.referencedObjectKeys()).toEqual(new Set(["inputs/ready.png"]));
+    expect(store.purgeTombstones(100)).toEqual({ tasks: 1, canvases: 1, media: 2 });
+    expect(store.readTask("purge-task", true)).not.toBeNull();
+    expect(store.purgeTombstones(100, true)).toEqual({ tasks: 1, canvases: 1, media: 2 });
+    expect(store.readTask("purge-task", true)).toBeNull();
+    expect(store.readTask("referenced-task", true)).not.toBeNull();
+    expect(store.referencedObjectKeys()).toEqual(new Set(["inputs/ready.png"]));
+    store.close();
+  });
 });
