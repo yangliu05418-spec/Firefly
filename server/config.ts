@@ -64,6 +64,9 @@ export const config = {
   openrouterApiKeys: (process.env.OPENROUTER_API_KEYS ?? "").split(",").map((key) => key.trim()).filter(Boolean),
   openrouterBaseUrl: process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1",
   openrouterRequestTimeoutMs: positiveInt("OPENROUTER_REQUEST_TIMEOUT_MS", 180_000),
+  canvasV2Enabled: (process.env.CANVAS_V2_ENABLED ?? "false").toLowerCase() === "true",
+  canvasV2Allowlist: (process.env.CANVAS_V2_ALLOWLIST ?? "").split(",").map((email) => email.trim().toLowerCase()).filter(Boolean),
+  canvasTextModel: process.env.CANVAS_TEXT_MODEL ?? "google/gemini-2.5-flash",
   shutdownGraceMs: positiveInt("SHUTDOWN_GRACE_MS", 30_000),
   revision: process.env.FIREFLY_REVISION ?? "development",
   imageDigest: process.env.FIREFLY_IMAGE_DIGEST ?? "unknown"

@@ -100,6 +100,7 @@ type ChatRequestBody = {
   messages: { role: "user"; content: (OpenRouterReference | { type: "image_url"; image_url: { url: string } })[] }[];
   modalities?: string[];
   image?: { size?: string };
+  stream?: boolean;
 };
 
 const callWithRetry = async (body: ChatRequestBody): Promise<{ data: unknown; key: string }> => {
@@ -204,6 +205,96 @@ const extractMarkdownImages = (text: string) => {
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(text)) !== null) urls.push(match[1]);
   return urls;
+};
+
+const parseOpenRouterText = (data: unknown) => {
+  const record = (data ?? {}) as Record<string, unknown>;
+  const error = record.error as Record<string, unknown> | undefined;
+  if (error) throw new OpenRouterError(String(error.message ?? error.code ?? "OpenRouter 返回错误"), 400);
+  const message = (record.choices as { message?: Record<string, unknown> }[] | undefined)?.[0]?.message;
+  const content = message?.content;
+  if (typeof content === "string") return content.trim();
+  if (Array.isArray(content)) return content.map((part) => {
+    if (typeof part === "string") return part;
+    if (part && typeof part === "object" && typeof (part as Record<string, unknown>).text === "string") return String((part as Record<string, unknown>).text);
+    return "";
+  }).join("").trim();
+  return "";
+};
+
+export const parseOpenRouterTextDelta = (value: string) => {
+  const chunk = JSON.parse(value) as { choices?: { delta?: { content?: unknown } }[]; error?: { message?: string } };
+  if (chunk.error) throw new OpenRouterError(chunk.error.message ?? "OpenRouter 流式响应错误", 502);
+  const content = chunk.choices?.[0]?.delta?.content;
+  return typeof content === "string" ? content : Array.isArray(content) ? content.map((part) => typeof part === "string" ? part : part && typeof part === "object" && "text" in part ? String((part as { text: unknown }).text) : "").join("") : "";
+};
+
+export const generateCanvasText = async (input: { instruction: string; currentText: string; context: string }, onPartial?: (text: string) => void | Promise<void>) => {
+  const prompt = [
+    "你是 Firefly 画布内的创作助理。回答必须适合直接写入创作文本节点，使用简洁、自然的中文 Markdown，不要解释你的身份。",
+    input.context ? `上游创作上下文：\n${input.context}` : "",
+    input.currentText ? `当前节点内容：\n${input.currentText}` : "",
+    `用户指令：\n${input.instruction}`,
+  ].filter(Boolean).join("\n\n");
+  if (onPartial) {
+    let lastError = new OpenRouterError("没有可用的 OpenRouter API Key", 503);
+    for (let attempt = 0; attempt < Math.max(1, pool.size); attempt += 1) {
+      const key = pool.next();
+      if (!key) throw new OpenRouterError("OpenRouter 全部 API Key 暂时不可用（限流或密钥失效），请稍后重试", 503);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), config.openrouterRequestTimeoutMs);
+      try {
+        const response = await fetch(chatCompletionsUrl(), {
+          method: "POST",
+          headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", "HTTP-Referer": config.origin, "X-Title": "Firefly Studio" },
+          body: JSON.stringify({ model: config.canvasTextModel, stream: true, messages: [{ role: "user", content: [{ type: "text", text: prompt }] }] }),
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          const message = (await response.text()).slice(0, 300);
+          pool.reportFailure(key, response.status);
+          lastError = new OpenRouterError(`OpenRouter 流式请求失败: ${message}`, response.status);
+          if (response.status === 401 || response.status === 429 || response.status >= 500) continue;
+          throw lastError;
+        }
+        if (!response.body) throw new OpenRouterError("OpenRouter 未返回流式响应", 502);
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let pending = "";
+        let result = "";
+        const acceptLine = async (line: string) => {
+          if (!line.startsWith("data:")) return;
+          const value = line.slice(5).trim();
+          if (!value || value === "[DONE]") return;
+          const text = parseOpenRouterTextDelta(value);
+          if (text) { result += text; await onPartial(result); }
+        };
+        while (true) {
+          const { done, value } = await reader.read();
+          pending += decoder.decode(value, { stream: !done });
+          const lines = pending.split(/\r?\n/); pending = lines.pop() ?? "";
+          for (const line of lines) await acceptLine(line);
+          if (done) break;
+        }
+        if (pending) await acceptLine(pending);
+        if (!result.trim()) throw new OpenRouterError("OpenRouter 未返回文本内容", 502);
+        pool.reportSuccess(key);
+        return result.trim();
+      } catch (error) {
+        if (error instanceof OpenRouterError && error.status !== 401 && error.status !== 429 && error.status !== "network" && error.status < 500) throw error;
+        pool.reportFailure(key, error instanceof OpenRouterError && typeof error.status === "number" ? error.status : "network");
+        lastError = error instanceof OpenRouterError ? error : new OpenRouterError(error instanceof Error ? `OpenRouter 网络错误: ${error.message.slice(0, 200)}` : "OpenRouter 网络错误", "network");
+      } finally { clearTimeout(timer); }
+    }
+    throw lastError;
+  }
+  const { data } = await callWithRetry({
+    model: config.canvasTextModel,
+    messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
+  });
+  const result = parseOpenRouterText(data);
+  if (!result) throw new OpenRouterError("OpenRouter 未返回文本内容", 502);
+  return result;
 };
 
 const isDataUrl = (url: string) => url.startsWith("data:");

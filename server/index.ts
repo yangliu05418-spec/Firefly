@@ -10,12 +10,12 @@ import { z } from "zod";
 import { config } from "./config.js";
 import { MODELS } from "./capabilities.js";
 import { clearSession, createSession, getSessionUser, publicUser, requireAuth, type SessionUser } from "./auth.js";
-import type { AssetCategory, CanvasProject, UserAsset } from "./db.js";
+import type { AssetCategory, CanvasJob, CanvasProject, CanvasProjectAsset, UserAsset } from "./db.js";
 import { users } from "./store.js";
-import { canvasDocumentSchema, DEFAULT_CANVAS_DOCUMENT } from "./canvas-document.js";
+import { canvasDocumentSchema, DEFAULT_CANVAS_DOCUMENT, DEFAULT_CANVAS_DOCUMENT_V1, parseCanvasDocumentSafe, toCanvasDocumentV2 } from "./canvas-document.js";
 import { publicCanvasProject, publicCanvasProjectDetail } from "./canvas-public.js";
 import { consumeFeishuAuthorization, createFeishuAuthorization, exchangeFeishuCode } from "./feishu.js";
-import { assetQueue, generationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, readTask, redis, saveTask, type StoredTask } from "./redis.js";
+import { assetQueue, canvasQueue, generationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, readTask, redis, saveTask, type StoredTask } from "./redis.js";
 import { canAccessTask } from "./task-access.js";
 import { publicTask } from "./task-public.js";
 import { validateGeneration } from "./provider.js";
@@ -23,16 +23,18 @@ import { callAssetApi } from "./asset-api.js";
 import { ensureAutoReferenceGroup } from "./asset-registration.js";
 import { previewRedirectCacheControl } from "./media-cache.js";
 import { stablePreviewUrl } from "./preview-url-cache.js";
-import { abortMultipartUpload, completeMultipartUpload, createMultipartUpload, deleteObject, headObject, inputObjectKey, inspectMediaObject, signUploadPart, signedObjectUrl, tosConfigured, tosEnabled, tosHealth } from "./tos.js";
+import { abortMultipartUpload, canvasExportObjectKey, completeMultipartUpload, createMultipartUpload, deleteObject, headObject, inputObjectKey, inspectMediaObject, signUploadPart, signedObjectUrl, tosConfigured, tosEnabled, tosHealth, verifyStoredObject } from "./tos.js";
 import { canonicalUploadContentType, tosMediaInfoViolation, uploadKindFromContentType } from "./upload-policy.js";
 import { acquireUploadCompletionLock, claimUploadSlot, releaseUploadCompletionLock, releaseUploadSlot, UPLOAD_SESSION_TTL_SECONDS } from "./upload-slots.js";
-import { createCanvasAssetFromUpload } from "./canvas-assets.js";
+import { createCanvasAssetFromUpload, prepareCanvasAssetFromUpload } from "./canvas-assets.js";
 import { createCanvasMediaHandler } from "./canvas-media-route.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
 import { IMAGE_MODELS, IMAGE_RATIOS, imageModelById, computeImageSize, DEFAULT_IMAGE_MODEL } from "./image-models.js";
 import { acquireImageSlot, downloadImageBuffer, generateSingleImage, openRouterPool, OpenRouterError, releaseImageSlot } from "./openrouter.js";
 import { storeGeneratedImage } from "./generated-media.js";
 import { providerAssetName } from "./asset-name.js";
+import { acquireCanvasLease, releaseCanvasLease, renewCanvasLease, validateCanvasLease } from "./canvas-lease.js";
+import { canvasProjectAssetProviderUrl, canvasProjectAssetSignedUrl, createCanvasProjectMediaHandler, publicCanvasProjectAsset } from "./canvas-project-assets.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -748,6 +750,11 @@ app.get("/api/image-media/:id", requireAuth, async (req, res) => {
 });
 
 // ---- Canvas projects ----
+const canvasV2EnabledFor = (user: SessionUser) => config.canvasV2Enabled || config.canvasV2Allowlist.includes(user.email.trim().toLowerCase());
+app.get("/api/canvas/config", requireAuth, (_req, res) => {
+  const user = res.locals.user as SessionUser;
+  res.json({ enabled: canvasV2EnabledFor(user) });
+});
 const canvasListQuerySchema = z.object({ page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(50) });
 const canvasTitleBodySchema = z.object({ title: z.string().trim().min(1, "画布名称不能为空").max(80, "画布名称不能超过 80 个字符") });
 const canvasSaveBodySchema = z.object({ revision: z.number().int().min(0), document: canvasDocumentSchema });
@@ -755,11 +762,72 @@ const canvasMediaImportSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("generation"), taskId: z.string().min(1).max(120) }),
   z.object({ kind: z.literal("upload"), uploadId: z.string().min(20).max(200) }),
   z.object({ kind: z.literal("generated"), mediaId: z.string().min(1).max(120) }),
+  z.object({ kind: z.literal("user_asset"), assetId: z.string().min(1).max(200) }),
 ]);
 const accessibleCanvas = (id: string, userId: string) => {
   const project = users.readCanvasProject(id);
   return project && project.ownerId === userId ? project : null;
 };
+
+const canvasAssetKind = (contentType: string): CanvasProjectAsset["kind"] => contentType.startsWith("video/") ? "video" : contentType.startsWith("audio/") ? "audio" : "image";
+
+const recordCanvasProjectAsset = (input: Omit<CanvasProjectAsset, "id" | "createdAt" | "updatedAt">) => {
+  const now = Date.now();
+  return users.upsertCanvasProjectAsset({ id: `canvas-project-asset-${crypto.randomUUID()}`, ...input, createdAt: now, updatedAt: now });
+};
+
+const publicCanvasJob = (job: CanvasJob) => ({
+  id: job.id,
+  canvasId: job.canvasId,
+  nodeId: job.nodeId,
+  kind: job.kind,
+  status: job.status,
+  resultAssetId: job.resultAssetId,
+  providerTaskId: job.providerTaskId,
+  partialText: job.partialText,
+  error: job.error,
+  createdAt: job.createdAt,
+  updatedAt: job.updatedAt,
+});
+
+const canvasLeaseBodySchema = z.object({
+  clientId: z.string().min(16).max(160),
+  takeover: z.boolean().optional(),
+  token: z.string().min(32).max(160).optional(),
+});
+
+app.post("/api/canvases/:id/lease", requireAuth, async (req, res) => {
+  try {
+    const user = res.locals.user as SessionUser;
+    const canvasId = param(req.params.id);
+    if (!accessibleCanvas(canvasId, user.id)) return res.status(404).json({ error: "画布不存在" });
+    const body = canvasLeaseBodySchema.parse(req.body);
+    const result = await acquireCanvasLease({ canvasId, userId: user.id, clientId: body.clientId, takeover: body.takeover });
+    res.status(result.acquired ? 200 : 409).json(result);
+  } catch (error) { respondError(res, error, 503); }
+});
+
+app.put("/api/canvases/:id/lease", requireAuth, async (req, res) => {
+  try {
+    const user = res.locals.user as SessionUser;
+    const canvasId = param(req.params.id);
+    if (!accessibleCanvas(canvasId, user.id)) return res.status(404).json({ error: "画布不存在" });
+    const body = canvasLeaseBodySchema.required({ token: true }).parse(req.body);
+    if (!await renewCanvasLease(canvasId, user.id, body.token)) return res.status(409).json({ error: "编辑权已失效" });
+    res.status(204).end();
+  } catch (error) { respondError(res, error, 503); }
+});
+
+app.delete("/api/canvases/:id/lease", requireAuth, async (req, res) => {
+  try {
+    const user = res.locals.user as SessionUser;
+    const canvasId = param(req.params.id);
+    if (!accessibleCanvas(canvasId, user.id)) return res.status(404).json({ error: "画布不存在" });
+    const body = canvasLeaseBodySchema.required({ token: true }).parse(req.body);
+    await releaseCanvasLease(canvasId, user.id, body.token);
+    res.status(204).end();
+  } catch (error) { respondError(res, error, 503); }
+});
 
 app.get("/api/canvases", requireAuth, async (req, res) => {
   try {
@@ -778,7 +846,7 @@ app.post("/api/canvases", requireAuth, async (req, res) => {
     const now = Date.now();
     const project: CanvasProject = {
       id: `canvas-${crypto.randomUUID()}`, ownerId: user.id, title: title ?? "未命名画布",
-      documentJson: JSON.stringify(DEFAULT_CANVAS_DOCUMENT), revision: 0, createdAt: now, updatedAt: now
+      documentJson: JSON.stringify(canvasV2EnabledFor(user) ? DEFAULT_CANVAS_DOCUMENT : DEFAULT_CANVAS_DOCUMENT_V1), revision: 0, createdAt: now, updatedAt: now
     };
     users.createCanvasProject(project);
     console.info(JSON.stringify({ type: "canvas_mutation", action: "create", userId: user.id, canvasId: project.id, at: new Date().toISOString() }));
@@ -800,6 +868,9 @@ app.put("/api/canvases/:id", requireAuth, async (req, res) => {
     const { revision, document } = canvasSaveBodySchema.parse(req.body);
     const user = res.locals.user as SessionUser;
     const id = param(req.params.id);
+    if (canvasV2EnabledFor(user) && document.version === 2 && !await validateCanvasLease(id, user.id, req.header("x-canvas-lease"))) {
+      return res.status(409).json({ error: "画布编辑权已失效，本地草稿已保留", code: "CANVAS_LEASE_LOST" });
+    }
     const result = users.updateCanvasProjectDocument(id, user.id, JSON.stringify(document), revision);
     if (result === null) return res.status(404).json({ error: "画布不存在" });
     if (result.status === "conflict") return res.status(409).json({ error: "画布已在其他窗口被修改，已保留最新版本", currentRevision: result.currentRevision });
@@ -855,23 +926,391 @@ app.post("/api/canvases/:id/media", requireAuth, async (req, res) => {
         const seconds = stream?.Duration ?? info?.Format?.Duration;
         durationMs = typeof seconds === "number" && Number.isFinite(seconds) ? Math.round(seconds * 1000) : undefined;
       } catch { /* 元信息读取失败时节点使用默认尺寸 */ }
+      const projectAsset = recordCanvasProjectAsset({
+        ownerId: user.id,
+        canvasId,
+        kind: "video",
+        sourceType: "generation",
+        sourceId: task.id,
+        title: task.prompt.slice(0, 80) || "生成视频",
+        contentType: media.contentType,
+        size: media.size,
+        width,
+        height,
+        durationMs,
+        status: "ready",
+      });
       console.info(JSON.stringify({ type: "canvas_media_import", kind: "generation", userId: user.id, canvasId, taskId: task.id, width, height, durationMs, at: new Date().toISOString() }));
-      res.json({ mediaRef: { source: "generation", taskId: task.id }, title: task.prompt || "参考素材生成", fileName: media.fileName, width, height, durationMs });
+      res.json({ mediaRef: { source: "project-asset", projectAssetId: projectAsset.id }, projectAsset: publicCanvasProjectAsset(projectAsset), title: task.prompt || "参考素材生成", fileName: media.fileName, width, height, durationMs });
       return;
     }
     if (body.kind === "upload") {
-    const asset = await createCanvasAssetFromUpload({ source: { kind: "upload", uploadId: body.uploadId }, ownerId: user.id, canvasId });
-    console.info(JSON.stringify({ type: "canvas_media_import", kind: "upload", userId: user.id, canvasId, assetId: asset.id, at: new Date().toISOString() }));
-    res.status(201).json({ mediaRef: { source: "canvas-asset", assetId: asset.id }, title: asset.fileName, fileName: asset.fileName, status: asset.status });
-    return;
+      const v2 = canvasV2EnabledFor(user);
+      const asset = v2
+        ? prepareCanvasAssetFromUpload({ uploadId: body.uploadId, ownerId: user.id, canvasId })
+        : await createCanvasAssetFromUpload({ source: { kind: "upload", uploadId: body.uploadId }, ownerId: user.id, canvasId });
+      const projectAsset = recordCanvasProjectAsset({
+        ownerId: user.id, canvasId, canvasAssetId: asset.id, kind: canvasAssetKind(asset.contentType), sourceType: "canvas_asset", sourceId: asset.id,
+        title: asset.fileName, contentType: asset.contentType, size: asset.size, status: asset.status,
+      });
+      if (v2) void mediaQueue.add("copy-canvas-asset", { assetId: asset.id }, { jobId: `copy-${asset.id}`, attempts: 5, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } })
+        .catch((error) => console.warn(JSON.stringify({ type: "canvas_copy_queue_failed", at: new Date().toISOString(), userId: user.id, canvasId, assetId: asset.id, code: (error as { code?: string }).code ?? "unknown" })));
+      console.info(JSON.stringify({ type: "canvas_media_import", kind: "upload", userId: user.id, canvasId, assetId: asset.id, at: new Date().toISOString() }));
+      res.status(201).json({ mediaRef: { source: "project-asset", projectAssetId: projectAsset.id }, projectAsset: publicCanvasProjectAsset(projectAsset), title: asset.fileName, fileName: asset.fileName, status: asset.status });
+      return;
     }
     if (body.kind === "generated") {
       const media = users.readMedia(body.mediaId);
       if (!media || media.ownerId !== user.id || media.kind !== "generated" || media.status !== "ready") return res.status(404).json({ error: "生成图片不存在或尚未就绪" });
+      if (canvasV2EnabledFor(user)) {
+        const projectAsset = recordCanvasProjectAsset({ ownerId: user.id, canvasId, kind: "image", sourceType: "generated", sourceId: media.id, title: media.fileName, contentType: media.contentType, size: media.size, status: "ready" });
+        res.status(201).json({ mediaRef: { source: "project-asset", projectAssetId: projectAsset.id }, projectAsset: publicCanvasProjectAsset(projectAsset), title: media.fileName, fileName: media.fileName, status: projectAsset.status });
+        return;
+      }
       const asset = await createCanvasAssetFromUpload({ source: { kind: "object", objectKey: media.objectKey, fileName: media.fileName, contentType: media.contentType, ownerId: media.ownerId }, ownerId: user.id, canvasId });
+      const projectAsset = recordCanvasProjectAsset({
+        ownerId: user.id, canvasId, canvasAssetId: asset.id, kind: "image", sourceType: "canvas_asset", sourceId: asset.id,
+        title: asset.fileName, contentType: asset.contentType, size: asset.size, status: asset.status,
+      });
       console.info(JSON.stringify({ type: "canvas_media_import", kind: "generated", userId: user.id, canvasId, mediaId: media.id, assetId: asset.id, at: new Date().toISOString() }));
-      res.status(201).json({ mediaRef: { source: "canvas-asset", assetId: asset.id }, title: asset.fileName, fileName: asset.fileName, status: asset.status });
+      res.status(201).json({ mediaRef: { source: "project-asset", projectAssetId: projectAsset.id }, projectAsset: publicCanvasProjectAsset(projectAsset), title: asset.fileName, fileName: asset.fileName, status: asset.status });
+      return;
     }
+    if (body.kind === "user_asset") {
+      const asset = users.readUserAsset(body.assetId);
+      if (!asset || asset.ownerId !== user.id || asset.status !== "Active") return res.status(404).json({ error: "素材不存在或尚未就绪" });
+      const source = asset.uploadId ? users.readUpload(asset.uploadId) : null;
+      if (!source || source.ownerId !== user.id || source.status !== "ready") return res.status(409).json({ error: "该素材缺少可供画布使用的原始文件" });
+      const projectAsset = recordCanvasProjectAsset({
+        ownerId: user.id, canvasId, kind: canvasAssetKind(source.contentType), sourceType: "user_asset", sourceId: asset.id,
+        title: asset.name, contentType: source.contentType, size: source.size, status: "ready",
+      });
+      res.status(201).json({ mediaRef: { source: "project-asset", projectAssetId: projectAsset.id }, projectAsset: publicCanvasProjectAsset(projectAsset), title: projectAsset.title, fileName: source.fileName, status: projectAsset.status });
+    }
+  } catch (error) { respondError(res, error, 502); }
+});
+
+app.get("/api/canvases/:id/assets", requireAuth, async (req, res) => {
+  try {
+    const user = res.locals.user as SessionUser;
+    const canvasId = param(req.params.id);
+    if (!accessibleCanvas(canvasId, user.id)) return res.status(404).json({ error: "画布不存在" });
+    const query = z.object({ before: z.coerce.number().int().positive().optional(), limit: z.coerce.number().int().min(1).max(100).default(50) }).parse(req.query);
+    const items = users.listCanvasProjectAssets(canvasId, user.id, query.limit + 1, query.before ?? Number.MAX_SAFE_INTEGER);
+    res.json({ Items: items.slice(0, query.limit).map(publicCanvasProjectAsset), HasMore: items.length > query.limit, NextBefore: items.at(query.limit - 1)?.createdAt });
+  } catch (error) { respondError(res, error, 502); }
+});
+
+app.post("/api/canvases/:id/assets/import", requireAuth, (req, res) => {
+  res.redirect(307, `/api/canvases/${encodeURIComponent(param(req.params.id))}/media`);
+});
+
+app.get("/api/canvas-project-assets/:id/media", requireAuth, createCanvasProjectMediaHandler({
+  readAsset: (id) => users.readCanvasProjectAsset(id),
+  canAccessCanvas: (canvasId, userId) => Boolean(accessibleCanvas(canvasId, userId)),
+  signedUrl: canvasProjectAssetSignedUrl,
+  cacheControl: previewRedirectCacheHeader,
+}));
+
+const canvasJobBaseSchema = z.object({ nodeId: z.string().min(1).max(120), revision: z.number().int().min(0) });
+const canvasJobCreateSchema = z.discriminatedUnion("kind", [
+  canvasJobBaseSchema.extend({ kind: z.literal("text"), payload: z.object({ instruction: z.string().trim().min(1).max(20_000) }) }),
+  canvasJobBaseSchema.extend({ kind: z.literal("image"), payload: z.object({ prompt: z.string().trim().min(1).max(20_000), model: z.string().min(1).max(120), ratio: z.string().min(1).max(20), resolution: z.string().min(1).max(20), referenceAssetIds: z.array(z.string().min(1).max(180)).max(30).default([]) }) }),
+  canvasJobBaseSchema.extend({ kind: z.literal("character_tool"), payload: z.object({ tool: z.enum(["turnaround", "closeup", "expressions", "portrait"]), prompt: z.string().trim().min(1).max(20_000), model: z.string().min(1).max(120), ratio: z.string().min(1).max(20), resolution: z.string().min(1).max(20), referenceAssetIds: z.array(z.string().min(1).max(180)).max(30).default([]) }) }),
+  canvasJobBaseSchema.extend({ kind: z.literal("video"), payload: z.object({ generation: z.record(z.unknown()), references: z.array(z.object({ assetId: z.string().min(1).max(180), role: z.enum(["reference_image", "reference_video", "reference_audio", "first_frame", "last_frame"]) })).max(50).default([]) }) }),
+]);
+
+const canvasContextForNode = (canvasId: string, ownerId: string, nodeId: string) => {
+  const project = accessibleCanvas(canvasId, ownerId);
+  if (!project) return null;
+  const parsed = parseCanvasDocumentSafe(project.documentJson);
+  const document = parsed ? toCanvasDocumentV2(parsed) : null;
+  const target = document?.nodes.find((node) => node.id === nodeId);
+  if (!document || !target) return null;
+  const sources = document.connections
+    .filter((edge) => edge.target === nodeId)
+    .map((edge) => document.nodes.find((node) => node.id === edge.source))
+    .filter((node): node is NonNullable<typeof node> => Boolean(node));
+  const text = sources.filter((node) => node.type === "text").map((node) => node.data.markdown?.trim()).filter(Boolean).join("\n\n");
+  const assetIds = sources.map((node) => node.data.projectAssetId).filter((value): value is string => typeof value === "string");
+  return { project, document, target, text, assetIds };
+};
+
+const ownedCanvasProjectAssets = (canvasId: string, ownerId: string, ids: string[]) => [...new Set(ids)].map((id) => {
+  const asset = users.readCanvasProjectAsset(id);
+  if (!asset || asset.canvasId !== canvasId || asset.ownerId !== ownerId || asset.status !== "ready") throw new Error("参考素材不存在或尚未就绪");
+  return asset;
+});
+
+const characterToolPrompts = {
+  turnaround: "保持同一角色身份、服装、发型与身体比例，生成正面、侧面、背面三视图；使用中性站姿、统一尺度和简洁背景，禁止重复人物与身份漂移。",
+  closeup: "保持同一角色身份与关键五官，生成具有清晰眼神、皮肤质感和可控景深的面部特写；不得改变年龄、发型或服装设定。",
+  expressions: "保持同一角色身份与构图尺度，生成 3×3 表情九宫格，覆盖喜悦、悲伤、愤怒、惊讶、恐惧、厌恶、平静、疑惑与坚定；每格只改变表情。",
+  portrait: "保持同一角色身份和关键造型，生成可用于后续镜头引用的高一致性人物肖像，轮廓清楚、面部无遮挡、光线自然。",
+} as const;
+
+app.post("/api/canvases/:id/jobs", requireAuth, async (req, res) => {
+  try {
+    const body = canvasJobCreateSchema.parse(req.body);
+    const user = res.locals.user as SessionUser;
+    if (!canvasV2EnabledFor(user)) return res.status(404).json({ error: "Canvas V2 尚未启用" });
+    const canvasId = param(req.params.id);
+    const context = canvasContextForNode(canvasId, user.id, body.nodeId);
+    if (!context) return res.status(404).json({ error: "画布或目标节点不存在" });
+    if (context.project.revision !== body.revision) return res.status(409).json({ error: "请先保存画布的最新改动", currentRevision: context.project.revision });
+    const now = Date.now();
+    const canvasJob: CanvasJob = {
+      id: `canvas-job-${crypto.randomUUID()}`, ownerId: user.id, canvasId, nodeId: body.nodeId, kind: body.kind,
+      status: "queued", payload: body.payload, partialText: "", createdAt: now, updatedAt: now,
+    };
+
+    if (body.kind === "text") {
+      users.createCanvasJob(canvasJob);
+      try {
+        await canvasQueue.add("text", { canvasJobId: canvasJob.id, kind: "text", payload: { instruction: body.payload.instruction, currentText: context.target.data.markdown ?? "", context: context.text } }, { jobId: canvasJob.id, attempts: 3, backoff: { type: "exponential", delay: 3000 }, removeOnComplete: { age: 7 * 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } });
+      } catch (error) { users.updateCanvasJob(canvasJob.id, { status: "failed", error: "任务进入文本队列失败" }); throw error; }
+      return res.status(202).json(publicCanvasJob(canvasJob));
+    }
+
+    if (body.kind === "image" || body.kind === "character_tool") {
+      const references = ownedCanvasProjectAssets(canvasId, user.id, [...context.assetIds, ...body.payload.referenceAssetIds]);
+      if (!users.createCanvasImageJobWithinLimit(canvasJob, 2)) return res.status(429).json({ error: "你已有 2 个图片任务正在处理，请等待其中一个完成" });
+      const prompt = [context.text, body.kind === "character_tool" ? characterToolPrompts[body.payload.tool] : "", body.payload.prompt].filter(Boolean).join("\n\n");
+      try {
+        await canvasQueue.add(body.kind, { canvasJobId: canvasJob.id, kind: body.kind, payload: { prompt, model: body.payload.model, ratio: body.payload.ratio, resolution: body.payload.resolution, referenceAssetIds: references.map((asset) => asset.id) } }, { jobId: canvasJob.id, attempts: 3, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: { age: 7 * 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } });
+      } catch (error) { users.updateCanvasJob(canvasJob.id, { status: "failed", error: "任务进入图片队列失败" }); throw error; }
+      return res.status(202).json(publicCanvasJob(canvasJob));
+    }
+
+    const references = body.payload.references.length ? body.payload.references : ownedCanvasProjectAssets(canvasId, user.id, context.assetIds).map((asset) => ({ assetId: asset.id, role: asset.kind === "video" ? "reference_video" as const : asset.kind === "audio" ? "reference_audio" as const : "reference_image" as const }));
+    const referenceAssets = ownedCanvasProjectAssets(canvasId, user.id, references.map((item) => item.assetId));
+    const byId = new Map(referenceAssets.map((asset) => [asset.id, asset]));
+    const generationAssets = references.map((reference) => {
+      const asset = byId.get(reference.assetId)!;
+      const type = asset.kind;
+      if ((reference.role === "first_frame" || reference.role === "last_frame") && type !== "image") throw new Error("首帧和尾帧只能引用图片素材");
+      return { id: asset.id, type, role: reference.role, url: canvasProjectAssetProviderUrl(asset), name: asset.title };
+    });
+    const input = validateGeneration({ ...body.payload.generation, prompt: [context.text, String(body.payload.generation.prompt ?? "")].filter(Boolean).join("\n\n"), assets: generationAssets });
+    const taskId = crypto.randomUUID();
+    const task: StoredTask = { id: taskId, ownerId: user.id, visibility: "private", status: "queued", mediaStatus: "none", mediaRevision: 0, prompt: input.prompt, model: input.model, mode: input.mode, ratio: input.ratio, resolution: input.resolution, duration: input.duration, request: input, createdAt: now, updatedAt: now };
+    if (!users.createTaskWithinLimit(task, config.maxActiveGenerationsPerUser)) return res.status(429).json({ error: `你已有 ${config.maxActiveGenerationsPerUser} 个任务正在生成，请稍后再试` });
+    users.createCanvasJob({ ...canvasJob, providerTaskId: taskId });
+    await saveTask(task);
+    try {
+      await generationQueue.add("generate", { input }, { jobId: taskId, attempts: 4, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: { age: 7 * 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } });
+    } catch (error) {
+      users.updateCanvasJob(canvasJob.id, { status: "failed", error: "任务进入生成队列失败" });
+      await saveTask({ ...task, status: "failed", error: "任务进入生成队列失败", updatedAt: Date.now() });
+      throw error;
+    }
+    res.status(202).json(publicCanvasJob(users.readCanvasJob(canvasJob.id)!));
+  } catch (error) { respondError(res, error, 502); }
+});
+
+app.get("/api/canvases/:id/jobs", requireAuth, async (req, res) => {
+  try {
+    const user = res.locals.user as SessionUser;
+    const canvasId = param(req.params.id);
+    if (!accessibleCanvas(canvasId, user.id)) return res.status(404).json({ error: "画布不存在" });
+    const query = z.object({ updatedAfter: z.coerce.number().int().nonnegative().default(0) }).parse(req.query);
+    res.json({ Items: users.listCanvasJobs(canvasId, user.id, query.updatedAfter).map(publicCanvasJob) });
+  } catch (error) { respondError(res, error, 502); }
+});
+
+app.get("/api/canvases/:id/jobs/:jobId", requireAuth, async (req, res) => {
+  const user = res.locals.user as SessionUser;
+  const canvasId = param(req.params.id);
+  const job = users.readCanvasJob(param(req.params.jobId));
+  if (!job || job.canvasId !== canvasId || job.ownerId !== user.id || !accessibleCanvas(canvasId, user.id)) return res.status(404).json({ error: "画布任务不存在" });
+  res.json(publicCanvasJob(job));
+});
+
+app.get("/api/canvases/:id/events", requireAuth, async (req, res) => {
+  const user = res.locals.user as SessionUser;
+  const canvasId = param(req.params.id);
+  if (!accessibleCanvas(canvasId, user.id)) return res.status(404).json({ error: "画布不存在" });
+  const updatedAfter = Number(req.header("last-event-id") ?? req.query.updatedAfter ?? 0) || 0;
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+  const subscriber = redis.duplicate();
+  const channel = `canvas:events:${canvasId}`;
+  const heartbeat = setInterval(() => res.write(": keepalive\n\n"), 15_000);
+  let closed = false;
+  req.on("close", () => {
+    closed = true; clearInterval(heartbeat);
+    void subscriber.unsubscribe(channel).finally(() => subscriber.quit());
+  });
+  subscriber.on("message", (_channel, message) => {
+    try {
+      const event = JSON.parse(message) as { type?: string; job?: CanvasJob };
+      if (event.job?.ownerId === user.id) res.write(`id: ${event.job.updatedAt}\nevent: ${event.type ?? "message"}\ndata: ${JSON.stringify(publicCanvasJob(event.job))}\n\n`);
+    } catch { /* 丢弃无法解析的内部事件 */ }
+  });
+  await subscriber.subscribe(channel);
+  if (closed) return;
+  // Subscribe before replaying durable rows so an event cannot fall into the
+  // gap between the SQLite snapshot and Redis subscription. Replaying the
+  // previous millisecond may duplicate an event but can never lose one.
+  for (const job of users.listCanvasJobs(canvasId, user.id, Math.max(0, updatedAfter - 1))) res.write(`id: ${job.updatedAt}\nevent: canvas_job\ndata: ${JSON.stringify(publicCanvasJob(job))}\n\n`);
+});
+
+app.post("/api/canvases/:id/jobs/:jobId/cancel", requireAuth, async (req, res) => {
+  try {
+    const user = res.locals.user as SessionUser;
+    const canvasId = param(req.params.id);
+    const job = users.readCanvasJob(param(req.params.jobId));
+    if (!job || job.canvasId !== canvasId || job.ownerId !== user.id || !accessibleCanvas(canvasId, user.id)) return res.status(404).json({ error: "画布任务不存在" });
+    if (["succeeded", "failed", "cancelled"].includes(job.status)) return res.json(publicCanvasJob(job));
+    const cancelled = users.updateCanvasJob(job.id, { status: "cancelled", cancelledAt: Date.now(), error: null })!;
+    await canvasQueue.getJob(job.id).then((queued) => queued?.remove()).catch(() => undefined);
+    if (job.providerTaskId) {
+      const task = await readTask(job.providerTaskId, true);
+      if (task && task.ownerId === user.id) {
+        await saveTask({ ...task, deletedAt: Date.now(), updatedAt: Date.now() });
+        await generationQueue.getJob(task.id).then((queued) => queued?.remove()).catch(() => undefined);
+      }
+    }
+    await redis.publish(`canvas:events:${canvasId}`, JSON.stringify({ type: "canvas_job", job: cancelled }));
+    res.json(publicCanvasJob(cancelled));
+  } catch (error) { respondError(res, error, 502); }
+});
+
+const montageClipSchema = z.object({
+  id: z.string().min(1).max(160),
+  projectAssetId: z.string().min(1).max(180),
+  startMs: z.number().int().nonnegative().max(600_000),
+  durationMs: z.number().int().positive().max(600_000),
+  trimStartMs: z.number().int().nonnegative().default(0),
+  trimEndMs: z.number().int().nonnegative().default(0),
+  muted: z.boolean().default(false),
+});
+const montageTimelineSchema = z.object({
+  video: z.array(montageClipSchema).max(500),
+  audio: z.array(montageClipSchema.omit({ muted: true })).max(100).default([]),
+  settings: z.object({ width: z.number().int().min(320).max(1920), height: z.number().int().min(240).max(1080), fps: z.number().int().min(1).max(30) }),
+}).superRefine((timeline, context) => {
+  const effectiveDuration = (clip: { durationMs: number; trimStartMs: number; trimEndMs: number }) => clip.durationMs - clip.trimStartMs - clip.trimEndMs;
+  const end = Math.max(0, ...timeline.video.map((clip) => clip.startMs + effectiveDuration(clip)), ...timeline.audio.map((clip) => clip.startMs + effectiveDuration(clip)));
+  if (end > 600_000) context.addIssue({ code: z.ZodIssueCode.custom, message: "Montage 最长支持 10 分钟" });
+  if ([...timeline.video, ...timeline.audio].some((clip) => clip.trimStartMs + clip.trimEndMs >= clip.durationMs)) context.addIssue({ code: z.ZodIssueCode.custom, message: "素材裁剪范围无效" });
+});
+
+const validateMontageAssets = (canvasId: string, ownerId: string, timeline: z.infer<typeof montageTimelineSchema>) => {
+  const video = ownedCanvasProjectAssets(canvasId, ownerId, timeline.video.map((clip) => clip.projectAssetId));
+  if (video.some((asset) => asset.kind !== "video")) throw new Error("视频轨只能使用视频素材");
+  const audio = ownedCanvasProjectAssets(canvasId, ownerId, timeline.audio.map((clip) => clip.projectAssetId));
+  if (audio.some((asset) => asset.kind !== "audio")) throw new Error("音频轨只能使用音频素材");
+};
+
+app.post("/api/canvases/:id/montages", requireAuth, async (req, res) => {
+  try {
+    const user = res.locals.user as SessionUser;
+    const canvasId = param(req.params.id);
+    if (!accessibleCanvas(canvasId, user.id)) return res.status(404).json({ error: "画布不存在" });
+    const timeline = montageTimelineSchema.parse(req.body.timeline);
+    validateMontageAssets(canvasId, user.id, timeline);
+    const now = Date.now();
+    const montage = { id: `canvas-montage-${crypto.randomUUID()}`, ownerId: user.id, canvasId, revision: 0, timeline, createdAt: now, updatedAt: now };
+    users.createCanvasMontage(montage);
+    res.status(201).json(montage);
+  } catch (error) { respondError(res, error, 502); }
+});
+
+app.get("/api/canvases/:id/montages", requireAuth, async (req, res) => {
+  const user = res.locals.user as SessionUser;
+  const canvasId = param(req.params.id);
+  if (!accessibleCanvas(canvasId, user.id)) return res.status(404).json({ error: "画布不存在" });
+  res.json({ Items: users.listCanvasMontages(canvasId, user.id) });
+});
+
+app.put("/api/canvases/:id/montages/:montageId", requireAuth, async (req, res) => {
+  try {
+    const user = res.locals.user as SessionUser;
+    const canvasId = param(req.params.id);
+    const montage = users.readCanvasMontage(param(req.params.montageId));
+    if (!montage || montage.canvasId !== canvasId || montage.ownerId !== user.id || !accessibleCanvas(canvasId, user.id)) return res.status(404).json({ error: "Montage 不存在" });
+    const body = z.object({ revision: z.number().int().nonnegative(), timeline: montageTimelineSchema }).parse(req.body);
+    validateMontageAssets(canvasId, user.id, body.timeline);
+    const updated = users.updateCanvasMontage(montage.id, user.id, body.revision, body.timeline);
+    if (!updated) return res.status(409).json({ error: "Montage 已在其他窗口被修改", currentRevision: users.readCanvasMontage(montage.id)?.revision });
+    res.json(updated);
+  } catch (error) { respondError(res, error, 502); }
+});
+
+const canvasExportPartSize = 16 * 1024 * 1024;
+app.post("/api/canvases/:id/montages/:montageId/exports", requireAuth, async (req, res) => {
+  try {
+    const user = res.locals.user as SessionUser;
+    const canvasId = param(req.params.id);
+    const montage = users.readCanvasMontage(param(req.params.montageId));
+    if (!montage || montage.canvasId !== canvasId || montage.ownerId !== user.id || !accessibleCanvas(canvasId, user.id)) return res.status(404).json({ error: "Montage 不存在" });
+    const { fileSize } = z.object({ fileSize: z.number().int().positive().max(8 * 1024 * 1024 * 1024) }).parse(req.body);
+    const exportId = `canvas-export-${crypto.randomUUID()}`;
+    const objectKey = canvasExportObjectKey(user.id, canvasId, exportId);
+    const tosUploadId = await createMultipartUpload(objectKey, "video/mp4", "montage.mp4");
+    const now = Date.now();
+    const record = users.createCanvasExport({ id: exportId, ownerId: user.id, canvasId, montageId: montage.id, status: "uploading" as const, objectKey, tosUploadId, parts: [], createdAt: now, updatedAt: now });
+    const partCount = Math.ceil(fileSize / canvasExportPartSize);
+    const firstParts = Array.from({ length: Math.min(partCount, 20) }, (_, index) => ({ partNumber: index + 1, url: signUploadPart(objectKey, tosUploadId, index + 1) }));
+    res.status(201).json({ id: record.id, status: record.status, partSize: canvasExportPartSize, partCount, parts: firstParts });
+  } catch (error) { respondError(res, error, 502); }
+});
+
+app.post("/api/canvases/:id/exports/:exportId/parts/sign", requireAuth, async (req, res) => {
+  try {
+    const user = res.locals.user as SessionUser;
+    const canvasId = param(req.params.id);
+    const record = users.readCanvasExport(param(req.params.exportId));
+    if (!record || record.canvasId !== canvasId || record.ownerId !== user.id || record.status !== "uploading" || !record.tosUploadId || !accessibleCanvas(canvasId, user.id)) return res.status(404).json({ error: "导出任务不存在" });
+    const { partNumbers } = z.object({ partNumbers: z.array(z.number().int().min(1).max(10_000)).min(1).max(50) }).parse(req.body);
+    res.json({ parts: [...new Set(partNumbers)].map((partNumber) => ({ partNumber, url: signUploadPart(record.objectKey, record.tosUploadId!, partNumber) })) });
+  } catch (error) { respondError(res, error, 502); }
+});
+
+app.post("/api/canvases/:id/exports/:exportId/complete", requireAuth, async (req, res) => {
+  try {
+    const user = res.locals.user as SessionUser;
+    const canvasId = param(req.params.id);
+    const record = users.readCanvasExport(param(req.params.exportId));
+    if (!record || record.canvasId !== canvasId || record.ownerId !== user.id || record.status !== "uploading" || !record.tosUploadId || !accessibleCanvas(canvasId, user.id)) return res.status(404).json({ error: "导出任务不存在" });
+    const body = z.object({ parts: z.array(z.object({ partNumber: z.number().int().min(1).max(10_000), etag: z.string().trim().min(1).max(200) })).min(1).max(10_000) }).parse(req.body);
+    const numbers = body.parts.map((part) => part.partNumber);
+    if (new Set(numbers).size !== numbers.length || numbers.some((number, index) => number !== index + 1)) throw new Error("导出分片必须从 1 开始连续且不可重复");
+    users.updateCanvasExport(record.id, { status: "verifying", parts: body.parts, error: null });
+    try {
+      await completeMultipartUpload(record.objectKey, record.tosUploadId, body.parts.map((part) => ({ partNumber: part.partNumber, eTag: part.etag.replace(/^\"|\"$/g, "") })));
+      const head = await verifyStoredObject(record.objectKey, "video/mp4");
+      const headData = head.data as unknown as { contentLength?: number };
+      const headers = head.headers as Record<string, string | undefined>;
+      const size = Number(headData.contentLength ?? headers["content-length"] ?? 0);
+      const now = Date.now();
+      const montage = users.readCanvasMontage(record.montageId);
+      const timeline = montageTimelineSchema.parse(montage?.timeline);
+      const durationMs = Math.max(0, ...timeline.video.map((clip) => clip.startMs + clip.durationMs - clip.trimStartMs - clip.trimEndMs));
+      const projectAsset = recordCanvasProjectAsset({ ownerId: user.id, canvasId, kind: "video", sourceType: "montage", sourceId: record.id, title: "Montage 导出", contentType: "video/mp4", size, width: timeline.settings.width, height: timeline.settings.height, durationMs, status: "ready" });
+      const completed = users.updateCanvasExport(record.id, { status: "ready", parts: body.parts, resultAssetId: projectAsset.id, error: null })!;
+      res.json({ id: completed.id, status: completed.status, projectAsset: publicCanvasProjectAsset(projectAsset) });
+    } catch (error) {
+      users.updateCanvasExport(record.id, { status: "failed", error: error instanceof Error ? error.message.slice(0, 500) : "导出校验失败" });
+      throw error;
+    }
+  } catch (error) { respondError(res, error, 502); }
+});
+
+app.delete("/api/canvases/:id/exports/:exportId", requireAuth, async (req, res) => {
+  try {
+    const user = res.locals.user as SessionUser;
+    const canvasId = param(req.params.id);
+    const record = users.readCanvasExport(param(req.params.exportId));
+    if (!record || record.canvasId !== canvasId || record.ownerId !== user.id || !accessibleCanvas(canvasId, user.id)) return res.status(404).json({ error: "导出任务不存在" });
+    if (record.status === "ready") return res.status(409).json({ error: "已完成的导出请从项目资产中管理" });
+    if (record.tosUploadId) await abortMultipartUpload(record.objectKey, record.tosUploadId).catch(() => undefined);
+    users.updateCanvasExport(record.id, { status: "cancelled", error: null });
+    res.status(204).end();
   } catch (error) { respondError(res, error, 502); }
 });
 
@@ -892,7 +1331,7 @@ app.get("/api/health/ready", async (_req, res) => {
   try {
     await redis.ping();
     if (!users.healthCheck()) throw new Error("database unavailable");
-    await Promise.all([generationQueue.getJobCounts("wait", "active"), mediaQueue.getJobCounts("wait", "active"), assetQueue.getJobCounts("wait", "active")]);
+    await Promise.all([generationQueue.getJobCounts("wait", "active"), mediaQueue.getJobCounts("wait", "active"), assetQueue.getJobCounts("wait", "active"), canvasQueue.getJobCounts("wait", "active")]);
     if (tosEnabled()) {
       const checkedAt = latestTosHealth.checkedAt ? Date.parse(latestTosHealth.checkedAt) : 0;
       if (!checkedAt || checkedAt < Date.now() - 30_000) await probeTos();

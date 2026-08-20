@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { OpenRouterError, OpenRouterKeyPool, parseOpenRouterImages } from "./openrouter.js";
+import { OpenRouterError, OpenRouterKeyPool, parseOpenRouterImages, parseOpenRouterTextDelta } from "./openrouter.js";
 import { computeImageSize, IMAGE_MODELS, imageModelById } from "./image-models.js";
 
 describe("OpenRouterKeyPool", () => {
@@ -91,6 +91,17 @@ describe("parseOpenRouterImages", () => {
 
   it("returns empty when no image is present", () => {
     expect(parseOpenRouterImages({ choices: [{ message: { content: "text only" } }] })).toEqual([]);
+  });
+});
+
+describe("parseOpenRouterTextDelta", () => {
+  it("parses string and structured streaming deltas", () => {
+    expect(parseOpenRouterTextDelta(JSON.stringify({ choices: [{ delta: { content: "镜头" } }] }))).toBe("镜头");
+    expect(parseOpenRouterTextDelta(JSON.stringify({ choices: [{ delta: { content: [{ type: "text", text: "向前" }] } }] }))).toBe("向前");
+  });
+
+  it("surfaces provider stream errors", () => {
+    expect(() => parseOpenRouterTextDelta(JSON.stringify({ error: { message: "stream failed" } }))).toThrow("stream failed");
   });
 });
 

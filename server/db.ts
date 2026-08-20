@@ -103,6 +103,69 @@ export type CanvasAsset = {
   deletedAt?: number;
 };
 
+export type CanvasProjectAsset = {
+  id: string;
+  ownerId: string;
+  canvasId: string;
+  canvasAssetId?: string;
+  kind: "image" | "video" | "audio";
+  sourceType: "canvas_asset" | "generation" | "generated" | "user_asset" | "montage";
+  sourceId: string;
+  title: string;
+  contentType: string;
+  size: number;
+  width?: number;
+  height?: number;
+  durationMs?: number;
+  status: "copying" | "ready" | "failed";
+  createdAt: number;
+  updatedAt: number;
+  deletedAt?: number;
+};
+
+export type CanvasJob = {
+  id: string;
+  ownerId: string;
+  canvasId: string;
+  nodeId: string;
+  kind: "text" | "image" | "video" | "character_tool";
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  payload: unknown;
+  resultAssetId?: string;
+  providerTaskId?: string;
+  partialText: string;
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+  cancelledAt?: number;
+};
+
+export type CanvasMontage = {
+  id: string;
+  ownerId: string;
+  canvasId: string;
+  revision: number;
+  timeline: unknown;
+  createdAt: number;
+  updatedAt: number;
+  deletedAt?: number;
+};
+
+export type CanvasExport = {
+  id: string;
+  ownerId: string;
+  canvasId: string;
+  montageId: string;
+  status: "uploading" | "verifying" | "ready" | "failed" | "cancelled";
+  objectKey: string;
+  tosUploadId?: string;
+  parts: { partNumber: number; etag: string }[];
+  resultAssetId?: string;
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
 export type CanvasProject = {
   id: string;
   ownerId: string;
@@ -158,6 +221,30 @@ type CanvasAssetRow = {
   status: "copying" | "ready" | "failed"; created_at: number; updated_at: number; deleted_at: number | null;
 };
 
+type CanvasProjectAssetRow = {
+  id: string; owner_id: string; canvas_id: string; canvas_asset_id: string | null;
+  kind: CanvasProjectAsset["kind"]; source_type: CanvasProjectAsset["sourceType"]; source_id: string;
+  title: string; content_type: string; size: number; width: number | null; height: number | null;
+  duration_ms: number | null; status: CanvasProjectAsset["status"]; created_at: number; updated_at: number; deleted_at: number | null;
+};
+
+type CanvasJobRow = {
+  id: string; owner_id: string; canvas_id: string; node_id: string; kind: CanvasJob["kind"];
+  status: CanvasJob["status"]; payload_json: string; result_asset_id: string | null; provider_task_id: string | null;
+  partial_text: string; error: string | null; created_at: number; updated_at: number; cancelled_at: number | null;
+};
+
+type CanvasMontageRow = {
+  id: string; owner_id: string; canvas_id: string; revision: number; timeline_json: string;
+  created_at: number; updated_at: number; deleted_at: number | null;
+};
+
+type CanvasExportRow = {
+  id: string; owner_id: string; canvas_id: string; montage_id: string; status: CanvasExport["status"];
+  object_key: string; tos_upload_id: string | null; parts_json: string; result_asset_id: string | null;
+  error: string | null; created_at: number; updated_at: number;
+};
+
 const mapUser = (row?: UserRow): User | null => row ? ({
   id: row.id, feishuOpenId: row.feishu_open_id, feishuUnionId: row.feishu_union_id,
   tenantKey: row.tenant_key, email: row.email, name: row.name, avatarUrl: row.avatar_url,
@@ -199,6 +286,34 @@ const mapCanvasAsset = (row?: CanvasAssetRow): CanvasAsset | null => row ? ({
   objectKey: row.object_key, fileName: row.file_name, contentType: row.content_type, size: row.size,
   etag: row.etag, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at,
   deletedAt: row.deleted_at ?? undefined
+}) : null;
+
+const mapCanvasProjectAsset = (row?: CanvasProjectAssetRow): CanvasProjectAsset | null => row ? ({
+  id: row.id, ownerId: row.owner_id, canvasId: row.canvas_id, canvasAssetId: row.canvas_asset_id ?? undefined,
+  kind: row.kind, sourceType: row.source_type, sourceId: row.source_id, title: row.title,
+  contentType: row.content_type, size: row.size, width: row.width ?? undefined, height: row.height ?? undefined,
+  durationMs: row.duration_ms ?? undefined, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at,
+  deletedAt: row.deleted_at ?? undefined,
+}) : null;
+
+const mapCanvasJob = (row?: CanvasJobRow): CanvasJob | null => row ? ({
+  id: row.id, ownerId: row.owner_id, canvasId: row.canvas_id, nodeId: row.node_id, kind: row.kind, status: row.status,
+  payload: JSON.parse(row.payload_json), resultAssetId: row.result_asset_id ?? undefined, providerTaskId: row.provider_task_id ?? undefined,
+  partialText: row.partial_text, error: row.error ?? undefined, createdAt: row.created_at, updatedAt: row.updated_at,
+  cancelledAt: row.cancelled_at ?? undefined,
+}) : null;
+
+const mapCanvasMontage = (row?: CanvasMontageRow): CanvasMontage | null => row ? ({
+  id: row.id, ownerId: row.owner_id, canvasId: row.canvas_id, revision: row.revision,
+  timeline: JSON.parse(row.timeline_json), createdAt: row.created_at, updatedAt: row.updated_at,
+  deletedAt: row.deleted_at ?? undefined,
+}) : null;
+
+const mapCanvasExport = (row?: CanvasExportRow): CanvasExport | null => row ? ({
+  id: row.id, ownerId: row.owner_id, canvasId: row.canvas_id, montageId: row.montage_id, status: row.status,
+  objectKey: row.object_key, tosUploadId: row.tos_upload_id ?? undefined, parts: JSON.parse(row.parts_json),
+  resultAssetId: row.result_asset_id ?? undefined, error: row.error ?? undefined,
+  createdAt: row.created_at, updatedAt: row.updated_at,
 }) : null;
 
 export class UserStore {
@@ -516,6 +631,148 @@ export class UserStore {
 
   listCanvasAssetsByCanvas(canvasId: string) {
     return (this.database.prepare("SELECT * FROM canvas_assets WHERE canvas_id = ? AND deleted_at IS NULL AND status = 'ready' ORDER BY created_at ASC").all(canvasId) as CanvasAssetRow[]).map((row) => mapCanvasAsset(row)!);
+  }
+
+  copyingCanvasAssets(limit = 100) {
+    return (this.database.prepare("SELECT * FROM canvas_assets WHERE deleted_at IS NULL AND status = 'copying' ORDER BY updated_at ASC LIMIT ?").all(limit) as CanvasAssetRow[]).map((row) => mapCanvasAsset(row)!);
+  }
+
+  upsertCanvasProjectAsset(asset: CanvasProjectAsset) {
+    this.database.prepare(`
+      INSERT INTO canvas_project_assets
+        (id, owner_id, canvas_id, canvas_asset_id, kind, source_type, source_id, title, content_type, size, width, height, duration_ms, status, created_at, updated_at, deleted_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(canvas_id, source_type, source_id) WHERE deleted_at IS NULL DO UPDATE SET
+        canvas_asset_id=excluded.canvas_asset_id, title=excluded.title, content_type=excluded.content_type,
+        size=excluded.size, width=excluded.width, height=excluded.height, duration_ms=excluded.duration_ms,
+        status=excluded.status, updated_at=excluded.updated_at
+    `).run(
+      asset.id, asset.ownerId, asset.canvasId, asset.canvasAssetId ?? null, asset.kind, asset.sourceType, asset.sourceId,
+      asset.title, asset.contentType, asset.size, asset.width ?? null, asset.height ?? null, asset.durationMs ?? null,
+      asset.status, asset.createdAt, asset.updatedAt, asset.deletedAt ?? null,
+    );
+    return this.readCanvasProjectAssetBySource(asset.canvasId, asset.sourceType, asset.sourceId)!;
+  }
+
+  readCanvasProjectAsset(id: string) {
+    return mapCanvasProjectAsset(this.database.prepare("SELECT * FROM canvas_project_assets WHERE id = ? AND deleted_at IS NULL").get(id) as CanvasProjectAssetRow | undefined);
+  }
+
+  readCanvasProjectAssetBySource(canvasId: string, sourceType: CanvasProjectAsset["sourceType"], sourceId: string) {
+    return mapCanvasProjectAsset(this.database.prepare("SELECT * FROM canvas_project_assets WHERE canvas_id = ? AND source_type = ? AND source_id = ? AND deleted_at IS NULL").get(canvasId, sourceType, sourceId) as CanvasProjectAssetRow | undefined);
+  }
+
+  updateCanvasProjectAssetByCanvasAsset(canvasAssetId: string, patch: Pick<CanvasProjectAsset, "status" | "size" | "contentType">) {
+    this.database.prepare("UPDATE canvas_project_assets SET status = ?, size = ?, content_type = ?, updated_at = ? WHERE canvas_asset_id = ? AND deleted_at IS NULL")
+      .run(patch.status, patch.size, patch.contentType, Date.now(), canvasAssetId);
+  }
+
+  listCanvasProjectAssets(canvasId: string, ownerId: string, limit = 100, before = Number.MAX_SAFE_INTEGER) {
+    return (this.database.prepare(`
+      SELECT * FROM canvas_project_assets
+      WHERE canvas_id = ? AND owner_id = ? AND deleted_at IS NULL AND created_at < ?
+      ORDER BY created_at DESC LIMIT ?
+    `).all(canvasId, ownerId, before, limit) as CanvasProjectAssetRow[]).map((row) => mapCanvasProjectAsset(row)!);
+  }
+
+  createCanvasJob(job: CanvasJob) {
+    this.database.prepare(`
+      INSERT INTO canvas_jobs
+        (id, owner_id, canvas_id, node_id, kind, status, payload_json, result_asset_id, provider_task_id, partial_text, error, created_at, updated_at, cancelled_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(job.id, job.ownerId, job.canvasId, job.nodeId, job.kind, job.status, JSON.stringify(job.payload ?? {}), job.resultAssetId ?? null, job.providerTaskId ?? null, job.partialText, job.error ?? null, job.createdAt, job.updatedAt, job.cancelledAt ?? null);
+    return job;
+  }
+
+  createCanvasImageJobWithinLimit(job: CanvasJob, limit: number) {
+    return this.database.transaction(() => {
+      const active = (this.database.prepare(`
+        SELECT COUNT(*) AS count FROM canvas_jobs
+        WHERE owner_id = ? AND kind IN ('image', 'character_tool') AND status IN ('queued', 'running')
+      `).get(job.ownerId) as { count: number }).count;
+      if (active >= limit) return false;
+      this.createCanvasJob(job);
+      return true;
+    })();
+  }
+
+  readCanvasJob(id: string) {
+    return mapCanvasJob(this.database.prepare("SELECT * FROM canvas_jobs WHERE id = ?").get(id) as CanvasJobRow | undefined);
+  }
+
+  listCanvasJobs(canvasId: string, ownerId: string, updatedAfter = 0) {
+    return (this.database.prepare("SELECT * FROM canvas_jobs WHERE canvas_id = ? AND owner_id = ? AND updated_at > ? ORDER BY updated_at ASC LIMIT 500").all(canvasId, ownerId, updatedAfter) as CanvasJobRow[]).map((row) => mapCanvasJob(row)!);
+  }
+
+  readCanvasJobByProviderTask(providerTaskId: string) {
+    return mapCanvasJob(this.database.prepare("SELECT * FROM canvas_jobs WHERE provider_task_id = ? ORDER BY created_at DESC LIMIT 1").get(providerTaskId) as CanvasJobRow | undefined);
+  }
+
+  updateCanvasJob(id: string, patch: Partial<Pick<CanvasJob, "status" | "resultAssetId" | "providerTaskId" | "partialText" | "cancelledAt">> & { error?: string | null }) {
+    const current = this.readCanvasJob(id);
+    if (!current) return null;
+    const updatedAt = Date.now();
+    this.database.prepare(`
+      UPDATE canvas_jobs SET status = ?, result_asset_id = ?, provider_task_id = ?, partial_text = ?, error = ?, updated_at = ?, cancelled_at = ?
+      WHERE id = ?
+    `).run(
+      patch.status ?? current.status, patch.resultAssetId ?? current.resultAssetId ?? null,
+      patch.providerTaskId ?? current.providerTaskId ?? null, patch.partialText ?? current.partialText,
+      patch.error === undefined ? current.error ?? null : patch.error, updatedAt,
+      patch.cancelledAt ?? current.cancelledAt ?? null, id,
+    );
+    return this.readCanvasJob(id)!;
+  }
+
+  createCanvasMontage(montage: CanvasMontage) {
+    this.database.prepare("INSERT INTO canvas_montages (id, owner_id, canvas_id, revision, timeline_json, created_at, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(montage.id, montage.ownerId, montage.canvasId, montage.revision, JSON.stringify(montage.timeline), montage.createdAt, montage.updatedAt, montage.deletedAt ?? null);
+    return montage;
+  }
+
+  readCanvasMontage(id: string) {
+    return mapCanvasMontage(this.database.prepare("SELECT * FROM canvas_montages WHERE id = ? AND deleted_at IS NULL").get(id) as CanvasMontageRow | undefined);
+  }
+
+  listCanvasMontages(canvasId: string, ownerId: string) {
+    return (this.database.prepare("SELECT * FROM canvas_montages WHERE canvas_id = ? AND owner_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 100").all(canvasId, ownerId) as CanvasMontageRow[]).map((row) => mapCanvasMontage(row)!);
+  }
+
+  updateCanvasMontage(id: string, ownerId: string, revision: number, timeline: unknown) {
+    const result = this.database.prepare("UPDATE canvas_montages SET timeline_json = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND owner_id = ? AND deleted_at IS NULL AND revision = ?")
+      .run(JSON.stringify(timeline), Date.now(), id, ownerId, revision);
+    return result.changes ? this.readCanvasMontage(id) : null;
+  }
+
+  createCanvasExport(record: CanvasExport) {
+    this.database.prepare(`
+      INSERT INTO canvas_exports
+        (id, owner_id, canvas_id, montage_id, status, object_key, tos_upload_id, parts_json, result_asset_id, error, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(record.id, record.ownerId, record.canvasId, record.montageId, record.status, record.objectKey, record.tosUploadId ?? null, JSON.stringify(record.parts), record.resultAssetId ?? null, record.error ?? null, record.createdAt, record.updatedAt);
+    return record;
+  }
+
+  readCanvasExport(id: string) {
+    return mapCanvasExport(this.database.prepare("SELECT * FROM canvas_exports WHERE id = ?").get(id) as CanvasExportRow | undefined);
+  }
+
+  updateCanvasExport(id: string, patch: Partial<Pick<CanvasExport, "status" | "tosUploadId" | "parts" | "resultAssetId">> & { error?: string | null }) {
+    const current = this.readCanvasExport(id);
+    if (!current) return null;
+    this.database.prepare(`
+      UPDATE canvas_exports SET status = ?, tos_upload_id = ?, parts_json = ?, result_asset_id = ?, error = ?, updated_at = ? WHERE id = ?
+    `).run(
+      patch.status ?? current.status, patch.tosUploadId ?? current.tosUploadId ?? null,
+      JSON.stringify(patch.parts ?? current.parts), patch.resultAssetId ?? current.resultAssetId ?? null,
+      patch.error === undefined ? current.error ?? null : patch.error, Date.now(), id,
+    );
+    return this.readCanvasExport(id)!;
+  }
+
+
+  listCanvasExports(canvasId: string, ownerId: string) {
+    return (this.database.prepare("SELECT * FROM canvas_exports WHERE canvas_id = ? AND owner_id = ? ORDER BY updated_at DESC LIMIT 100").all(canvasId, ownerId) as CanvasExportRow[]).map((row) => mapCanvasExport(row)!);
   }
 
   canvasesPendingAssetCleanup(limit = 20) {

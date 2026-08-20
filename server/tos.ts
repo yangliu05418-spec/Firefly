@@ -28,6 +28,8 @@ export const inputObjectKey = (ownerId: string, uploadId: string, fileName: stri
 export const outputObjectKey = (ownerId: string, taskId: string, extension: string) => `outputs/${shard(taskId)}/${ownerId}/${taskId}/result${extension.startsWith(".") ? extension : `.${extension}`}`;
 export const previewObjectKey = (ownerId: string, taskId: string) => `previews/${shard(taskId)}/${ownerId}/${taskId}/preview.mp4`;
 export const posterObjectKey = (ownerId: string, taskId: string) => `posters/${shard(taskId)}/${ownerId}/${taskId}/poster.webp`;
+export const canvasExportObjectKey = (ownerId: string, canvasId: string, exportId: string) =>
+  `canvas-exports/${shard(exportId)}/${ownerId}/${canvasId}/${exportId}/montage.mp4`;
 
 export const createMultipartUpload = async (key: string, contentType: string, fileName: string) => {
   requireTos();
@@ -98,7 +100,7 @@ const responseHeader = (headers: unknown, name: string) => {
   return String(record[name] ?? record[name.toLowerCase()] ?? record[name.toUpperCase()] ?? "");
 };
 
-const verifyStoredObject = async (key: string, expectedContentType?: string) => {
+export const verifyStoredObject = async (key: string, expectedContentType?: string) => {
   const head = await headObject(key);
   const ranged = await tos.getObjectV2({ bucket: config.tosBucket, key, dataType: "buffer", range: "bytes=0-0" });
   if (ranged.statusCode !== 206 || ranged.data.content.length !== 1) throw new Error("TOS Range 校验失败");

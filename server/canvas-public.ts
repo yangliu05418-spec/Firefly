@@ -1,8 +1,8 @@
 import type { CanvasProject } from "./db.js";
-import { countCanvasNodes, parseCanvasDocumentSafe, type CanvasDocumentV1 } from "./canvas-document.js";
+import { countCanvasNodes, parseCanvasDocumentSafe, type CanvasDocument } from "./canvas-document.js";
 
 export type PublicCanvasProject = { id: string; title: string; nodeCount: number; updatedAt: number };
-export type PublicCanvasProjectDetail = { id: string; title: string; revision: number; updatedAt: number; document: CanvasDocumentV1 | null };
+export type PublicCanvasProjectDetail = { id: string; title: string; revision: number; updatedAt: number; document: CanvasDocument | null };
 
 export const publicCanvasProject = (project: CanvasProject): PublicCanvasProject => ({
   id: project.id,
