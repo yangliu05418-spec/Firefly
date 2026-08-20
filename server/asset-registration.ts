@@ -56,7 +56,7 @@ const defaultDeps = () => productionDeps ??= {
   readRegisteredAsset: (ownerId, uploadId) => users.readUserAssetByUpload(ownerId, uploadId) ?? undefined,
   acquireAssetLock: (ownerId, uploadId) => acquireAssetCreationLock(redis, ownerId, uploadId),
   releaseAssetLock: (lock) => releaseAssetCreationLock(redis, lock),
-  saveAsset: (asset) => users.upsertUserAsset(asset)
+  saveAsset: (asset) => users.upsertUserAsset({ ...asset, category: users.readUserAsset(asset.id)?.category ?? "material" })
 };
 
 let groupIdPromise: Promise<string> | undefined;
@@ -117,7 +117,7 @@ const registerUpload = async (uploadId: string, ownerId: string, name: string, i
         GroupId: groupId,
         URL: await deps.resolveMediaUrl(media),
         AssetType: assetType,
-        Name: media.fileName
+        Name: name.slice(0, 80)
       });
     } catch (error) {
       if (/real[ -]?person|real human|真人|人脸/i.test(error instanceof Error ? error.message : String(error))) {
@@ -127,7 +127,7 @@ const registerUpload = async (uploadId: string, ownerId: string, name: string, i
     }
     assetId = created.Id;
     await deps.cacheSet(cacheKey, assetId);
-    deps.saveAsset?.({ id: assetId, ownerId, groupId, uploadId, name: media.fileName, assetType, status: "Processing", createdAt: deps.now(), updatedAt: deps.now() });
+    deps.saveAsset?.({ id: assetId, ownerId, groupId, uploadId, name, assetType, status: "Processing", createdAt: deps.now(), updatedAt: deps.now() });
     console.info(JSON.stringify({ type: "provider_asset_created", at: new Date().toISOString(), ownerId, uploadId, assetId, groupId }));
   }
   } finally { if (creationLock && deps.releaseAssetLock) await deps.releaseAssetLock(creationLock).catch(() => undefined); }

@@ -1,3 +1,5 @@
+import { prepareImageForUpload } from "./image-normalize";
+
 export const AUTH_EXPIRED_EVENT = "firefly:auth-expired";
 const AUTH_CHANNEL = "firefly-auth";
 
@@ -134,7 +136,7 @@ async function uploadTosPart(uploadId: string, initial: SignedPart, blob: Blob, 
   throw lastError ?? new Error("TOS 分片上传失败");
 }
 
-type UploadedFile = { id: string; uploadId?: string; name: string; type: UploadKind; size: number; url?: string };
+type UploadedFile = { id: string; uploadId?: string; name: string; type: UploadKind; size: number; url?: string; normalized?: boolean };
 
 const finalizeUpload = async (uploadId: string, body: unknown, signal?: AbortSignal): Promise<UploadedFile> => {
   const deadline = Date.now() + 240_000;
@@ -158,7 +160,9 @@ const finalizeUpload = async (uploadId: string, body: unknown, signal?: AbortSig
 
 export async function uploadFile(file: File, type: UploadKind, onProgress: (value: number) => void, options: { signal?: AbortSignal } = {}) {
   const signal = options.signal;
-  const init = await api.post<{ id: string; chunkSize: number; direct?: boolean; concurrency?: number; parts?: SignedPart[] }>("/api/uploads", { name: file.name, size: file.size, type, mime: file.type });
+  const prepared = type === "image" ? await prepareImageForUpload(file, signal) : { file, normalized: false };
+  const upload = prepared.file;
+  const init = await api.post<{ id: string; chunkSize: number; direct?: boolean; concurrency?: number; parts?: SignedPart[] }>("/api/uploads", { name: upload.name, size: upload.size, type, mime: upload.type });
   try {
   if (init.direct) {
     const parts = init.parts ?? [];
@@ -168,21 +172,21 @@ export async function uploadFile(file: File, type: UploadKind, onProgress: (valu
       while (cursor < parts.length) {
         const part = parts[cursor++];
         const start = (part.partNumber - 1) * init.chunkSize;
-        const blob = file.slice(start, Math.min(file.size, start + init.chunkSize));
+        const blob = upload.slice(start, Math.min(upload.size, start + init.chunkSize));
         results.push(await uploadTosPart(init.id, part, blob, signal));
         completedBytes += blob.size;
-        onProgress(Math.min(100, Math.round(completedBytes / file.size * 100)));
+        onProgress(Math.min(100, Math.round(completedBytes / upload.size * 100)));
       }
     };
     await Promise.all(Array.from({ length: Math.min(init.concurrency ?? 3, parts.length) }, worker));
-    return await finalizeUpload(init.id, { parts: results.sort((a, b) => a.partNumber - b.partNumber) }, signal);
+    return { ...(await finalizeUpload(init.id, { parts: results.sort((a, b) => a.partNumber - b.partNumber) }, signal)), name: file.name, normalized: prepared.normalized };
   }
   let offset = 0;
-  while (offset < file.size) {
-    offset = await uploadChunk(init.id, file, offset, init.chunkSize, signal);
-    onProgress(Math.round(offset / file.size * 100));
+  while (offset < upload.size) {
+    offset = await uploadChunk(init.id, upload, offset, init.chunkSize, signal);
+    onProgress(Math.round(offset / upload.size * 100));
   }
-  return await finalizeUpload(init.id, {}, signal);
+  return { ...(await finalizeUpload(init.id, {}, signal)), name: file.name, normalized: prepared.normalized };
   } catch (error) {
     // Cancellation is completion-lock-aware: it cannot delete an object that the server is finalizing
     // or has already committed to the durable media database.
