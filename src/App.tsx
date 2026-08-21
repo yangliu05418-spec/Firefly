@@ -3,7 +3,8 @@ import { createPortal } from "react-dom";
 import { Archive, ArrowRight, AudioLines, Check, CheckSquare2, ChevronDown, ChevronRight, Clock3, Clapperboard, Copy, Download, Film, Home, ImageIcon, Layers3, LayoutGrid, Library, LoaderCircle, LogOut, Menu, MessageSquare, PanelLeftClose, Pencil, Play, Plus, RefreshCw, Search, Send, Settings2, Sparkles, Square, Trash2, Upload, Video, WandSparkles, X } from "lucide-react";
 import { api, inferUploadType, listenForSignedOut, notifySignedOut, uploadFile } from "./api";
 import type { AssetCategory, CreationMode, CreationSession, ImageGenResponse, ImageModel, ImageResultBundle, LibraryAsset, LibraryGroup, ModelCapability, SessionUser, Task, UploadAsset } from "./types";
-import { materializePromptReferences, promptAssetLabel, promptAssetMarker } from "./prompt-references";
+import { materializePromptReferences, promptAssetLabel } from "./prompt-references";
+import { createPromptAssetToken, promptNodeText, renderPromptValue } from "./prompt-editor-dom";
 import { clearEditorSelection } from "./prompt-selection";
 import { CanvasProjectList } from "./features/canvas/CanvasProjectList";
 import { CanvasWorkspaceGate as CanvasWorkspace } from "./features/canvas/CanvasWorkspaceGate";
@@ -13,6 +14,9 @@ import { assetMetadataCache, filterCachedAssets } from "./asset-metadata-cache";
 import { areAttachedUploadsReady } from "./upload-state";
 import { hasActiveStudioWork, replaceSessionSnapshot } from "./studio-sync";
 import { useAdaptiveRefresh } from "./use-adaptive-refresh";
+import { composerDraftCache, type ComposerDraftState } from "./composer-draft-cache";
+import { recoverComposerDraftAsset } from "./composer-draft-recovery";
+import { reconcileComposerAssets } from "./composer-assets";
 
 const modeLabels: Record<CreationMode, string> = { omni: "全能参考", first_frame: "首帧生成", first_last: "首尾帧", edit: "视频编辑", extend: "视频续写", text: "文本生成" };
 const modeNotes: Record<CreationMode, string> = { omni: "自由组合图片、视频和音频", first_frame: "锁定开场画面继续创作", first_last: "精确控制起点与落点", edit: "替换、增删或重绘画面", extend: "向前、向后或多段衔接", text: "只用提示词生成镜头" };
@@ -128,15 +132,6 @@ function AccessGate({ back }: { back: () => void }) {
 
 function Popover({ children, className = "" }: { children: React.ReactNode; className?: string }) { return <div className={`popover ${className}`} onClick={(e) => e.stopPropagation()}>{children}</div>; }
 
-const promptNodeText = (node: Node): string => {
-  if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? "";
-  if (!(node instanceof HTMLElement)) return "";
-  if (node.dataset.assetId) return promptAssetMarker(node.dataset.assetId);
-  if (node.tagName === "BR") return "\n";
-  const content = Array.from(node.childNodes).map(promptNodeText).join("");
-  return content + (["DIV", "P"].includes(node.tagName) ? "\n" : "");
-};
-
 function PromptEditor({ value, placeholder, assets, disabled, attach, change }: { value: string; placeholder: string; assets: UploadAsset[]; disabled: boolean; attach: (asset: UploadAsset) => UploadAsset | null; change: (value: string) => void }) {
   const editor = useRef<HTMLDivElement>(null); const mentionRange = useRef<Range | null>(null);
   const [open, setOpen] = useState(false); const [query, setQuery] = useState(""); const [active, setActive] = useState(0); const [anchor, setAnchor] = useState({ left: 12, top: 12, above: false });
@@ -149,7 +144,16 @@ function PromptEditor({ value, placeholder, assets, disabled, attach, change }: 
     return (term ? merged.filter((asset) => asset.name.toLocaleLowerCase().includes(term) || promptAssetLabel(asset, merged).toLocaleLowerCase().includes(term)) : merged).slice(0, 30);
   }, [assets, library, query]);
 
-  useEffect(() => { if (value === "" && editor.current?.childNodes.length) editor.current.replaceChildren(); }, [value]);
+  useEffect(() => {
+    const node = editor.current;
+    if (!node || document.activeElement === node) return;
+    const rendered = Array.from(node.childNodes).map(promptNodeText).join("").replace(/\n{3,}/g, "\n\n");
+    const staleToken = Array.from(node.querySelectorAll<HTMLElement>("[data-asset-id]")).some((token) => {
+      const asset = assets.find((candidate) => candidate.id === token.dataset.assetId);
+      return token.title !== (asset?.name ?? "正在恢复素材") || Boolean(token.querySelector("img")) !== Boolean(asset?.preview);
+    });
+    if (rendered !== value || staleToken) renderPromptValue(node, value, assets);
+  }, [value, assets]);
   useEffect(() => {
     if (!editor.current) return;
     const attached = new Set(assets.map((asset) => asset.id)); let removed = false;
@@ -181,9 +185,7 @@ function PromptEditor({ value, placeholder, assets, disabled, attach, change }: 
   const selectAsset = (candidate: UploadAsset) => {
     const asset = attach(candidate); const range = mentionRange.current;
     if (!asset || !range || !editor.current) return;
-    const token = document.createElement("span"); token.className = "prompt-asset-token"; token.contentEditable = "false"; token.dataset.assetId = asset.id; token.title = asset.name;
-    if (asset.preview) { const image = document.createElement("img"); image.src = asset.preview; image.alt = ""; token.append(image); }
-    const label = document.createElement("span"); label.textContent = asset.name; token.append(label);
+    const token = createPromptAssetToken(asset, asset.id);
     range.deleteContents(); range.insertNode(token); const space = document.createTextNode("\u00a0"); token.after(space);
     const selection = window.getSelection(); const caret = document.createRange(); caret.setStartAfter(space); caret.collapse(true); selection?.removeAllRanges(); selection?.addRange(caret);
     setOpen(false); setQuery(""); mentionRange.current = null; sync(); editor.current.focus();
@@ -209,6 +211,7 @@ function PromptEditor({ value, placeholder, assets, disabled, attach, change }: 
 }
 
 function Composer({ models, compact, sessionId, onCreated, onImagesGenerated }: { models: ModelCapability[]; compact: boolean; sessionId: string; onCreated: (task: Task) => void; onImagesGenerated?: (bundle: ImageResultBundle) => void }) {
+  const userId = useAssetCacheUserId();
   const defaultModel = models[0];
   const [modelId, setModelId] = useState(defaultModel?.id ?? "");
   const model = models.find((item) => item.id === modelId) ?? defaultModel;
@@ -223,6 +226,7 @@ function Composer({ models, compact, sessionId, onCreated, onImagesGenerated }: 
   const [assets, setAssets] = useState<UploadAsset[]>([]); const [open, setOpen] = useState<"generation" | "model" | "mode" | "format" | "duration" | "advanced" | "library" | "image-model" | "image-format" | null>(null);
   const [generateAudio, setGenerateAudio] = useState(true); const [cameraFixed, setCameraFixed] = useState(false); const [watermark, setWatermark] = useState(false); const [seed, setSeed] = useState(-1);
   const [loading, setLoading] = useState(false); const [error, setError] = useState(""); const fileInput = useRef<HTMLInputElement>(null);
+  const [draftHydrated, setDraftHydrated] = useState(false); const [draftNotice, setDraftNotice] = useState("");
   const uploadControllers = useRef(new Map<string, AbortController>());
   const localPreviewUrls = useRef(new Set<string>());
 
@@ -255,32 +259,94 @@ function Composer({ models, compact, sessionId, onCreated, onImagesGenerated }: 
 
   useEffect(() => {
     void api.get<{ Items: ImageModel[]; DefaultModel: string }>("/api/image-models").then((result) => {
-      setImageModels(result.Items ?? []);
-      const defaultId = result.DefaultModel ?? result.Items?.[0]?.id ?? "";
-      setImageModelId(defaultId);
-      const spec = result.Items?.find((item) => item.id === defaultId);
-      if (spec) setImageResolution(spec.defaultResolution ?? spec.resolutions[0]);
+      const items = result.Items ?? [];
+      setImageModels(items);
+      setImageModelId((current) => {
+        const spec = items.find((item) => item.id === current) ?? items.find((item) => item.id === result.DefaultModel) ?? items[0];
+        if (spec) {
+          setImageResolution((resolution) => spec.resolutions.includes(resolution) ? resolution : (spec.defaultResolution ?? spec.resolutions[0]));
+          setImageCount((count) => Math.min(count, spec.maxCount));
+        }
+        return spec?.id ?? "";
+      });
     }).catch(() => setImageModels([]));
   }, []);
   useEffect(() => {
     if (!model) return;
-    assets.forEach(cancelAssetTransfer);
     if (!model.modes.includes(mode)) { setMode(model.modes[0]); return; }
     if (!model.resolutions.includes(resolution)) setResolution(model.resolutions.includes("720p") ? "720p" : model.resolutions[0]);
     if (ratioLocked) setRatio("adaptive"); else if (ratio === "adaptive" || !model.ratios.includes(ratio)) setRatio("16:9");
     if (durationLocked) setDuration(-1); else setDuration((value) => Math.min(model.duration[1], Math.max(model.duration[0], value === -1 ? model.duration[0] : value)));
     if (!model.supportsAudio) setGenerateAudio(false);
-    setAssets([]);
+    setAssets((current) => {
+      const next = reconcileComposerAssets(current, engine, mode, model);
+      const retained = new Set(next.map((asset) => asset.id));
+      current.filter((asset) => !retained.has(asset.id)).forEach(cancelAssetTransfer);
+      return next;
+    });
     setError("");
   }, [modelId, mode]);
   useEffect(() => {
-    if (engine === "image") {
-      const removed = assets.filter((asset) => asset.type !== "image");
-      removed.forEach(cancelAssetTransfer);
-      if (removed.length) setAssets((current) => current.filter((asset) => asset.type === "image"));
-    }
+    setAssets((current) => {
+      const next = reconcileComposerAssets(current, engine, mode, model);
+      const retained = new Set(next.map((asset) => asset.id));
+      current.filter((asset) => !retained.has(asset.id)).forEach(cancelAssetTransfer);
+      return next;
+    });
     setError("");
   }, [engine]);
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    setDraftHydrated(false);
+    void composerDraftCache.read(userId, sessionId).then(async (restored) => {
+      if (!active || !restored) { if (active) setDraftHydrated(true); return; }
+      const state = restored.state;
+      setEngine(state.engine);
+      setPrompt(state.prompt);
+      setModelId(models.some((item) => item.id === state.modelId) ? state.modelId : (defaultModel?.id ?? ""));
+      setMode(state.mode);
+      setRatio(state.ratio);
+      setResolution(state.resolution);
+      setDuration(state.duration);
+      setGenerateAudio(state.generateAudio);
+      setCameraFixed(state.cameraFixed);
+      setWatermark(state.watermark);
+      setSeed(state.seed);
+      setImageModelId(state.imageModelId);
+      setImageRatio(state.imageRatio);
+      setImageResolution(state.imageResolution);
+      setImageCount(state.imageCount);
+      const cachedAssets = state.assets.map((asset) => ({ ...asset, progress: 100, phase: asset.assetId ? undefined : "verifying" as const, status: asset.assetId ? "Processing" as const : undefined }));
+      setAssets(cachedAssets);
+      setDraftHydrated(true);
+      const results = await Promise.all(cachedAssets.map(async (asset) => {
+        try { return { id: asset.id, asset: await recoverComposerDraftAsset(asset, controller.signal) }; }
+        catch (recoveryError) { if (recoveryError instanceof DOMException && recoveryError.name === "AbortError") return { id: asset.id, asset: undefined }; return { id: asset.id, asset: null }; }
+      }));
+      if (!active) return;
+      const resolved = new Map(results.filter((result) => result.asset !== undefined).map((result) => [result.id, result.asset]));
+      const invalid = results.filter((result) => result.asset === null).length + restored.droppedAssets;
+      setAssets((current) => current.flatMap((asset) => {
+        if (!resolved.has(asset.id)) return [asset];
+        const recovered = resolved.get(asset.id);
+        return recovered ? [recovered] : [];
+      }));
+      if (state.prompt.trim() || state.assets.length || restored.droppedAssets) setDraftNotice(invalid ? `已恢复草稿，${invalid} 个过期素材已移除` : "已恢复上次未发送的内容");
+    }).catch(() => { if (active) setDraftHydrated(true); });
+    return () => { active = false; controller.abort(); };
+  }, [userId, sessionId]);
+  const draftState = useMemo<ComposerDraftState>(() => ({ engine, prompt, modelId, mode, ratio, resolution, duration, generateAudio, cameraFixed, watermark, seed, imageModelId, imageRatio, imageResolution, imageCount, assets }), [engine, prompt, modelId, mode, ratio, resolution, duration, generateAudio, cameraFixed, watermark, seed, imageModelId, imageRatio, imageResolution, imageCount, assets]);
+  useEffect(() => {
+    if (!draftHydrated) return;
+    const timer = window.setTimeout(() => { void composerDraftCache.write(userId, sessionId, draftState); }, 350);
+    return () => window.clearTimeout(timer);
+  }, [draftHydrated, userId, sessionId, draftState]);
+  useEffect(() => {
+    if (!draftNotice) return;
+    const timer = window.setTimeout(() => setDraftNotice(""), 5_000);
+    return () => window.clearTimeout(timer);
+  }, [draftNotice]);
   useEffect(() => () => {
     for (const controller of uploadControllers.current.values()) controller.abort();
     uploadControllers.current.clear();
@@ -323,8 +389,11 @@ function Composer({ models, compact, sessionId, onCreated, onImagesGenerated }: 
         const tempId = pending.id;
         const role = pending.role;
       try {
-        const uploaded = await uploadFile(file, pending.type, (progress, phase) => setAssets((old) => old.map((a) => a.id === tempId ? { ...a, progress, phase } : a)), { signal: controller.signal });
-        setAssets((old) => old.map((a) => a.id === tempId ? { ...a, ...uploaded, uploadId: uploaded.uploadId ?? uploaded.id, role, progress: 100, phase: "ready" } : a));
+        const uploaded = await uploadFile(file, pending.type, (progress, phase) => setAssets((old) => old.map((a) => a.id === tempId ? { ...a, progress, phase } : a)), {
+          signal: controller.signal,
+          onTransportComplete: (transport) => setAssets((old) => old.map((asset) => asset.id === tempId ? { ...asset, uploadId: transport.uploadId ?? transport.id, name: file.name, size: transport.size, progress: 100, phase: "verifying" } : asset)),
+        });
+        setAssets((old) => old.map((a) => a.id === tempId ? { ...a, ...uploaded, id: tempId, uploadId: uploaded.uploadId ?? uploaded.id, role, progress: 100, phase: "ready" } : a));
         } catch (e) {
           releaseLocalPreview(pending.preview);
           setAssets((old) => old.filter((a) => a.id !== tempId));
@@ -365,11 +434,11 @@ function Composer({ models, compact, sessionId, onCreated, onImagesGenerated }: 
         onImagesGenerated?.(pendingImage);
         const references = assets.filter((asset) => asset.type === "image" && asset.uploadId).map((asset) => asset.uploadId!);
         await api.post<ImageGenResponse>("/api/image-generation", { requestId: pendingImage.id, sessionId, model: imageModelId, ratio: imageRatio, resolution: imageResolution, count: imageCount, prompt: submittedPrompt, references });
-        setPrompt(""); clearAttachedAssets();
+        setPrompt(""); clearAttachedAssets(); void composerDraftCache.clearSession(userId, sessionId);
         return;
       }
       const task = await api.post<Task>("/api/generations", { sessionId, prompt: materializePromptReferences(prompt, assets), model: model.id, mode, ratio, resolution, duration, generateAudio: model.supportsAudio && generateAudio, seed, cameraFixed, watermark, outputFormat: "mp4", assets: assets.map(({ preview, progress, size, ...asset }) => asset) });
-      onCreated(task); setPrompt(""); clearAttachedAssets();
+      onCreated(task); setPrompt(""); clearAttachedAssets(); void composerDraftCache.clearSession(userId, sessionId);
     } catch (e) {
       const message = e instanceof Error ? e.message : "无法创建任务";
       if (pendingImage) onImagesGenerated?.({ ...pendingImage, status: "failed", error: message });
@@ -389,7 +458,7 @@ function Composer({ models, compact, sessionId, onCreated, onImagesGenerated }: 
   return <div className={`composer ${compact ? "composer--compact" : ""}`} onClick={(e) => e.stopPropagation()}>
     {!compact && <h1>今晚，想创造什么？</h1>}
     <div className="composer-shell">
-      {!!assets.length && <div className="asset-strip">{assets.map((asset, index) => <div className="asset-chip" key={asset.id}>{asset.preview ? <img src={asset.preview} /> : asset.type === "video" ? <Video /> : <AudioLines />}<span><b>{asset.role === "first_frame" ? "首帧" : asset.role === "last_frame" ? "尾帧" : `${asset.type === "image" ? "图片" : asset.type === "video" ? "视频" : "音频"} ${index + 1}`}</b><small>{asset.phase === "preparing" ? "正在检查图片" : asset.phase === "verifying" ? "文件已上传 · 正在准备引用" : asset.progress === 100 ? `${asset.name}${asset.normalized ? " · 已自动补白" : ""}` : `上传 ${asset.progress ?? 0}%`}</small></span>{asset.progress !== 100 && <i style={{ width: `${asset.progress ?? 0}%` }} />}<button onClick={() => removeAttachedAsset(asset.id)}><X /></button></div>)}</div>}
+      {!!assets.length && <div className="asset-strip">{assets.map((asset, index) => <div className="asset-chip" key={asset.id}>{asset.preview ? <img src={asset.preview} /> : asset.type === "image" ? <ImageIcon /> : asset.type === "video" ? <Video /> : <AudioLines />}<span><b>{asset.role === "first_frame" ? "首帧" : asset.role === "last_frame" ? "尾帧" : `${asset.type === "image" ? "图片" : asset.type === "video" ? "视频" : "音频"} ${index + 1}`}</b><small>{asset.status === "Processing" ? "正在恢复素材引用" : asset.phase === "preparing" ? "正在检查图片" : asset.phase === "verifying" ? "文件已上传 · 正在准备引用" : asset.progress === 100 ? `${asset.name}${asset.normalized ? " · 已自动补白" : ""}` : `上传 ${asset.progress ?? 0}%`}</small></span>{asset.progress !== 100 && <i style={{ width: `${asset.progress ?? 0}%` }} />}<button onClick={() => removeAttachedAsset(asset.id)}><X /></button></div>)}</div>}
       <div className={`prompt-row ${referenceSlots.length > 1 ? "prompt-row--dual" : ""} ${!referenceSlots.length ? "prompt-row--text" : ""}`}>
         {!!referenceSlots.length && <div className="reference-slots">{referenceSlots.map((label, index) => <button className="add-reference" key={label} onClick={() => fileInput.current?.click()} disabled={(mode === "first_frame" && assets.length >= 1) || (mode === "first_last" && assets.length > index)}><Plus /><span>{label}</span></button>)}</div>}
         <PromptEditor value={prompt} change={setPrompt} placeholder={engine === "image" ? "描述你想生成的画面；上传参考图即可进行图生图……" : modePlaceholders[mode]} assets={assets} disabled={mode === "text" && engine === "video"} attach={attachMentionAsset} />
@@ -416,6 +485,7 @@ function Composer({ models, compact, sessionId, onCreated, onImagesGenerated }: 
         <button className={`send-button ${engine === "image" && loading ? "send-button--submitted" : ""}`} title={uploadsFinalizing ? "文件已上传，引用准备完成后即可生成" : undefined} aria-label={uploadsFinalizing ? "文件已上传，正在准备引用" : engine === "image" && loading ? "图片已提交，正在生成" : engine === "image" ? "生成图片" : "生成视频"} aria-busy={engine === "image" && loading ? true : undefined} disabled={loading || !uploadsReady || !modeReady} onClick={submit}>{engine === "image" && loading ? <Check /> : loading ? <LoaderCircle className="spin" /> : <Send />}</button>
       </div>
       {engine === "image" && loading && <div className="composer-generation-status" role="status" aria-live="polite"><Check /><span><b>已提交，正在生成</b><small>完成后会自动出现在结果区</small></span></div>}
+      {draftNotice && <div className="composer-draft-status" role="status" aria-live="polite"><RefreshCw /><span>{draftNotice}</span></div>}
       {error && <div className="composer-error">{error}</div>}
     </div>
   </div>;
@@ -939,14 +1009,14 @@ function Studio({ user, route, navigate, logout }: { user: SessionUser; route: s
   const confirmDelete = async () => { if (!deleteTarget) return; setDeleting(true); setDeleteError(""); try { await api.delete(`/api/generations/${deleteTarget.id}`); setTasks((old) => old.filter((task) => task.id !== deleteTarget.id)); setAssetTasks((old) => old.filter((task) => task.id !== deleteTarget.id)); setDeleteTarget(null); } catch (error) { setDeleteError(error instanceof Error ? error.message : "删除失败，请稍后重试"); } finally { setDeleting(false); } };
   const beginRenameSession = (session: CreationSession) => { setEditingSessionId(session.id); setSessionTitleDraft(session.title); };
   const saveSessionTitle = async (session: CreationSession) => { const title = sessionTitleDraft.trim(); if (!title || title === session.title) { setEditingSessionId(null); return; } setSessionBusy(true); try { const updated = await api.patch<CreationSession>(`/api/creation-sessions/${encodeURIComponent(session.id)}`, { title }); setSessions((current) => current.map((item) => item.id === session.id ? updated : item)); setEditingSessionId(null); } catch { setSyncIssue(true); } finally { setSessionBusy(false); } };
-  const confirmDeleteSession = async () => { if (!sessionDeleteTarget) return; setSessionBusy(true); try { await api.delete(`/api/creation-sessions/${encodeURIComponent(sessionDeleteTarget.id)}`); const remaining = sessions.filter((session) => session.id !== sessionDeleteTarget.id); setSessions(remaining); setSessionDeleteTarget(null); if (sessionDeleteTarget.id === activeSessionId) { if (remaining[0]) await openSession(remaining[0]); else await createSession(); } } catch { setSyncIssue(true); } finally { setSessionBusy(false); } };
+  const confirmDeleteSession = async () => { if (!sessionDeleteTarget) return; setSessionBusy(true); try { await api.delete(`/api/creation-sessions/${encodeURIComponent(sessionDeleteTarget.id)}`); void composerDraftCache.clearSession(user.id, sessionDeleteTarget.id); const remaining = sessions.filter((session) => session.id !== sessionDeleteTarget.id); setSessions(remaining); setSessionDeleteTarget(null); if (sessionDeleteTarget.id === activeSessionId) { if (remaining[0]) await openSession(remaining[0]); else await createSession(); } } catch { setSyncIssue(true); } finally { setSessionBusy(false); } };
   return <main className={`studio ${sidebar ? "" : "studio--collapsed"}`}>
     <div className={`intelligence-aura ${featureNotice ? featureNotice.leaving ? "intelligence-aura--leaving" : "intelligence-aura--active" : ""}`} aria-hidden="true"><i className="aura-corner aura-corner--tl" /><i className="aura-corner aura-corner--tr" /><i className="aura-corner aura-corner--br" /><i className="aura-corner aura-corner--bl" /></div>
     <nav className="app-rail" aria-label="主要导航"><button className="rail-logo" aria-label="Firefly 创作台" onClick={() => showCreate(false)}><FireflyGlyph compact /></button><div className="rail-nav"><button className={view === "create" ? "active" : ""} aria-current={view === "create" ? "page" : undefined} onClick={() => showCreate(false)}><GenerateNavGlyph /><span>生成</span></button><button className={view === "assets" ? "active" : ""} aria-current={view === "assets" ? "page" : undefined} onClick={showAssets}><AssetsNavGlyph /><span>资产</span>{archivedCount > 0 && <i title={`${archivedCount} 个资产`}>{archivedCount > 99 ? "99+" : archivedCount}</i>}</button><button className={view === "canvas" ? "active" : ""} aria-current={view === "canvas" ? "page" : undefined} onClick={showCanvas}><CanvasNavGlyph /><span>画布</span></button><button className={featureNotice && !featureNotice.leaving ? "future active-preview" : "future"} aria-pressed={Boolean(featureNotice && !featureNotice.leaving)} onClick={activateAtlas}><AtlasNavGlyph /><span>Atlas</span></button></div><div className="rail-account" ref={profileRef}><button className="rail-avatar" aria-label="打开账号菜单" aria-expanded={profileOpen} onClick={() => setProfileOpen((open) => !open)}><UserAvatar user={user} /></button>{profileOpen && <AccountMenu user={user} close={() => setProfileOpen(false)} home={() => navigate("/")} logout={logout} />}</div></nav>
     <aside className="sidebar" aria-hidden={!sidebar} inert={!sidebar ? true : undefined}><div className="sidebar-head"><span>{view === "assets" ? "资产归档" : view === "canvas" ? "画布" : "开始创作"}</span><button aria-label="收起侧栏" onClick={() => setSidebar(false)}><PanelLeftClose /></button></div>{view === "create" ? <><button className="new-chat" disabled={creatingSession} onClick={() => showCreate(true)}>{creatingSession ? <LoaderCircle className="spin" /> : <Plus />} 新创作</button><div className="sidebar-label">创作会话</div><div className="session-list">{sessions.map((session) => <div className={`session-item ${session.id === activeSessionId ? "is-active" : ""}`} key={session.id}>{editingSessionId === session.id ? <input autoFocus maxLength={64} value={sessionTitleDraft} disabled={sessionBusy} onChange={(event) => setSessionTitleDraft(event.target.value)} onBlur={() => void saveSessionTitle(session)} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); if (event.key === "Escape") setEditingSessionId(null); }} aria-label="会话名称" /> : <button className="session-item__main" onClick={() => void openSession(session)}><MessageSquare /><span><b>{session.title}</b><small>{new Date(session.updatedAt).toLocaleDateString("zh-CN")}</small></span></button>}<span className="session-item__actions"><button title="重命名会话" aria-label={`重命名 ${session.title}`} onPointerDown={(event) => event.preventDefault()} onClick={() => beginRenameSession(session)}><Pencil /></button><button title="删除会话" aria-label={`删除 ${session.title}`} onClick={() => setSessionDeleteTarget(session)}><Trash2 /></button></span></div>)}{!sessions.length && <p>还没有创作会话</p>}</div></> : view === "assets" ? <><div className="asset-sidebar-summary"><span>已归档成片</span><strong>{archivedCount}</strong><p>不同创作会话的成片会统一归档在这里。</p></div><button className="new-chat new-chat--quiet" onClick={() => showCreate(true)}><Plus /> 创建新内容</button></> : <div className="canvas-sidebar-summary"><CanvasNavGlyph /><span>自由画布</span><p>把镜头、素材与灵感组织在同一张画布上，自由排版、连接创作。</p><button className="new-chat new-chat--quiet" onClick={createCanvasFromSidebar}><Plus /> 新建画布</button></div>}</aside>
     {sidebar && <button className="sidebar-scrim" aria-label="关闭侧栏" onClick={() => setSidebar(false)} />}
     <section className="workspace"><header className="workspace-head">{!sidebar && <button className="menu-button" aria-label="打开侧栏" onClick={() => setSidebar(true)}><Menu /></button>}<span>{view === "assets" ? "Firefly media archive" : view === "canvas" ? "Firefly canvas" : "Seedance video studio"}</span><div className={`system-live ${syncIssue ? "system-live--issue" : ""}`} title={syncIssue ? "与服务端的同步暂时中断，系统会自动重试" : undefined}><i /> {syncIssue ? "同步暂时中断" : activeTasks.length ? `${activeTasks.length} 项进行中` : "系统在线"}</div></header>
-      {loading ? <div className="workspace-loading"><LoaderCircle className="spin" /> 正在唤醒 Firefly</div> : loadError ? <div className="workspace-error"><Archive /><h1>创作台暂时无法载入</h1><p>{loadError}</p><button onClick={() => void initialLoad()}><RefreshCw /> 重新载入</button></div> : view === "canvas" ? (route === "/studio/canvas" ? <CanvasProjectList navigate={navigate} autoCreate={pendingCanvasCreate} onAutoCreateHandled={() => setPendingCanvasCreate(false)} /> : <CanvasWorkspace canvasId={route.split("/")[3] ?? ""} navigate={navigate} user={user} logout={logout} />) : view === "assets" ? <AssetArchive tasks={assetTasks} imageResults={assetImageResults} models={models} onCreate={() => showCreate(true)} onDelete={requestDelete} onRemoveImage={(id) => void removeImageResult(id)} onInsertCanvas={setCanvasInsertTarget} /> : creatingNew || (!tasks.length && !imageResults.length) ? <div className="empty-workspace"><Composer models={models} compact={false} sessionId={activeSessionId} onCreated={(task) => { setTasks((old) => [task, ...old]); setAssetTasks((old) => [task, ...old]); setCreatingNew(false); markSessionUsed(task.prompt); }} onImagesGenerated={(bundle) => { updateImageResult(bundle); setCreatingNew(false); markSessionUsed(bundle.prompt); }} /><div className="creation-footnote">输入素材保留 7 天 · 成片将长期保存至主动删除</div></div> : <div className="conversation"><div className="conversation-inner"><ImageResultsGallery results={imageResults} onInsertCanvas={setCanvasInsertTarget} onRemove={removeImageResult} />{!!tasks.length && <><div className="conversation-heading"><span>Current sequence</span><h1>创作正在发生</h1></div>{tasks.map((task) => <TaskCard key={task.id} task={task} models={models} eager={task.id === latestVideoTaskId} now={now} onDelete={requestDelete} canDelete={task.ownerId === user.id} />)}</>}</div><div className="composer-dock"><Composer models={models} compact sessionId={activeSessionId} onCreated={(task) => { setTasks((old) => [task, ...old]); setAssetTasks((old) => [task, ...old]); markSessionUsed(task.prompt); }} onImagesGenerated={(bundle) => { updateImageResult(bundle); markSessionUsed(bundle.prompt); }} /></div></div>}
+      {loading ? <div className="workspace-loading"><LoaderCircle className="spin" /> 正在唤醒 Firefly</div> : loadError ? <div className="workspace-error"><Archive /><h1>创作台暂时无法载入</h1><p>{loadError}</p><button onClick={() => void initialLoad()}><RefreshCw /> 重新载入</button></div> : view === "canvas" ? (route === "/studio/canvas" ? <CanvasProjectList navigate={navigate} autoCreate={pendingCanvasCreate} onAutoCreateHandled={() => setPendingCanvasCreate(false)} /> : <CanvasWorkspace canvasId={route.split("/")[3] ?? ""} navigate={navigate} user={user} logout={logout} />) : view === "assets" ? <AssetArchive tasks={assetTasks} imageResults={assetImageResults} models={models} onCreate={() => showCreate(true)} onDelete={requestDelete} onRemoveImage={(id) => void removeImageResult(id)} onInsertCanvas={setCanvasInsertTarget} /> : creatingNew || (!tasks.length && !imageResults.length) ? <div className="empty-workspace"><Composer key={`${activeSessionId}:empty`} models={models} compact={false} sessionId={activeSessionId} onCreated={(task) => { setTasks((old) => [task, ...old]); setAssetTasks((old) => [task, ...old]); setCreatingNew(false); markSessionUsed(task.prompt); }} onImagesGenerated={(bundle) => { updateImageResult(bundle); setCreatingNew(false); markSessionUsed(bundle.prompt); }} /><div className="creation-footnote">输入素材保留 7 天 · 成片将长期保存至主动删除</div></div> : <div className="conversation"><div className="conversation-inner"><ImageResultsGallery results={imageResults} onInsertCanvas={setCanvasInsertTarget} onRemove={removeImageResult} />{!!tasks.length && <><div className="conversation-heading"><span>Current sequence</span><h1>创作正在发生</h1></div>{tasks.map((task) => <TaskCard key={task.id} task={task} models={models} eager={task.id === latestVideoTaskId} now={now} onDelete={requestDelete} canDelete={task.ownerId === user.id} />)}</>}</div><div className="composer-dock"><Composer key={`${activeSessionId}:dock`} models={models} compact sessionId={activeSessionId} onCreated={(task) => { setTasks((old) => [task, ...old]); setAssetTasks((old) => [task, ...old]); markSessionUsed(task.prompt); }} onImagesGenerated={(bundle) => { updateImageResult(bundle); markSessionUsed(bundle.prompt); }} /></div></div>}
     </section>
     {canvasInsertTarget && <CanvasInsertPicker payload={canvasInsertTarget.kind === "video" ? { kind: "video", taskId: canvasInsertTarget.task.id, title: canvasInsertTarget.task.prompt || "参考素材生成" } : canvasInsertTarget.kind === "image" ? { kind: "image", uploadId: canvasInsertTarget.asset.UploadId ?? "", name: canvasInsertTarget.asset.Name || "图片" } : { kind: "generated", mediaId: canvasInsertTarget.mediaId, title: canvasInsertTarget.title }} onClose={() => setCanvasInsertTarget(null)} navigate={navigate} />}
     {deleteTarget && <div className="confirm-backdrop" role="dialog" aria-modal="true" aria-labelledby="delete-title" onClick={() => !deleting && setDeleteTarget(null)}><div className="confirm-dialog" onClick={(event) => event.stopPropagation()}><span><Trash2 /></span><h2 id="delete-title">删除这次创作？</h2><p>项目与已归档成片将被删除，此操作无法撤销。</p>{deleteError && <small className="confirm-error" role="alert">{deleteError}</small>}<div><button autoFocus disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button><button className="danger" disabled={deleting} onClick={confirmDelete}>{deleting ? <LoaderCircle className="spin" /> : <Trash2 />} 删除项目</button></div></div></div>}
@@ -959,9 +1029,9 @@ export function App() {
   const [route, setRoute] = useState(location.pathname); const [auth, setAuth] = useState<SessionUser | null | undefined>(undefined);
   const navigate = (path: string) => { history.pushState({}, "", path); setRoute(path); };
   useEffect(() => { const pop = () => setRoute(location.pathname); addEventListener("popstate", pop); api.get<{ authenticated: boolean; user?: SessionUser }>("/api/auth/session").then((r) => setAuth(r.authenticated && r.user ? r.user : null)).catch(() => setAuth(null)); return () => removeEventListener("popstate", pop); }, []);
-  useEffect(() => listenForSignedOut(() => { if (auth?.id) void assetMetadataCache.clear(auth.id); setAuth(null); }), [auth?.id]);
+  useEffect(() => listenForSignedOut((reason) => { if (reason === "explicit" && auth?.id) { void assetMetadataCache.clear(auth.id); void composerDraftCache.clearUser(auth.id); } setAuth(null); }), [auth?.id]);
   if (route === "/") return <Landing enter={() => navigate("/studio")} />;
   if (auth === undefined) return <main className="boot"><FireflyMark /><LoaderCircle className="spin" /></main>;
   if (!auth) return <AccessGate back={() => navigate("/")} />;
-  return <AssetCacheScope userId={auth.id}><Studio user={auth} route={route} navigate={navigate} logout={async () => { await api.delete("/api/auth/session"); notifySignedOut(); navigate("/"); }} /></AssetCacheScope>;
+  return <AssetCacheScope userId={auth.id}><Studio user={auth} route={route} navigate={navigate} logout={async () => { await api.delete("/api/auth/session"); notifySignedOut("explicit"); navigate("/"); }} /></AssetCacheScope>;
 }

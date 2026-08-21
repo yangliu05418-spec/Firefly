@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { materializePromptReferences, promptAssetMarker } from "./prompt-references";
+import { materializePromptReferences, parsePromptReferences, promptAssetMarker } from "./prompt-references";
 import type { UploadAsset } from "./types";
 
 const assets: UploadAsset[] = [
@@ -16,5 +16,13 @@ describe("prompt asset references", () => {
 
   it("removes references whose asset has been detached", () => {
     expect(materializePromptReferences(`Use ${promptAssetMarker("missing")}`, assets)).toBe("Use");
+  });
+
+  it("parses saved prompt markers so the editor can restore visual asset chips", () => {
+    expect(parsePromptReferences(`Use ${promptAssetMarker("image-a")} gently`)).toEqual([
+      { type: "text", value: "Use " },
+      { type: "asset", id: "image-a" },
+      { type: "text", value: " gently" },
+    ]);
   });
 });

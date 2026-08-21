@@ -2,22 +2,24 @@ import { prepareImageForUpload } from "./image-normalize";
 
 export const AUTH_EXPIRED_EVENT = "firefly:auth-expired";
 const AUTH_CHANNEL = "firefly-auth";
+export type SignedOutReason = "expired" | "explicit";
 
-export const notifySignedOut = () => {
+export const notifySignedOut = (reason: SignedOutReason = "expired") => {
   if (typeof window === "undefined") return;
-  window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
+  window.dispatchEvent(new CustomEvent<SignedOutReason>(AUTH_EXPIRED_EVENT, { detail: reason }));
   if (typeof BroadcastChannel === "undefined") return;
   const channel = new BroadcastChannel(AUTH_CHANNEL);
-  channel.postMessage({ type: "signed-out" });
+  channel.postMessage({ type: "signed-out", reason });
   channel.close();
 };
 
-export const listenForSignedOut = (callback: () => void) => {
+export const listenForSignedOut = (callback: (reason: SignedOutReason) => void) => {
   if (typeof window === "undefined") return () => undefined;
-  window.addEventListener(AUTH_EXPIRED_EVENT, callback);
+  const onLocal = (event: Event) => callback(event instanceof CustomEvent && event.detail === "explicit" ? "explicit" : "expired");
+  window.addEventListener(AUTH_EXPIRED_EVENT, onLocal);
   const channel = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel(AUTH_CHANNEL);
-  if (channel) channel.onmessage = (event) => { if (event.data?.type === "signed-out") callback(); };
-  return () => { window.removeEventListener(AUTH_EXPIRED_EVENT, callback); channel?.close(); };
+  if (channel) channel.onmessage = (event) => { if (event.data?.type === "signed-out") callback(event.data.reason === "explicit" ? "explicit" : "expired"); };
+  return () => { window.removeEventListener(AUTH_EXPIRED_EVENT, onLocal); channel?.close(); };
 };
 
 export class ApiError extends Error {

@@ -2,6 +2,21 @@ import type { UploadAsset } from "./types";
 
 const markerPattern = /\[\[firefly-asset:([^\]]+)\]\]/g;
 
+export type PromptReferencePart = { type: "text"; value: string } | { type: "asset"; id: string };
+
+export const parsePromptReferences = (prompt: string): PromptReferencePart[] => {
+  const parts: PromptReferencePart[] = [];
+  let cursor = 0;
+  for (const match of prompt.matchAll(markerPattern)) {
+    const index = match.index ?? 0;
+    if (index > cursor) parts.push({ type: "text", value: prompt.slice(cursor, index) });
+    parts.push({ type: "asset", id: match[1] });
+    cursor = index + match[0].length;
+  }
+  if (cursor < prompt.length) parts.push({ type: "text", value: prompt.slice(cursor) });
+  return parts;
+};
+
 export const promptAssetMarker = (id: string) => `[[firefly-asset:${id}]]`;
 
 export const promptAssetLabel = (asset: UploadAsset, assets: UploadAsset[]) => {
