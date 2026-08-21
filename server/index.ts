@@ -630,12 +630,23 @@ type ProviderAssetRecord = { Id: string; Name?: string; AssetType?: UserAsset["a
 const assetCategories = ["character", "scene", "prop", "material"] as const satisfies readonly AssetCategory[];
 const assetCategorySchema = z.enum(assetCategories);
 const ownedUserAsset = (assetId: string, ownerId: string) => { const asset = users.readUserAsset(assetId); return asset?.ownerId === ownerId ? asset : null; };
+const publicAssetGroupId = "group-firefly-auto-references";
+const enqueueProviderAssetDelete = (assetId: string) => {
+  const bucket = Math.floor(Date.now() / (5 * 60 * 1000));
+  void assetQueue.add("delete-provider", { assetId }, {
+    jobId: `delete-${assetId}-${bucket}`,
+    attempts: 6,
+    backoff: { type: "exponential", delay: 10_000 },
+    removeOnComplete: true,
+    removeOnFail: { age: 7 * 24 * 3600 }
+  }).catch((error) => console.warn(JSON.stringify({ type: "asset_provider_delete_enqueue_failed", at: new Date().toISOString(), assetId, code: (error as { code?: string }).code ?? "unknown" })));
+};
 
-app.get("/api/assets/groups", requireAuth, async (_req, res) => {
-  try { const groupId = await ensureAutoReferenceGroup(); res.json({ Items: [{ Id: groupId, Name: "我的素材", Description: "仅当前用户可见" }] }); } catch (error) { respondError(res, error, 502); }
+app.get("/api/assets/groups", requireAuth, (_req, res) => {
+  res.json({ Items: [{ Id: publicAssetGroupId, Name: "我的素材", Description: "仅当前用户可见" }] });
 });
-app.post("/api/assets/groups", requireAuth, async (req, res) => {
-  try { z.object({ name: z.string().min(1).max(80), description: z.string().max(200).default("") }).parse(req.body); const groupId = await ensureAutoReferenceGroup(); res.status(201).json({ Id: groupId, Name: "我的素材" }); } catch (error) { respondError(res, error, 502); }
+app.post("/api/assets/groups", requireAuth, (req, res) => {
+  try { z.object({ name: z.string().min(1).max(80), description: z.string().max(200).default("") }).parse(req.body); res.status(201).json({ Id: publicAssetGroupId, Name: "我的素材" }); } catch (error) { respondError(res, error); }
 });
 app.get("/api/assets", requireAuth, async (req, res) => {
   try {
@@ -654,7 +665,9 @@ app.post("/api/assets", requireAuth, async (req, res) => {
     const user = res.locals.user as SessionUser;
     auditUserId = user.id;
     auditUploadId = body.uploadId ?? null;
-    let groupId = body.groupId ?? "";
+    // Browser-visible group ids are logical product concepts. Only the worker resolves
+    // the actual shared provider group, keeping BytePlus off the interactive path.
+    let groupId = body.groupId === publicAssetGroupId ? "" : body.groupId ?? "";
     let url = body.url;
     let assetType = body.type;
     let providerName = providerAssetName(body.name);
@@ -705,9 +718,14 @@ app.post("/api/assets/bulk-delete", requireAuth, async (req, res) => {
     const owned = ids.map((id) => ownedUserAsset(id, user.id));
     if (owned.some((asset) => !asset)) return res.status(404).json({ error: "素材不存在", requestId: res.locals.requestId });
     const blocked = new Set(ids.filter((id) => users.isUserAssetInActiveTask(id, user.id)));
-    const deleted: string[] = []; const failed: string[] = [...blocked]; const deletable = ids.filter((id) => !blocked.has(id)); let cursor = 0;
-    const next = async () => { while (cursor < deletable.length) { const id = deletable[cursor++]; if (!id) continue; try { const asset = ownedUserAsset(id, user.id); if (!asset) { failed.push(id); continue; } if (asset.providerAssetId) await callAssetApi("DeleteAsset", { Id: asset.providerAssetId }); else await assetQueue.getJob(id).then((job) => job?.remove()).catch(() => undefined); users.deleteUserAsset(id, user.id); deleted.push(id); } catch { failed.push(id); } } };
-    await Promise.all(Array.from({ length: Math.min(4, deletable.length) }, next));
+    const deleted: string[] = []; const failed: string[] = [...blocked]; const deletable = ids.filter((id) => !blocked.has(id));
+    for (const id of deletable) {
+      const asset = ownedUserAsset(id, user.id);
+      if (!asset || !users.deleteUserAsset(id, user.id)) { failed.push(id); continue; }
+      deleted.push(id);
+      if (asset.providerAssetId) enqueueProviderAssetDelete(id);
+      else void assetQueue.getJob(id).then((job) => job?.remove()).catch(() => undefined);
+    }
     console.info(JSON.stringify({ type: "user_asset_mutation", action: "bulk_delete", userId: user.id, deleted: deleted.length, failed: failed.length, at: new Date().toISOString() }));
     res.json({ deleted, failed });
   } catch (error) { respondError(res, error, 502); }
@@ -738,14 +756,25 @@ app.patch("/api/assets/:id", requireAuth, async (req, res) => {
     const user = res.locals.user as SessionUser; const id = param(req.params.id);
     const asset = ownedUserAsset(id, user.id);
     if (!asset) return res.status(404).json({ error: "素材不存在" });
-    if (body.name !== undefined) { if (asset.providerAssetId) await callAssetApi("UpdateAsset", { Id: asset.providerAssetId, Name: providerAssetName(body.name) }); users.renameUserAsset(id, user.id, body.name); }
+    // Firefly metadata is canonical. Provider names are operational only and must not
+    // make a local rename wait on, or fail with, an external control-plane request.
+    if (body.name !== undefined) users.renameUserAsset(id, user.id, body.name);
     if (body.category !== undefined) users.updateUserAssetCategory(id, user.id, body.category);
     console.info(JSON.stringify({ type: "user_asset_mutation", action: body.name !== undefined ? body.category !== undefined ? "update_asset" : "rename_asset" : "categorize_asset", userId: user.id, assetId: id, at: new Date().toISOString() }));
     res.json(publicUserAsset(users.readUserAsset(id)!));
   } catch (error) { respondError(res, error, 502); }
 });
 app.delete("/api/assets/:id", requireAuth, async (req, res) => {
-  try { const user = res.locals.user as SessionUser; const id = param(req.params.id); const asset = ownedUserAsset(id, user.id); if (!asset) return res.status(404).json({ error: "素材不存在" }); if (users.isUserAssetInActiveTask(id, user.id)) return res.status(409).json({ error: "素材正被运行中的任务引用，任务结束后即可删除" }); if (asset.providerAssetId) await callAssetApi("DeleteAsset", { Id: asset.providerAssetId }); else await assetQueue.getJob(id).then((job) => job?.remove()).catch(() => undefined); users.deleteUserAsset(id, user.id); console.info(JSON.stringify({ type: "user_asset_mutation", action: "delete_asset", userId: user.id, assetId: id, at: new Date().toISOString() })); res.status(204).end(); } catch (error) { respondError(res, error, 502); }
+  try {
+    const user = res.locals.user as SessionUser; const id = param(req.params.id); const asset = ownedUserAsset(id, user.id);
+    if (!asset) return res.status(404).json({ error: "素材不存在" });
+    if (users.isUserAssetInActiveTask(id, user.id)) return res.status(409).json({ error: "素材正被运行中的任务引用，任务结束后即可删除" });
+    if (!users.deleteUserAsset(id, user.id)) return res.status(404).json({ error: "素材不存在" });
+    if (asset.providerAssetId) enqueueProviderAssetDelete(id);
+    else void assetQueue.getJob(id).then((job) => job?.remove()).catch(() => undefined);
+    console.info(JSON.stringify({ type: "user_asset_mutation", action: "delete_asset", userId: user.id, assetId: id, at: new Date().toISOString() }));
+    res.status(204).end();
+  } catch (error) { respondError(res, error, 500); }
 });
 
 

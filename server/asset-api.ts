@@ -6,6 +6,22 @@ const hash = (data: string) => crypto.createHash("sha256").update(data).digest("
 const retryableActions = new Set(["GetAsset", "ListAssets", "ListAssetGroups"]);
 export const canRetryAssetAction = (action: string) => retryableActions.has(action);
 
+export class AssetApiError extends Error {
+  constructor(message: string, readonly status: number, readonly providerCode?: string, readonly action?: string) {
+    super(message);
+    this.name = "AssetApiError";
+  }
+}
+
+export const isMissingProviderAssetError = (error: unknown) => {
+  if (!(error instanceof Error)) return false;
+  const providerCode = error instanceof AssetApiError ? error.providerCode ?? "" : "";
+  const status = error instanceof AssetApiError ? error.status : 0;
+  return status === 404
+    || /(?:not.?found|does.?not.?exist|asset.?not.?exist|invalid.?asset)/i.test(providerCode)
+    || /(?:asset|素材).{0,40}(?:not found|does not exist|不存在)/i.test(error.message);
+};
+
 export async function callAssetApi<T>(action: string, body: Record<string, unknown>): Promise<T> {
   if (!config.accessKey || !config.secretKey) throw new Error("服务器尚未配置资源库 AK/SK");
   const url = new URL(config.openApiEndpoint);
@@ -36,8 +52,9 @@ export async function callAssetApi<T>(action: string, body: Record<string, unkno
     const text = await response.text();
     const json = text ? JSON.parse(text) : {};
     if (!response.ok || json.ResponseMetadata?.Error) {
+      const providerCode = json.ResponseMetadata?.Error?.Code ?? json.code;
       const message = json.ResponseMetadata?.Error?.Message ?? json.message ?? `资源库请求失败 (${response.status})`;
-      const error = new Error(message);
+      const error = new AssetApiError(message, response.status, providerCode, action);
       (error as { retryable?: boolean }).retryable = canRetryAssetAction(action) && (response.status >= 500 || response.status === 429);
       throw error;
     }
