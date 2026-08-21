@@ -1,4 +1,4 @@
-import { lazy, memo, Suspense, useEffect, useState } from "react";
+import { lazy, memo, Suspense, useEffect, useRef, useState } from "react";
 import { Handle, NodeResizer, Position, type Node, type NodeProps } from "@xyflow/react";
 import { Box, CircleStop, Clapperboard, Crop, Download, ImageIcon, Images, Library, LoaderCircle, Maximize2, Plus, RotateCw, ScanFace, TextCursorInput, Upload, Users, WandSparkles, X } from "lucide-react";
 import type { CanvasNodeTypeV2, CanvasNodeV2 } from "../canvas-v2-types";
@@ -35,6 +35,7 @@ function CanvasV2NodeView({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const { domain, readOnly } = data;
   const Icon = icons[domain.type];
   const [imageError, setImageError] = useState(false);
+  const uploadInput = useRef<HTMLInputElement>(null);
   const persistedMediaUrl = domain.data.projectAssetId ? `/api/canvas-project-assets/${encodeURIComponent(domain.data.projectAssetId)}/media` : "";
   const mediaUrl = data.localPreviewUrl ?? persistedMediaUrl;
   const status = domain.data.status ?? "idle";
@@ -49,15 +50,15 @@ function CanvasV2NodeView({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     <Icon />
     <span>{imageError ? "素材暂时无法显示" : emptyCopy[domain.type]}</span>
     {!readOnly && <div className="canvas-v2-node__empty-actions nodrag nowheel">
-      <label>
+      <button type="button" onClick={() => uploadInput.current?.click()}>
         <Upload />
         <span>本地上传</span>
-        <input type="file" accept={uploadAccept} onChange={(event) => {
-          const file = event.currentTarget.files?.[0];
-          event.currentTarget.value = "";
-          if (file) data.onUpload(id, file);
-        }} />
-      </label>
+      </button>
+      <input ref={uploadInput} type="file" accept={uploadAccept} onChange={(event) => {
+        const file = event.currentTarget.files?.[0];
+        event.currentTarget.value = "";
+        if (file) data.onUpload(id, file);
+      }} />
       <button type="button" onClick={() => data.onPickAsset(id)}><Library /><span>资产库</span></button>
     </div>}
   </div> : <div className="canvas-v2-node__empty"><Icon /><span>{emptyCopy[domain.type]}</span></div>;
