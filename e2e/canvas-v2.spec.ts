@@ -36,7 +36,7 @@ const json = (route: Route, body: unknown, status = 200) => route.fulfill({ stat
 async function mockAuthenticatedApi(page: Page, options: {
   leaseHeld?: boolean; expireLeaseOnce?: boolean; document?: CanvasDocumentV2; imageGenerationDelayMs?: number; projectAssets?: CanvasProjectAsset[];
   creationSessions?: Array<{ id: string; title: string; createdAt: number; updatedAt: number }>;
-  imageHistory?: Array<Record<string, unknown>>; imageSessionFailures?: string[]; generationAdmissionResponseLost?: boolean;
+  imageHistory?: Array<Record<string, unknown>>; imageSessionFailures?: string[]; generationAdmissionResponseLost?: boolean; creationSessionAdmissionResponseLost?: boolean;
 } = {}) {
   let revision = 0;
   let storedDocument = structuredClone(options.document ?? documentV2);
@@ -44,6 +44,7 @@ async function mockAuthenticatedApi(page: Page, options: {
   let imageHistory: Array<Record<string, unknown>> = structuredClone(options.imageHistory ?? []);
   let videoHistory: Array<Record<string, unknown>> = [];
   let creationSessions = structuredClone(options.creationSessions ?? [{ id: "session-e2e", title: "新创作", createdAt: Date.now(), updatedAt: Date.now() }]);
+  const postedSessionRequests: string[] = [];
   const postedGenerations: Array<Record<string, unknown>> = [];
   let leasePostCount = 0;
   let leaseRenewCount = 0;
@@ -60,8 +61,17 @@ async function mockAuthenticatedApi(page: Page, options: {
     if (path === "/api/image-models") return json(route, { Items: imageModels, Ratios: ["16:9", "1:1", "9:16"], DefaultModel: imageModels[0].id });
     if (path === "/api/creation-sessions" && request.method() === "GET") return json(route, creationSessions);
     if (path === "/api/creation-sessions" && request.method() === "POST") {
-      const session = { id: `session-e2e-${creationSessions.length + 1}`, title: "新创作", createdAt: Date.now(), updatedAt: Date.now() };
-      creationSessions = [session, ...creationSessions]; return json(route, session, 201);
+      const body = request.postDataJSON() as { requestId?: string };
+      const id = body.requestId ?? `session-e2e-${creationSessions.length + 1}`;
+      postedSessionRequests.push(id);
+      const session = creationSessions.find((item) => item.id === id) ?? { id, title: "新创作", createdAt: Date.now(), updatedAt: Date.now() };
+      creationSessions = [session, ...creationSessions.filter((item) => item.id !== id)];
+      return options.creationSessionAdmissionResponseLost ? json(route, { error: "response lost" }, 503) : json(route, session, 201);
+    }
+    if (path.startsWith("/api/creation-sessions/") && request.method() === "GET") {
+      const id = decodeURIComponent(path.slice("/api/creation-sessions/".length));
+      const session = creationSessions.find((item) => item.id === id);
+      return session ? json(route, session) : json(route, { error: "创作会话不存在" }, 404);
     }
     if (path.startsWith("/api/creation-sessions/") && request.method() === "PATCH") {
       const id = decodeURIComponent(path.slice("/api/creation-sessions/".length)); const title = (request.postDataJSON() as { title: string }).title;
@@ -170,6 +180,8 @@ async function mockAuthenticatedApi(page: Page, options: {
     saveLeaseTokens: () => [...saveLeaseTokens],
     postedJobs: () => [...postedJobs],
     postedGenerations: () => [...postedGenerations],
+    postedSessionRequests: () => [...postedSessionRequests],
+    creationSessions: () => structuredClone(creationSessions),
     storedDocument: () => structuredClone(storedDocument),
   };
 }
@@ -199,6 +211,30 @@ test("studio restores an unsent composer draft and isolates it between creation 
 
   await page.locator(".session-item").nth(1).locator(".session-item__main").click();
   await expect(page.locator(".prompt-editor")).toHaveText("雨夜里缓慢推进的长镜头");
+});
+
+test("new creation reconciles a lost response without duplicating the session", async ({ page }) => {
+  const mock = await mockAuthenticatedApi(page, { creationSessionAdmissionResponseLost: true });
+  await page.goto("/studio");
+  await expect(page.getByRole("button", { name: "新创作", exact: true })).toBeVisible({ timeout: 30_000 });
+
+  await page.getByRole("button", { name: "新创作", exact: true }).click();
+
+  await expect.poll(() => new URL(page.url()).pathname).toMatch(/^\/studio\/sessions\/[0-9a-f-]{36}$/);
+  expect(mock.postedSessionRequests()).toHaveLength(1);
+  expect(mock.creationSessions()).toHaveLength(2);
+  await expect(page.locator(".session-item")).toHaveCount(2);
+});
+
+test("empty Studio bootstrap recovers its first session after a lost response", async ({ page }) => {
+  const mock = await mockAuthenticatedApi(page, { creationSessions: [], creationSessionAdmissionResponseLost: true });
+  await page.goto("/studio");
+
+  await expect.poll(() => new URL(page.url()).pathname).toMatch(/^\/studio\/sessions\/[0-9a-f-]{36}$/);
+  expect(mock.postedSessionRequests()).toHaveLength(1);
+  expect(mock.creationSessions()).toHaveLength(1);
+  await expect(page.locator(".session-item")).toHaveCount(1);
+  await expect(page.locator(".prompt-editor")).toBeVisible();
 });
 
 test("authenticated Canvas V2 opens, creates a node and preserves the app shell", async ({ page }) => {
@@ -426,7 +462,7 @@ test("new creation sessions isolate the stage and can be renamed or removed with
   const newCreation = page.getByRole("button", { name: "新创作", exact: true });
   await expect(newCreation).toBeVisible();
   await newCreation.click();
-  await expect.poll(() => new URL(page.url()).pathname).toContain("/studio/sessions/session-e2e-2");
+  await expect.poll(() => new URL(page.url()).pathname).toMatch(/^\/studio\/sessions\/[0-9a-f-]{36}$/);
   const active = page.locator(".session-item.is-active");
   await active.hover();
   await active.getByRole("button", { name: /重命名/ }).click();

@@ -62,7 +62,7 @@ describe("durable async job outbox", () => {
     store.close();
   });
 
-  it("persists the complete image payload needed after a web-process crash", () => {
+  it("persists the complete image payload and retries beyond provider key cooldowns", async () => {
     const { store, owner } = createStore();
     const createdAt = 200;
     const imageTask = {
@@ -79,6 +79,13 @@ describe("durable async job outbox", () => {
       queueName: "image-generation", jobId: imageTask.id, jobName: "generate-image", payload,
     })).toBe(true);
     expect(store.readAsyncJobIntent("image-generation", imageTask.id)).toMatchObject({ status: "pending", payload });
+    const add = vi.fn(async () => ({ id: imageTask.id }));
+    await dispatchPendingAsyncJobs(store, queues(add), createdAt);
+    expect(add).toHaveBeenCalledWith("generate-image", payload, expect.objectContaining({
+      jobId: imageTask.id,
+      attempts: 5,
+      backoff: expect.objectContaining({ type: "exponential", delay: 15_000 }),
+    }));
     store.close();
   });
 
