@@ -2,7 +2,7 @@ import { UnrecoverableError, Worker, type Job } from "bullmq";
 import { Redis } from "ioredis";
 import { config } from "./config.js";
 import { shouldRecoverArchiveHandoff } from "./archive-state.js";
-import { getProviderTask, validateGeneration, type GenerationInput } from "./provider.js";
+import { validateGeneration, type GenerationInput } from "./provider.js";
 import { canvasQueue, generationQueue, imageGenerationQueue, mediaQueue, readTask, saveTask } from "./redis.js";
 import { AssetRegistrationRejected, isRetryableAssetRejection, prepareProviderAssets } from "./asset-registration.js";
 import { users } from "./store.js";
@@ -13,10 +13,9 @@ import { startWorkerHeartbeat } from "./worker-heartbeat.js";
 import { startAsyncJobOutboxDispatcher } from "./async-job-outbox.js";
 import { resolveCanvasGenerationReferences } from "./canvas-project-assets.js";
 import { submitProviderTaskOnce } from "./generation-submission.js";
+import { pollProviderTaskUntilTerminal, ProviderPollingTerminalError } from "./provider-polling.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
-const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const maxPolls = Math.ceil(6 * 3600 * 1000 / config.providerPollIntervalMs);
 const archiveRecoveryBucketMs = 15 * 60 * 1000;
 const outputFormatFor = (task: { request?: unknown }) => (task.request as { outputFormat?: unknown } | undefined)?.outputFormat === "mov" ? "mov" as const : "mp4" as const;
 
@@ -40,34 +39,57 @@ const processGenerationJob = async (job: Job<{ input: unknown }>) => {
     task = { ...task, status: "running", error: undefined, updatedAt: Date.now() };
     await saveTask(task);
   }
-  for (let attempt = 0; attempt < maxPolls; attempt++) {
-    const current = await readTask(job.id!, true);
-    if (!current || current.deletedAt) return;
-    const result = await getProviderTask(task.providerId!);
-    if (result.status === "succeeded") {
-      const latest = await readTask(job.id!, true);
-      if (!latest || latest.deletedAt) return;
-      const sourceVideoUrl = result.content?.video_url;
-      if (!sourceVideoUrl) throw new Error("上游未返回成片地址");
-      const sourceVideoExpiresAt = Date.now() + 24 * 3600 * 1000;
-      const completed = { ...latest, status: "succeeded" as const, mediaStatus: "archiving" as const, sourceVideoUrl, sourceVideoExpiresAt, updatedAt: Date.now() };
-      await saveTask(completed);
-      console.info(JSON.stringify({ type: "generation_succeeded", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, providerId: task.providerId }));
-      if (config.mediaStorageBackend === "tos") {
-        await mediaQueue.add("archive-output", { taskId: task.id, sourceUrl: sourceVideoUrl, outputFormat: input.outputFormat }, { jobId: `archive-${task.id}`, attempts: 4, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: { age: 7 * 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } });
-      } else {
-        await saveTask({ ...completed, mediaStatus: "fallback", mediaRevision: (completed.mediaRevision ?? 0) + 1 });
-      }
-      return;
-    }
-    if (result.status === "failed" || result.status === "cancelled") {
-      const message = result.error?.message ?? "视频生成失败";
-      if (/may contain real person/i.test(message)) throw new UnrecoverableError("参考素材检测到真人面孔。Seedance 不允许直接使用未认证真人素材，请先在 BytePlus 真人资产库完成认证并等待资产状态变为 Active。 ");
-      throw new UnrecoverableError(message);
-    }
-    await delay(config.providerPollIntervalMs);
+  let result;
+  try {
+    result = await pollProviderTaskUntilTerminal({
+      providerId: task.providerId!,
+      deadlineAt: task.updatedAt + 6 * 3600 * 1000,
+      pollIntervalMs: config.providerPollIntervalMs,
+      shouldContinue: async () => {
+        const current = await readTask(job.id!, true);
+        return Boolean(current && !current.deletedAt);
+      },
+      onRetry: ({ error, consecutiveFailures, delayMs }) => {
+        console.warn(JSON.stringify({
+          type: "generation_poll_retry",
+          at: new Date().toISOString(),
+          taskId: task.id,
+          userId: task.ownerId,
+          providerId: task.providerId,
+          consecutiveFailures,
+          delayMs,
+          status: (error as { status?: unknown }).status,
+          message: error instanceof Error ? error.message.slice(0, 300) : undefined,
+        }));
+      },
+    });
+  } catch (error) {
+    if (error instanceof ProviderPollingTerminalError) throw new UnrecoverableError(error.message);
+    throw error;
   }
-  throw new Error("任务查询超时，可稍后通过官方任务 ID 查询");
+  if (!result) return;
+  if (result.status === "succeeded") {
+    const latest = await readTask(job.id!, true);
+    if (!latest || latest.deletedAt) return;
+    const sourceVideoUrl = result.content?.video_url;
+    if (!sourceVideoUrl) throw new UnrecoverableError("上游未返回成片地址");
+    const sourceVideoExpiresAt = Date.now() + 24 * 3600 * 1000;
+    const completed = { ...latest, status: "succeeded" as const, mediaStatus: "archiving" as const, sourceVideoUrl, sourceVideoExpiresAt, updatedAt: Date.now() };
+    await saveTask(completed);
+    console.info(JSON.stringify({ type: "generation_succeeded", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, providerId: task.providerId }));
+    if (config.mediaStorageBackend === "tos") {
+      await mediaQueue.add("archive-output", { taskId: task.id, sourceUrl: sourceVideoUrl, outputFormat: input.outputFormat }, { jobId: `archive-${task.id}`, attempts: 4, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: { age: 7 * 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } });
+    } else {
+      await saveTask({ ...completed, mediaStatus: "fallback", mediaRevision: (completed.mediaRevision ?? 0) + 1 });
+    }
+    return;
+  }
+  if (result.status === "failed" || result.status === "cancelled" || result.status === "expired") {
+    const message = result.error?.message ?? "视频生成失败";
+    if (/may contain real person/i.test(message)) throw new UnrecoverableError("参考素材检测到真人面孔。Seedance 不允许直接使用未认证真人素材，请先在 BytePlus 真人资产库完成认证并等待资产状态变为 Active。 ");
+    throw new UnrecoverableError(message);
+  }
+  throw new UnrecoverableError(`上游返回未知任务状态：${result.status}`);
 };
 
 const worker = new Worker<{ input: unknown }>("generation", async (job) => {
