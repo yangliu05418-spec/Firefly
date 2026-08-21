@@ -5,6 +5,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Film, ImageIcon, LoaderCircle, RefreshCw, Search, X } from "lucide-react";
 import { api } from "../../../api";
+import { RecoveringThumbnail } from "../../../recovering-image";
 import { useAssetCacheUserId } from "../../../asset-cache-context";
 import { assetMetadataCache, filterCachedAssets, loadAssetsCacheFirst } from "../../../asset-metadata-cache";
 import type { LibraryAsset, Task } from "../../../types";
@@ -117,7 +118,7 @@ export function CanvasMediaInsertModal({ open, canvasId, onClose, onInserted }: 
                 {filteredVideos.map((task) => (
                   <li key={task.id}>
                     <button type="button" className="canvas-insert__item" disabled={importing !== null} onClick={() => void insert("video", { taskId: task.id, title: task.prompt || "参考素材生成" })}>
-                      {task.posterUrl ? <img src={task.posterUrl} alt="" loading="lazy" decoding="async" /> : <span className="canvas-insert__thumb"><Film /></span>}
+                      {task.posterUrl ? <RecoveringThumbnail src={task.posterUrl} alt="视频海报" fallbackClassName="canvas-insert__thumb" manualRecovery={false} loading="lazy" decoding="async" /> : <span className="canvas-insert__thumb"><Film /></span>}
                       <span className="canvas-insert__meta"><b>{task.prompt || "参考素材生成"}</b><small>{task.ratio} · {task.duration}s</small></span>
                       {importing === task.id ? <LoaderCircle className="spin canvas-insert__spinner" /> : <i title="插入画布">插入</i>}
                     </button>
@@ -134,7 +135,7 @@ export function CanvasMediaInsertModal({ open, canvasId, onClose, onInserted }: 
               {filteredImages.map((asset) => (
                 <li key={asset.Id}>
                   <button type="button" className="canvas-insert__item" disabled={importing !== null || !asset.UploadId || asset.Status !== "Active"} title={!asset.UploadId ? "外部链接素材暂不支持插入画布" : asset.Status !== "Active" ? "素材仍在处理中" : "插入画布"} onClick={() => void insert("image", { uploadId: asset.UploadId!, name: asset.Name || "图片" })}>
-                    {asset.URL ? <img src={asset.URL} alt="" loading="lazy" decoding="async" /> : <span className="canvas-insert__thumb"><ImageIcon /></span>}
+                    {asset.URL ? <RecoveringThumbnail src={asset.URL} alt={asset.Name || "图片资产"} fallbackClassName="canvas-insert__thumb" manualRecovery={false} loading="lazy" decoding="async" /> : <span className="canvas-insert__thumb"><ImageIcon /></span>}
                     <span className="canvas-insert__meta"><b>{asset.Name || "未命名图片"}</b><small>{asset.Status !== "Active" ? (asset.Status === "Processing" ? "处理中" : "处理失败") : "长期保存"}</small></span>
                     {importing === asset.UploadId ? <LoaderCircle className="spin canvas-insert__spinner" /> : <i title="插入画布">插入</i>}
                   </button>

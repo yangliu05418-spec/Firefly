@@ -4,7 +4,8 @@
  * 裁剪：插件体系、批量生成、Config 节点、AI 面板；主题走 CSS 变量（Firefly 固定暗色）。
  */
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { Group, Image as ImageIcon, Music2, Video } from "lucide-react";
+import { Group, Image as ImageIcon, LoaderCircle, Music2, RefreshCw, Video } from "lucide-react";
+import { RecoveringImage, type ImageRecoveryState } from "../../../recovering-image";
 import type { CanvasNode as CanvasNodeData, CanvasPosition } from "../canvas-types";
 import { getNodeSpec, NODE_MIN_HEIGHT, NODE_MIN_WIDTH } from "../core/nodes";
 import { canvasMediaUrl } from "../canvas-media";
@@ -343,20 +344,26 @@ function TextNodeContent({ node, isEditingContent, textareaRef, onContentChange,
 
 function ImageNodeContent({ node }: { node: CanvasNodeData }) {
   const src = canvasMediaUrl(node);
-  const [failed, setFailed] = useState(false);
-  useEffect(() => setFailed(false), [src]);
-  if (!src || failed) {
+  if (!src) {
     return (
       <div className="canvas-node__empty">
         <i><ImageIcon /></i>
-        <span>{failed ? "图片加载失败" : "图片节点"}</span>
-        <small>{failed ? "可在资产归档中重新插入" : "通过资产归档插入"}</small>
+        <span>图片节点</span>
+        <small>通过资产归档插入</small>
       </div>
     );
   }
+  const fallback = ({ phase, retry }: ImageRecoveryState) => (
+    <div className="canvas-node__empty" role="status" aria-live="polite">
+      <i>{phase === "retrying" ? <LoaderCircle className="spin" /> : <ImageIcon />}</i>
+      <span>{phase === "retrying" ? "正在重新载入图片" : "图片连接失败"}</span>
+      <small>{phase === "retrying" ? "不会丢失当前画布内容" : "素材仍保留在项目中"}</small>
+      {phase === "failed" && <button type="button" data-canvas-no-zoom onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); retry(); }}><RefreshCw />重新加载</button>}
+    </div>
+  );
   return (
     <div className="canvas-node__media">
-      <img src={src} alt={node.title} draggable={false} loading="lazy" decoding="async" onDragStart={(event) => event.preventDefault()} onError={() => setFailed(true)} className={node.metadata.freeResize ? "canvas-node__img canvas-node__img--fill" : "canvas-node__img"} data-canvas-no-zoom />
+      <RecoveringImage src={src} alt={node.title} draggable={false} loading="lazy" decoding="async" onDragStart={(event) => event.preventDefault()} className={node.metadata.freeResize ? "canvas-node__img canvas-node__img--fill" : "canvas-node__img"} data-canvas-no-zoom fallback={fallback} />
     </div>
   );
 }

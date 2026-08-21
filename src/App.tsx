@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ImgHTMLAttributes } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Archive, ArrowRight, AudioLines, Check, CheckSquare2, ChevronDown, ChevronRight, Clock3, Clapperboard, Copy, Download, Film, Home, ImageIcon, Layers3, LayoutGrid, Library, LoaderCircle, LogOut, Menu, MessageSquare, PanelLeftClose, Pencil, Play, Plus, RefreshCw, Search, Send, Settings2, Sparkles, Square, Trash2, Upload, Video, WandSparkles, X } from "lucide-react";
 import { api, inferUploadType, listenForSignedOut, notifySignedOut, uploadFile } from "./api";
@@ -21,7 +21,7 @@ import { uploadFileUntilAccepted } from "./upload-acceptance";
 import { assetPreviewSource } from "./asset-preview-source";
 import { forgetPrivateMediaCacheUser, scopePrivateMediaCacheToUser } from "./private-media-cache";
 import { usePendingAssetPreviews } from "./use-pending-asset-previews";
-import { RecoveringImage } from "./recovering-image";
+import { RecoveringImage, RecoveringThumbnail } from "./recovering-image";
 
 const modeLabels: Record<CreationMode, string> = { omni: "全能参考", first_frame: "首帧生成", first_last: "首尾帧", edit: "视频编辑", extend: "视频续写", text: "文本生成" };
 const modeNotes: Record<CreationMode, string> = { omni: "自由组合图片、视频和音频", first_frame: "锁定开场画面继续创作", first_last: "精确控制起点与落点", edit: "替换、增删或重绘画面", extend: "向前、向后或多段衔接", text: "只用提示词生成镜头" };
@@ -37,18 +37,6 @@ const statusText: Record<Task["status"], string> = { queued: "等待调度", sub
 const taskStatusText = (task: Task) => task.status === "succeeded" && task.mediaStatus === "archiving" ? "正在归档成片" : task.status === "succeeded" && task.mediaStatus === "failed" ? "成片归档待恢复" : statusText[task.status];
 const assetCategoryLabels: Record<AssetCategory, string> = { character: "角色", scene: "场景", prop: "道具", material: "素材" };
 const assetCategories = Object.keys(assetCategoryLabels) as AssetCategory[];
-
-function RecoveringThumbnail({ fallbackClassName, manualRecovery = true, alt, ...props }: Omit<ImgHTMLAttributes<HTMLImageElement>, "src" | "onError"> & { src: string; fallbackClassName?: string; manualRecovery?: boolean }) {
-  return <RecoveringImage {...props} alt={alt} fallback={({ phase, retry }) => {
-    const failed = phase === "failed";
-    const interactive = failed && manualRecovery;
-    const activate = (event: { stopPropagation: () => void }) => { event.stopPropagation(); if (interactive) retry(); };
-    return <span className={fallbackClassName ?? "image-recovery-fallback"} role={interactive ? "button" : "status"} tabIndex={interactive ? 0 : undefined} aria-label={interactive ? `重新加载${alt || "图片"}` : failed ? `${alt || "图片"}暂时无法载入` : "正在重新载入图片"} title={interactive ? "图片载入失败，点击重新加载" : failed ? "图片暂时无法载入" : "正在重新载入图片"} onClick={interactive ? activate : undefined} onKeyDown={interactive ? (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activate(event); } } : undefined}>
-      {failed ? <RefreshCw /> : <LoaderCircle className="spin" />}
-      {interactive && <small>重新加载</small>}
-    </span>;
-  }} />;
-}
 
 const waitingMoments = [
   { title: "镜头正在成形", detail: "正在理解画面、运动与声音之间的关系" },
@@ -218,7 +206,7 @@ function PromptEditor({ value, placeholder, assets, disabled, attach, change }: 
   const popup = open && createPortal(<div className={`mention-pop ${anchor.above ? "mention-pop--above" : ""}`} style={{ left: anchor.left, top: anchor.top }} role="listbox" aria-label="选择参考资产" onMouseDown={(event) => event.preventDefault()}>
     <header><span>@ 选择参考资产</span><small>{query ? `搜索“${query}”` : "输入名称可筛选"}</small></header>
     <div className="mention-pop__list">{libraryLoading && !candidates.length ? <div className="mention-pop__state"><LoaderCircle className="spin" /> 正在读取资产</div> : candidates.length ? candidates.map((asset, index) => <button key={asset.id} className={index === active ? "active" : ""} role="option" aria-selected={index === active} onMouseDown={(event) => { event.preventDefault(); selectAsset(asset); }}>
-      {asset.preview ? <img src={asset.preview} alt="" /> : <span className="mention-pop__media">{asset.type === "video" ? <Video /> : asset.type === "audio" ? <AudioLines /> : <Library />}</span>}
+      {asset.preview ? <RecoveringThumbnail src={asset.preview} alt={asset.name || "参考素材"} fallbackClassName="mention-pop__media" manualRecovery={false} /> : <span className="mention-pop__media">{asset.type === "video" ? <Video /> : asset.type === "audio" ? <AudioLines /> : <Library />}</span>}
       <span><b>{asset.name}</b><small>{promptAssetLabel(asset, assets.some((item) => item.id === asset.id) ? assets : [...assets, asset])}</small></span><Check />
     </button>) : <div className="mention-pop__state">没有匹配的可用资产</div>}</div>
     <footer>↑↓ 选择　Enter 插入　Esc 关闭</footer>
@@ -475,7 +463,7 @@ function Composer({ models, compact, sessionId, onCreated, onImagesGenerated }: 
   return <div className={`composer ${compact ? "composer--compact" : ""}`} onClick={(e) => e.stopPropagation()}>
     {!compact && <h1>今晚，想创造什么？</h1>}
     <div className="composer-shell">
-      {!!assets.length && <div className="asset-strip">{assets.map((asset, index) => <div className="asset-chip" key={asset.id}>{asset.preview ? <img src={asset.preview} /> : asset.type === "image" ? <ImageIcon /> : asset.type === "video" ? <Video /> : <AudioLines />}<span><b>{asset.role === "first_frame" ? "首帧" : asset.role === "last_frame" ? "尾帧" : `${asset.type === "image" ? "图片" : asset.type === "video" ? "视频" : "音频"} ${index + 1}`}</b><small>{asset.status === "Processing" ? "正在恢复素材引用" : asset.phase === "preparing" ? "正在检查图片" : asset.phase === "verifying" ? "文件已上传 · 正在准备引用" : asset.progress === 100 ? `${asset.name}${asset.normalized ? " · 已自动补白" : ""}` : `上传 ${asset.progress ?? 0}%`}</small></span>{asset.progress !== 100 && <i style={{ width: `${asset.progress ?? 0}%` }} />}<button onClick={() => removeAttachedAsset(asset.id)}><X /></button></div>)}</div>}
+      {!!assets.length && <div className="asset-strip">{assets.map((asset, index) => <div className="asset-chip" key={asset.id}>{asset.preview ? <RecoveringThumbnail src={asset.preview} alt={asset.name || "参考素材"} fallbackClassName="asset-chip__media" manualRecovery={false} /> : asset.type === "image" ? <ImageIcon /> : asset.type === "video" ? <Video /> : <AudioLines />}<span><b>{asset.role === "first_frame" ? "首帧" : asset.role === "last_frame" ? "尾帧" : `${asset.type === "image" ? "图片" : asset.type === "video" ? "视频" : "音频"} ${index + 1}`}</b><small>{asset.status === "Processing" ? "正在恢复素材引用" : asset.phase === "preparing" ? "正在检查图片" : asset.phase === "verifying" ? "文件已上传 · 正在准备引用" : asset.progress === 100 ? `${asset.name}${asset.normalized ? " · 已自动补白" : ""}` : `上传 ${asset.progress ?? 0}%`}</small></span>{asset.progress !== 100 && <i style={{ width: `${asset.progress ?? 0}%` }} />}<button onClick={() => removeAttachedAsset(asset.id)}><X /></button></div>)}</div>}
       <div className={`prompt-row ${referenceSlots.length > 1 ? "prompt-row--dual" : ""} ${!referenceSlots.length ? "prompt-row--text" : ""}`}>
         {!!referenceSlots.length && <div className="reference-slots">{referenceSlots.map((label, index) => <button className="add-reference" key={label} onClick={() => fileInput.current?.click()} disabled={(mode === "first_frame" && assets.length >= 1) || (mode === "first_last" && assets.length > index)}><Plus /><span>{label}</span></button>)}</div>}
         <PromptEditor value={prompt} change={setPrompt} placeholder={engine === "image" ? "描述你想生成的画面；上传参考图即可进行图生图……" : modePlaceholders[mode]} assets={assets} disabled={mode === "text" && engine === "video"} attach={attachMentionAsset} />
@@ -903,7 +891,7 @@ function AssetArchive({ tasks, imageResults, models, onCreate, onDelete, onRemov
       : !filtered.length ? <div className="archive-empty archive-empty--search"><Search /><h2>没有找到相关视频</h2><p>换一个关键词，或清除当前搜索。</p><button onClick={() => setQuery("")}>清除搜索</button></div>
       : <div className="archive-grid">{filtered.map((task) => { const model = models.find((item) => item.id === task.model); return <article className="archive-card" key={task.id}>
         <button className="archive-card__media" onClick={() => setPreview(task)} aria-label={`预览 ${task.prompt || "生成视频"}`}>
-          <div className="archive-card__fallback"><Film /><span>{task.ratio}</span></div>{task.posterUrl && <img key={`${task.id}-${task.mediaRevision ?? 0}`} src={task.posterUrl} alt="" loading="lazy" decoding="async" onLoad={(event) => { event.currentTarget.style.display = "block"; event.currentTarget.style.opacity = "1"; }} onError={(event) => { event.currentTarget.style.display = "none"; }} />}<span className="archive-card__play"><Play /></span><small>{task.duration}s</small>
+          <div className="archive-card__fallback"><Film /><span>{task.ratio}</span></div>{task.posterUrl && <RecoveringImage key={`${task.id}-${task.mediaRevision ?? 0}`} src={task.posterUrl} alt="" loading="lazy" decoding="async" fallback={() => null} />}<span className="archive-card__play"><Play /></span><small>{task.duration}s</small>
         </button>
         <div className="archive-card__body"><h2 title={task.prompt || "参考素材生成"}>{task.prompt || "参考素材生成"}</h2><p>{model?.name ?? task.model} · {task.resolution} · {task.ratio}</p><footer><time>{new Date(task.createdAt).toLocaleDateString("zh-CN")}</time><div><CaseIdButton task={task} compact /><a href={task.downloadUrl ?? task.videoUrl} target="_blank" rel="noreferrer" title="下载视频" onClick={() => announceDownload(task)}><Download /></a><button title="插入画布" onClick={() => onInsertCanvas({ kind: "video", task })}><LayoutGrid /></button><button title="删除项目" onClick={() => onDelete(task)}><Trash2 /></button></div></footer></div>
       </article>; })}</div>}
