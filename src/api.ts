@@ -141,7 +141,7 @@ async function uploadTosPart(uploadId: string, initial: SignedPart, blob: Blob, 
 export type UploadedFile = { id: string; uploadId?: string; name: string; type: UploadKind; size: number; url?: string; normalized?: boolean };
 type UploadCompletionResponse = UploadedFile & { state?: "processing" | "ready" };
 export type UploadProgressPhase = "preparing" | "uploading" | "verifying" | "ready";
-export type UploadFileOptions = { signal?: AbortSignal; onTransportComplete?: (upload: UploadedFile) => void; waitForReady?: boolean };
+export type UploadFileOptions = { signal?: AbortSignal; onTransportComplete?: (upload: UploadedFile) => void; onPreparedPreview?: (blob: Blob) => void; waitForReady?: boolean };
 
 const finalizeUpload = async (uploadId: string, body: unknown, signal?: AbortSignal, onTransportComplete?: (upload: UploadedFile) => void, waitForReady = true): Promise<UploadCompletionResponse> => {
   const deadline = Date.now() + 240_000;
@@ -179,7 +179,8 @@ const finalizeUpload = async (uploadId: string, body: unknown, signal?: AbortSig
 export async function uploadFile(file: File, type: UploadKind, onProgress: (value: number, phase: UploadProgressPhase) => void, options: UploadFileOptions = {}) {
   const signal = options.signal;
   onProgress(0, type === "image" ? "preparing" : "uploading");
-  const prepared = type === "image" ? await prepareImageForUpload(file, signal) : { file, normalized: false };
+  const prepared = type === "image" ? await prepareImageForUpload(file, signal, Boolean(options.onPreparedPreview)) : { file, normalized: false, previewBlob: undefined };
+  if (prepared.previewBlob) options.onPreparedPreview?.(prepared.previewBlob);
   const upload = prepared.file;
   let transportReported = false;
   const reportTransportComplete = options.onTransportComplete
