@@ -134,6 +134,7 @@ jobs:
           grep -q 'assert_legacy_container.*service' ops/firefly-deploy.sh
           grep -q '/api/health/workers' ops/firefly-deploy.sh
           grep -q 'failed_worker_readiness' ops/firefly-deploy.sh
+          grep -q 'flock -w 30 9' ops/firefly-deploy.sh
           grep -q 'image-worker:dist-server/image-worker.js' ops/firefly-deploy.sh
           grep -q 'web worker image-worker media-worker canvas-worker' ops/firefly-retire-slot.sh
 
