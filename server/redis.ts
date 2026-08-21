@@ -3,15 +3,22 @@ import { Queue } from "bullmq";
 import { config } from "./config.js";
 import type { StoredTask } from "./db.js";
 import { users } from "./store.js";
+import { queueRedisOptions, requestRedisOptions } from "./redis-options.js";
 
-export const redis = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
-export const generationQueue = new Queue("generation", { connection: redis });
-export const mediaQueue = new Queue("media", { connection: redis });
-export const previewQueue = new Queue("preview", { connection: redis });
-export const assetQueue = new Queue("asset-ingest", { connection: redis });
-export const canvasQueue = new Queue("canvas-jobs", { connection: redis });
-export const imageGenerationQueue = new Queue("image-generation", { connection: redis });
-export const uploadFinalizationQueue = new Queue("upload-finalization", { connection: redis });
+export const redis = new Redis(config.redisUrl, requestRedisOptions);
+export const queueConnection = new Redis(config.redisUrl, queueRedisOptions);
+// Readiness and the health auditor own dependency reporting. Explicit
+// listeners prevent ioredis from emitting noisy unhandled-error diagnostics
+// for the same outage while both clients are reconnecting.
+redis.on("error", () => undefined);
+queueConnection.on("error", () => undefined);
+export const generationQueue = new Queue("generation", { connection: queueConnection });
+export const mediaQueue = new Queue("media", { connection: queueConnection });
+export const previewQueue = new Queue("preview", { connection: queueConnection });
+export const assetQueue = new Queue("asset-ingest", { connection: queueConnection });
+export const canvasQueue = new Queue("canvas-jobs", { connection: queueConnection });
+export const imageGenerationQueue = new Queue("image-generation", { connection: queueConnection });
+export const uploadFinalizationQueue = new Queue("upload-finalization", { connection: queueConnection });
 
 export type ImageGenerationQueuePayload = {
   ownerId: string;

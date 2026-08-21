@@ -67,5 +67,9 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
     if (!user) return res.status(401).json({ error: "请使用企业飞书账号登录" });
     res.locals.user = user;
     next();
-  } catch (error) { next(error); }
+  } catch (error) {
+    console.warn(JSON.stringify({ type: "session_validation_unavailable", at: new Date().toISOString(), requestId: res.locals.requestId, code: (error as { code?: string }).code ?? "unknown" }));
+    res.setHeader("Retry-After", "2");
+    return res.status(503).json({ error: "登录状态暂时无法验证，请稍后重试", requestId: res.locals.requestId });
+  }
 };

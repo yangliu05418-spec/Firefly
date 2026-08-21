@@ -14,7 +14,7 @@ import { canvasDocumentSchema, DEFAULT_CANVAS_DOCUMENT, DEFAULT_CANVAS_DOCUMENT_
 import { resolveCanvasContext } from "./canvas-context.js";
 import { publicCanvasProject, publicCanvasProjectDetail } from "./canvas-public.js";
 import { consumeFeishuAuthorization, createFeishuAuthorization, exchangeFeishuCode } from "./feishu.js";
-import { assetQueue, canvasQueue, generationQueue, imageGenerationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, previewQueue, readTask, redis, type StoredTask, uploadFinalizationQueue } from "./redis.js";
+import { assetQueue, canvasQueue, generationQueue, imageGenerationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, previewQueue, queueConnection, readTask, redis, type StoredTask, uploadFinalizationQueue } from "./redis.js";
 import { canAccessTask } from "./task-access.js";
 import { publicTask } from "./task-public.js";
 import { validateGeneration } from "./provider.js";
@@ -1520,7 +1520,7 @@ const shutdown = async () => {
   const forceClose = setTimeout(() => server.closeAllConnections(), Math.min(config.shutdownGraceMs, 10_000));
   await httpClosed; clearTimeout(forceClose);
   await Promise.all([generationQueue.close(), imageGenerationQueue.close(), mediaQueue.close(), previewQueue.close(), assetQueue.close(), canvasQueue.close(), uploadFinalizationQueue.close()]);
-  await redis.quit(); users.close(); process.exit(0);
+  await Promise.allSettled([redis.quit(), queueConnection.quit()]); users.close(); process.exit(0);
 };
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);

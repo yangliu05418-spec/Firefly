@@ -1,7 +1,8 @@
 import { Worker, type Job } from "bullmq";
+import { Redis } from "ioredis";
 import { config } from "./config.js";
 import { users } from "./store.js";
-import { mediaQueue, redis } from "./redis.js";
+import { mediaQueue } from "./redis.js";
 import { imageModelById, openRouterResolution } from "./image-models.js";
 import { downloadImageBuffer, generateCanvasText, generateSingleImage } from "./openrouter.js";
 import { storeGeneratedImage } from "./generated-media.js";
@@ -14,9 +15,10 @@ import { shouldFinalizeJobFailure } from "./job-failure.js";
 type TextPayload = { instruction: string; currentText: string; context: string };
 type ImagePayload = { prompt: string; model: string; ratio: string; resolution: string; referenceAssetIds: string[] };
 type CanvasQueuePayload = { canvasJobId: string; kind: "text" | "image" | "character_tool"; payload: TextPayload | ImagePayload };
+const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 
 const publish = async (canvasId: string, value: unknown) => {
-  await redis.publish(`canvas:events:${canvasId}`, JSON.stringify(value)).catch(() => undefined);
+  await connection.publish(`canvas:events:${canvasId}`, JSON.stringify(value)).catch(() => undefined);
 };
 
 const discardUncommittedMedia = async (mediaId: string, ownerId: string) => {
@@ -114,12 +116,12 @@ const worker = new Worker<CanvasQueuePayload>("canvas-jobs", async (job) => {
   await processCanvasJob(job);
   users.completeAsyncJobIntent("canvas-jobs", job.id!);
 }, {
-  connection: redis,
+  connection,
   concurrency: 2,
   lockDuration: Math.max(300_000, config.openrouterRequestTimeoutMs + 60_000),
 });
 await worker.waitUntilReady();
-const heartbeat = await startWorkerHeartbeat(redis, "canvas");
+const heartbeat = await startWorkerHeartbeat(connection, "canvas");
 
 worker.on("failed", (job, error) => {
   if (job?.id && shouldFinalizeJobFailure(error, job.attemptsMade, job.opts.attempts ?? 1)) users.completeAsyncJobIntent("canvas-jobs", job.id);
@@ -133,7 +135,7 @@ const shutdown = async () => {
   await heartbeat.stop();
   const graceful = await closeWorkersWithin([worker], config.shutdownGraceMs);
   console.info(JSON.stringify({ type: "worker_shutdown", at: new Date().toISOString(), worker: "canvas", graceful }));
-  await redis.quit(); users.close(); process.exit(0);
+  await connection.quit(); users.close(); process.exit(0);
 };
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
