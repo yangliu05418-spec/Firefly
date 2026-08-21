@@ -42,6 +42,7 @@ import { canvasProjectAssetSignedUrl, createCanvasProjectMediaHandler, publicCan
 import { readWorkerHealth, type WorkerHealthSnapshot } from "./worker-heartbeat.js";
 import { canvasGeneratedMediaId } from "./canvas-job-media.js";
 import { MediaValidationError, validateMedia } from "./media-validation.js";
+import { withinDeadline } from "./deadline.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -1192,27 +1193,46 @@ app.get("/api/canvases/:id/events", requireAuth, async (req, res) => {
   const canvasId = param(req.params.id);
   if (!accessibleCanvas(canvasId, user.id)) return res.status(404).json({ error: "画布不存在" });
   const updatedAfter = Number(req.header("last-event-id") ?? req.query.updatedAfter ?? 0) || 0;
-  res.status(200);
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders();
-  const subscriber = redis.duplicate();
+  const subscriber = redis.duplicate({ maxRetriesPerRequest: 1, connectTimeout: 3_000, commandTimeout: 3_000 });
   const channel = `canvas:events:${canvasId}`;
-  const heartbeat = setInterval(() => res.write(": keepalive\n\n"), 15_000);
+  let heartbeat: NodeJS.Timeout | undefined;
   let closed = false;
-  req.on("close", () => {
-    closed = true; clearInterval(heartbeat);
-    void subscriber.unsubscribe(channel).finally(() => subscriber.quit());
-  });
+  const closeSubscriber = () => {
+    if (closed) return;
+    closed = true;
+    if (heartbeat) clearInterval(heartbeat);
+    subscriber.disconnect(false);
+  };
+  res.once("close", closeSubscriber);
+  subscriber.on("error", () => undefined);
   subscriber.on("message", (_channel, message) => {
     try {
       const event = JSON.parse(message) as { type?: string; job?: CanvasJob };
       if (event.job?.ownerId === user.id) res.write(`id: ${event.job.updatedAt}\nevent: ${event.type ?? "message"}\ndata: ${JSON.stringify(publicCanvasJob(event.job))}\n\n`);
     } catch { /* 丢弃无法解析的内部事件 */ }
   });
-  await subscriber.subscribe(channel);
+  try {
+    await withinDeadline(subscriber.subscribe(channel), 4_000);
+  } catch {
+    subscriber.disconnect(false);
+    if (closed) return;
+    if (!res.headersSent) return res.status(503).json({ error: "实时更新暂时不可用，请稍后重试", requestId: res.locals.requestId });
+    if (!res.writableEnded) res.end();
+    return;
+  }
   if (closed) return;
+  subscriber.once("close", () => {
+    if (closed) return;
+    closed = true;
+    if (heartbeat) clearInterval(heartbeat);
+    if (!res.writableEnded) res.end();
+  });
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+  heartbeat = setInterval(() => res.write(": keepalive\n\n"), 15_000);
   // Subscribe before replaying durable rows so an event cannot fall into the
   // gap between the SQLite snapshot and Redis subscription. Replaying the
   // previous millisecond may duplicate an event but can never lose one.

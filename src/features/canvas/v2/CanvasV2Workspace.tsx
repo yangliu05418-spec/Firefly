@@ -12,6 +12,7 @@ import { uploadFileUntilAccepted } from "../../../upload-acceptance";
 import { filterCachedAssets, loadAssetsCacheFirst } from "../../../asset-metadata-cache";
 import { runWithConcurrency } from "../../../concurrency";
 import { readPendingAssetPreview, removePendingAssetPreview, storePendingAssetPreview } from "../../../pending-asset-preview-cache";
+import { useAdaptiveRefresh } from "../../../use-adaptive-refresh";
 import type { AssetCategory, ImageModel, LibraryAsset, ModelCapability, SessionUser } from "../../../types";
 import {
   acquireCanvasLease, cancelCanvasJob, createCanvasJob, getCanvasV2, importCanvasProjectAsset, listCanvasAssets, listCanvasJobs,
@@ -515,7 +516,6 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
       return { ...node, data: { ...node.data, domain: { ...node.data.domain, data: { ...node.data.domain.data, status, error: asset.status === "failed" ? "素材归档失败，可从资产面板重试上传" : undefined } } } };
     }));
   }, [canvasId, setNodes]);
-  useEffect(() => { if (loadState === "ready") void Promise.all([refreshAssets(), listCanvasJobs(canvasId).then(({ Items }) => Items.forEach((job) => applyJob(job)))]); }, [canvasId, loadState, refreshAssets]);
   useEffect(() => {
     if (!assets.some((asset) => asset.status === "copying")) return;
     const timer = window.setTimeout(() => void refreshAssets(), document.hidden ? 10_000 : 1500);
@@ -565,12 +565,35 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     if (job.status === "succeeded" && job.resultAssetId) void refreshAssets();
   }, [refreshAssets, setNodes]);
 
+  const jobCursor = useRef(0);
+  const activeJobs = useRef(new Set<string>());
+  const [hasActiveJobs, setHasActiveJobs] = useState(false);
+  const acceptJob = useCallback((job: CanvasJob) => {
+    jobCursor.current = Math.max(jobCursor.current, job.updatedAt);
+    if (["queued", "running"].includes(job.status)) activeJobs.current.add(job.id);
+    else activeJobs.current.delete(job.id);
+    setHasActiveJobs(activeJobs.current.size > 0);
+    applyJob(job);
+  }, [applyJob]);
+  const refreshJobs = useCallback(async () => {
+    const { Items } = await listCanvasJobs(canvasId, Math.max(0, jobCursor.current - 1));
+    Items.forEach(acceptJob);
+  }, [acceptJob, canvasId]);
+
+  useEffect(() => {
+    jobCursor.current = 0;
+    activeJobs.current.clear();
+    setHasActiveJobs(false);
+    if (loadState === "ready") void Promise.all([refreshAssets(), refreshJobs()]);
+  }, [canvasId, loadState, refreshAssets, refreshJobs]);
+  useAdaptiveRefresh(loadState === "ready", hasActiveJobs, refreshJobs);
+
   useEffect(() => {
     if (loadState !== "ready") return;
     const events = new EventSource(`/api/canvases/${encodeURIComponent(canvasId)}/events`);
-    events.addEventListener("canvas_job", (event) => { try { applyJob(JSON.parse((event as MessageEvent).data) as CanvasJob); } catch { /* ignore */ } });
+    events.addEventListener("canvas_job", (event) => { try { acceptJob(JSON.parse((event as MessageEvent).data) as CanvasJob); } catch { /* ignore */ } });
     return () => events.close();
-  }, [applyJob, canvasId, loadState]);
+  }, [acceptJob, canvasId, loadState]);
 
   const onNodesChange = useCallback((changes: NodeChange<CanvasFlowNode>[]) => onNodesChangeBase(changes), [onNodesChangeBase]);
   const onConnect = useCallback((connection: Connection) => {
@@ -797,7 +820,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     else {
       body = { kind: "video", nodeId: targetId, revision: currentRevision, payload: { generation: { prompt: composer.prompt, model: composer.model, mode: videoMode, ratio: composer.ratio, resolution: composer.resolution, duration: composer.duration, generateAudio: videoModel?.supportsAudio ?? false, seed: -1, cameraFixed: false, watermark: false, outputFormat: "mp4" }, references: [] } };
     }
-    try { const job = await createCanvasJob(canvasId, body); applyJob(job); setComposer(null); }
+    try { const job = await createCanvasJob(canvasId, body); acceptJob(job); setComposer(null); }
     catch (error) { setMessage(error instanceof Error ? error.message : "任务提交失败"); }
   };
 
