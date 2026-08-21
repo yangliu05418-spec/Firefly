@@ -8,6 +8,7 @@ import { AssetRegistrationRejected, isRetryableAssetRejection, prepareProviderAs
 import { users } from "./store.js";
 import { closeWorkersWithin } from "./shutdown.js";
 import { createImageGenerationWorker } from "./image-generation-worker.js";
+import { shouldFinalizeJobFailure } from "./job-failure.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -70,7 +71,7 @@ const imageWorker = createImageGenerationWorker(connection);
 
 worker.on("failed", async (job, error) => {
   if (!job?.id) return;
-  if (job.attemptsMade < (job.opts.attempts ?? 1)) return;
+  if (!shouldFinalizeJobFailure(error, job.attemptsMade, job.opts.attempts ?? 1)) return;
   try {
     const task = await readTask(job.id);
     if (!task) return;

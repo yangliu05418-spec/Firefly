@@ -123,6 +123,3 @@ export const processImageGenerationAttempt = async (
   deps.updateTask(task.id, task.ownerId, { status: "succeeded", items, failures });
   console.info(JSON.stringify({ type: "image_generation_done", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, requested: task.requestedCount, ok: items.length, failed: failures.length }));
 };
-
-export const shouldFinalizeImageGenerationFailure = (error: unknown, attemptsMade: number, maxAttempts: number) =>
-  error instanceof UnrecoverableError || (error instanceof Error && error.name === "UnrecoverableError") || attemptsMade >= maxAttempts;

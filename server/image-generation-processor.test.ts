@@ -1,9 +1,7 @@
-import { UnrecoverableError } from "bullmq";
 import { describe, expect, it, vi } from "vitest";
 import type { ImageGenerationTask, MediaObject } from "./db.js";
 import {
   processImageGenerationAttempt,
-  shouldFinalizeImageGenerationFailure,
   type ImageGenerationProcessorDependencies,
 } from "./image-generation-processor.js";
 import { OpenRouterError } from "./openrouter.js";
@@ -153,9 +151,4 @@ describe("image generation processor", () => {
     expect(state.discard).toHaveBeenCalledWith(media);
   });
 
-  it("finalizes unrecoverable errors immediately but waits for transient retry exhaustion", () => {
-    expect(shouldFinalizeImageGenerationFailure(new UnrecoverableError("bad reference"), 1, 3)).toBe(true);
-    expect(shouldFinalizeImageGenerationFailure(new Error("network"), 1, 3)).toBe(false);
-    expect(shouldFinalizeImageGenerationFailure(new Error("network"), 3, 3)).toBe(true);
-  });
 });

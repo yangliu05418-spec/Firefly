@@ -369,8 +369,9 @@ test("image generation confirms immediately and moves provider waiting into the 
 test("new creation sessions isolate the stage and can be renamed or removed without deleting assets", async ({ page }) => {
   await mockAuthenticatedApi(page);
   await page.goto("/studio");
-  await expect(page.getByText("新创作", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "新创作", exact: true }).click();
+  const newCreation = page.getByRole("button", { name: "新创作", exact: true });
+  await expect(newCreation).toBeVisible();
+  await newCreation.click();
   await expect.poll(() => new URL(page.url()).pathname).toContain("/studio/sessions/session-e2e-2");
   const active = page.locator(".session-item.is-active");
   await active.hover();
