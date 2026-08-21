@@ -10,7 +10,7 @@ export const publicUserAsset = (asset: UserAsset) => ({
   Name: asset.name,
   AssetType: asset.assetType,
   Status: asset.status,
-  URL: asset.uploadId ? `/api/assets/${encodeURIComponent(asset.id)}/source` : asset.url,
+  URL: asset.uploadId ? `/api/assets/${encodeURIComponent(asset.id)}/source${asset.assetType === "Image" ? "?variant=thumbnail" : ""}` : asset.url,
   GroupId: asset.groupId,
   UploadId: asset.uploadId,
   Category: asset.category,

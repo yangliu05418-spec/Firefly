@@ -46,6 +46,18 @@ describe("stable TOS preview URLs", () => {
     expect(new Set(urls).size).toBe(1);
   });
 
+  it("keeps transformed thumbnails isolated from original media URLs", async () => {
+    const { cache } = memoryCache();
+    const sign = vi.fn((_key: string, options: { process?: string }) => `https://tos.example/image?process=${options.process ?? "original"}`);
+    const common = { objectKey: "assets/a/reference.png", fileName: "reference.png", cache, sign, signatureTtlSeconds: 7200 };
+
+    const original = await stablePreviewUrl(common);
+    const thumbnail = await stablePreviewUrl({ ...common, process: "image/resize,w_640/format,webp" });
+
+    expect(original).not.toBe(thumbnail);
+    expect(sign).toHaveBeenCalledTimes(2);
+  });
+
   it("does not cache when the signature has no safety window", async () => {
     const { cache } = memoryCache();
     const sign = vi.fn(() => "https://tos.example/video?signature=short");

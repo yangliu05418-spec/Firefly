@@ -12,13 +12,14 @@ type Cache = {
 type StablePreviewUrlOptions = {
   objectKey: string;
   fileName: string;
+  process?: string;
   cache?: Cache;
   signatureTtlSeconds?: number;
-  sign?: (key: string, options: { fileName: string; expires: number }) => string;
+  sign?: (key: string, options: { fileName: string; expires: number; process?: string }) => string;
 };
 
-const cacheKey = (objectKey: string, fileName: string) => {
-  const digest = crypto.createHash("sha256").update(objectKey).update("\0").update(fileName).digest("hex");
+const cacheKey = (objectKey: string, fileName: string, process = "") => {
+  const digest = crypto.createHash("sha256").update(objectKey).update("\0").update(fileName).update("\0").update(process).digest("hex");
   return `tos-preview-url:v1:${digest}`;
 };
 
@@ -30,19 +31,20 @@ const cacheKey = (objectKey: string, fileName: string) => {
 export const stablePreviewUrl = async ({
   objectKey,
   fileName,
+  process,
   cache = redis,
   signatureTtlSeconds = config.tosPreviewTtlSeconds,
   sign = signedObjectUrl
 }: StablePreviewUrlOptions) => {
   const ttl = previewRedirectCacheSeconds(signatureTtlSeconds);
-  if (ttl <= 0) return sign(objectKey, { fileName, expires: signatureTtlSeconds });
+  if (ttl <= 0) return sign(objectKey, { fileName, expires: signatureTtlSeconds, process });
 
-  const key = cacheKey(objectKey, fileName);
+  const key = cacheKey(objectKey, fileName, process);
   try {
     const cached = await cache.get(key);
     if (cached) return cached;
 
-    const generated = sign(objectKey, { fileName, expires: signatureTtlSeconds });
+    const generated = sign(objectKey, { fileName, expires: signatureTtlSeconds, process });
     const stored = await cache.set(key, generated, "EX", ttl, "NX");
     if (stored) return generated;
     return (await cache.get(key)) ?? generated;
@@ -52,6 +54,6 @@ export const stablePreviewUrl = async ({
       at: new Date().toISOString(),
       error: error instanceof Error ? error.message : "unknown"
     }));
-    return sign(objectKey, { fileName, expires: signatureTtlSeconds });
+    return sign(objectKey, { fileName, expires: signatureTtlSeconds, process });
   }
 };

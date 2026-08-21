@@ -89,12 +89,13 @@ export const inspectMediaObject = async (key: string, type: "image" | "video" | 
   catch { throw new Error(`TOS 无法读取${type === "video" ? "视频" : "图片"}元信息`); }
 };
 
-export const signedObjectUrl = (key: string, options: { download?: boolean; fileName?: string; expires?: number } = {}) => {
+export const signedObjectUrl = (key: string, options: { download?: boolean; fileName?: string; expires?: number; process?: string } = {}) => {
   requireTos();
   const download = Boolean(options.download);
   return tos.getPreSignedUrl({
     bucket: config.tosBucket, key, method: "GET",
     expires: options.expires ?? (download ? config.tosDownloadTtlSeconds : config.tosPreviewTtlSeconds),
+    query: options.process ? { "x-tos-process": options.process } : undefined,
     response: {
       contentDisposition: `${download ? "attachment" : "inline"}; filename*=UTF-8''${encodeURIComponent(options.fileName ?? path.basename(key))}`
     }
@@ -337,9 +338,17 @@ export const createPoster = async (sourceKey: string, targetKey: string) => {
   }
 };
 
-export const putObjectBuffer = async (key: string, body: Buffer, contentType: string) => {
+export const putObjectBuffer = async (key: string, body: Buffer, contentType: string, fileName = path.basename(key)) => {
   requireTos();
-  const response = await tos.putObject({ bucket: config.tosBucket, key, body, contentType, forbidOverwrite: true });
+  const response = await tos.putObject({
+    bucket: config.tosBucket,
+    key,
+    body,
+    contentType,
+    contentDisposition: `inline; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+    cacheControl: "private, max-age=604800, immutable, no-transform",
+    forbidOverwrite: true
+  });
   const size = Number((response.data as unknown as { contentLength?: number })?.contentLength ?? body.length) || body.length;
   return { size, etag: String((response.data as unknown as { etag?: string })?.etag ?? "").replace(/^"|"$/g, "") };
 };

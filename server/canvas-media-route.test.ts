@@ -37,6 +37,22 @@ describe("GET /api/canvas-media/:assetId", () => {
     expect(response.headers.get("cache-control")).toBe("private, max-age=60");
   });
 
+  it("supports asynchronous stable URL resolution", async () => {
+    const app = express();
+    app.use((_req, res, next) => { res.locals.user = { id: "owner-1" }; next(); });
+    app.get("/api/canvas-media/:assetId", createCanvasMediaHandler({
+      readCanvasAsset: () => asset("ready"),
+      signedObjectUrl: async () => "https://tos.example/stable-image.png",
+      cacheControl: "private, max-age=60"
+    }));
+    const server = app.listen(0, "127.0.0.1");
+    servers.push(server);
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const { port } = server.address() as AddressInfo;
+    const response = await fetch(`http://127.0.0.1:${port}/api/canvas-media/asset-1`, { redirect: "manual" });
+    expect(response.headers.get("location")).toBe("https://tos.example/stable-image.png");
+  });
+
   it("returns 404 for a missing or cross-user asset", async () => {
     expect((await request(null)).status).toBe(404);
     expect((await request(asset("ready", "owner-2"))).status).toBe(404);
