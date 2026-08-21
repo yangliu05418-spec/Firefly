@@ -29,6 +29,7 @@ import { acquireUploadCompletionLock, claimUploadSlot, releaseUploadCompletionLo
 import { canCreatePendingAsset } from "./asset-upload-admission.js";
 import { createCanvasAssetFromUpload, prepareCanvasAssetFromUpload } from "./canvas-assets.js";
 import { createCanvasMediaHandler } from "./canvas-media-route.js";
+import { createServiceWorkerHandler } from "./static-web.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
 import { publicUserAsset } from "./user-asset-public.js";
 import { IMAGE_MODELS, IMAGE_RATIOS, imageModelById, DEFAULT_IMAGE_MODEL } from "./image-models.js";
@@ -1480,6 +1481,7 @@ app.use((error: unknown, req: express.Request, res: express.Response, next: expr
 });
 
 const webDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist-web");
+app.get("/firefly-media-sw.js", createServiceWorkerHandler(webDir));
 app.use(express.static(webDir, { maxAge: "1y", immutable: true, index: false }));
 app.use((req, res, next) => {
   if (req.method !== "GET" || req.path.startsWith("/api/") || req.path.startsWith("/media/")) return next();
