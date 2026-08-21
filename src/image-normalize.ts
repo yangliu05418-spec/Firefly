@@ -1,4 +1,4 @@
-import type { ImageNormalizationPlan } from "./image-normalize-policy";
+import { imageNormalizationPlan, type ImageNormalizationPlan } from "./image-normalize-policy";
 
 export type PreparedImage = { file: File; normalized: boolean; plan?: ImageNormalizationPlan };
 
@@ -26,9 +26,50 @@ const releaseNormalizationSlot = () => {
 
 const normalizedName = (name: string) => `${name.replace(/\.[^.]+$/u, "") || "image"}-firefly.jpg`;
 
+const abortError = (signal?: AbortSignal) => signal?.reason ?? new DOMException("操作已取消", "AbortError");
+
+const normalizeOnMainThread = async (file: File, signal?: AbortSignal): Promise<PreparedImage> => {
+  if (signal?.aborted) throw abortError(signal);
+  const url = URL.createObjectURL(file);
+  try {
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const element = new Image();
+      const cleanup = () => signal?.removeEventListener("abort", cancel);
+      const cancel = () => { cleanup(); element.src = ""; reject(abortError(signal)); };
+      element.onload = () => { cleanup(); resolve(element); };
+      element.onerror = () => { cleanup(); reject(new Error("浏览器无法读取这张图片，请转换为 JPG、PNG 或 WebP 后重试")); };
+      signal?.addEventListener("abort", cancel, { once: true });
+      element.decoding = "async";
+      element.src = url;
+    });
+    if (signal?.aborted) throw abortError(signal);
+    const plan = imageNormalizationPlan(image.naturalWidth, image.naturalHeight);
+    if (!plan.adjusted) return { file, normalized: false, plan };
+    const canvas = document.createElement("canvas");
+    canvas.width = plan.targetWidth;
+    canvas.height = plan.targetHeight;
+    const context = canvas.getContext("2d", { alpha: false });
+    if (!context) throw new Error("浏览器无法创建图片画布");
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, plan.targetWidth, plan.targetHeight);
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
+    context.drawImage(image, plan.drawX, plan.drawY, plan.drawWidth, plan.drawHeight);
+    const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((result) => result ? resolve(result) : reject(new Error("图片补白失败，请重试")), "image/jpeg", .92));
+    if (signal?.aborted) throw abortError(signal);
+    return { file: new File([blob], normalizedName(file.name), { type: "image/jpeg", lastModified: file.lastModified }), normalized: true, plan };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+};
+
 export const prepareImageForUpload = async (file: File, signal?: AbortSignal): Promise<PreparedImage> => {
   await acquireNormalizationSlot(signal);
   try {
+    // Safari exposes Canvas but not OffscreenCanvas inside workers. Keep the
+    // high-performance worker path elsewhere and use the native DOM fallback
+    // only when the worker primitive is unavailable.
+    if (typeof OffscreenCanvas === "undefined") return await normalizeOnMainThread(file, signal);
     return await new Promise<PreparedImage>((resolve, reject) => {
       if (signal?.aborted) return reject(signal.reason ?? new DOMException("操作已取消", "AbortError"));
       const worker = new Worker(new URL("./image-normalize.worker.ts", import.meta.url), { type: "module" });

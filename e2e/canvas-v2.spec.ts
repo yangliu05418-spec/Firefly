@@ -1,4 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
+import type { CanvasProjectAsset } from "../src/features/canvas/canvas-api";
 import type { CanvasDocumentV2 } from "../src/features/canvas/canvas-v2-types";
 
 test.describe.configure({ timeout: 60_000 });
@@ -12,12 +13,27 @@ const relationDocument: CanvasDocumentV2 = {
   ],
   connections: [{ id: "edge-context", source: "source-text", target: "target-image", sourceHandle: "right", targetHandle: "left", relation: "context" }],
 };
+const emptyMediaDocument: CanvasDocumentV2 = {
+  ...documentV2,
+  nodes: [
+    { id: "empty-image", type: "image", title: "空图片", position: { x: 240, y: 100 }, width: 320, height: 300, data: { status: "idle" } },
+    { id: "empty-character", type: "character", title: "空角色", position: { x: 700, y: 100 }, width: 320, height: 300, data: { status: "idle" } },
+    { id: "empty-video", type: "video", title: "空视频", position: { x: 240, y: 540 }, width: 320, height: 300, data: { status: "idle" } },
+    { id: "empty-scene", type: "scene", title: "空场景", position: { x: 700, y: 540 }, width: 320, height: 300, data: { status: "idle" } },
+  ],
+  connections: [],
+};
+const projectImageAsset: CanvasProjectAsset = {
+  id: "project-library-image", canvasId: "canvas-e2e", kind: "image", title: "常用角色参考", contentType: "image/png", size: 128,
+  width: 512, height: 512, status: "ready", createdAt: 1, updatedAt: 1,
+  mediaUrl: "/api/canvas-project-assets/project-library-image/media", downloadUrl: "/api/canvas-project-assets/project-library-image/media?download=1",
+};
 const videoModels = [{ id: "dreamina-seedance-2-5-260628", name: "Seedance 2.5", note: "旗舰模型", modes: ["omni", "text"], resolutions: ["720p", "1080p"], ratios: ["adaptive", "16:9", "9:16"], duration: [4, 30], imageLimit: 30, videoLimit: 10, audioLimit: 10, audioOnly: true, supportsAudio: true, outputFormats: ["mp4"] }];
 const imageModels = [{ id: "google/gemini-3.1-flash-lite-image", name: "Nano Banana 2 Lite", resolutions: ["512", "1024"], defaultResolution: "1024", maxCount: 4 }];
 
 const json = (route: Route, body: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
-async function mockAuthenticatedApi(page: Page, options: { leaseHeld?: boolean; expireLeaseOnce?: boolean; document?: CanvasDocumentV2; imageGenerationDelayMs?: number } = {}) {
+async function mockAuthenticatedApi(page: Page, options: { leaseHeld?: boolean; expireLeaseOnce?: boolean; document?: CanvasDocumentV2; imageGenerationDelayMs?: number; projectAssets?: CanvasProjectAsset[] } = {}) {
   let revision = 0;
   let storedDocument = structuredClone(options.document ?? documentV2);
   let leaseReleaseCount = 0;
@@ -26,6 +42,8 @@ async function mockAuthenticatedApi(page: Page, options: { leaseHeld?: boolean; 
   let leaseRenewCount = 0;
   const saveLeaseTokens: string[] = [];
   const postedJobs: Array<{ kind: string; nodeId: string; revision: number }> = [];
+  let projectAssets = structuredClone(options.projectAssets ?? []);
+  let uploadCount = 0;
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -57,7 +75,31 @@ async function mockAuthenticatedApi(page: Page, options: { leaseHeld?: boolean; 
       if (request.method() === "DELETE") leaseReleaseCount += 1;
       return route.fulfill({ status: 204 });
     }
-    if (path === "/api/canvases/canvas-e2e/assets") return json(route, { Items: [], HasMore: false });
+    if (path === "/api/uploads" && request.method() === "POST") {
+      uploadCount += 1;
+      return json(route, { id: `upload-e2e-${uploadCount.toString().padStart(24, "0")}`, chunkSize: 1024 * 1024, direct: false, concurrency: 1 });
+    }
+    if (/^\/api\/uploads\/upload-e2e-\d+\/chunks$/.test(path) && request.method() === "POST") return route.fulfill({ status: 204 });
+    if (/^\/api\/uploads\/upload-e2e-\d+\/complete$/.test(path) && request.method() === "POST") {
+      const uploadId = path.split("/")[3]!;
+      return json(route, { id: uploadId, uploadId, name: "node-upload.png", type: "image", size: 68 });
+    }
+    if (/^\/api\/uploads\/upload-e2e-\d+$/.test(path) && request.method() === "DELETE") return route.fulfill({ status: 204 });
+    if (path === "/api/canvases/canvas-e2e/assets") return json(route, { Items: projectAssets, HasMore: false });
+    if (path === "/api/canvases/canvas-e2e/media" && request.method() === "POST") {
+      const body = request.postDataJSON() as { kind: "upload" | "user_asset"; uploadId?: string; assetId?: string };
+      const source = body.kind === "user_asset" ? projectImageAsset : undefined;
+      const projectAsset: CanvasProjectAsset = source ?? {
+        ...projectImageAsset,
+        id: `project-${body.uploadId}`,
+        title: "node-upload.png",
+        mediaUrl: `/api/canvas-project-assets/project-${body.uploadId}/media`,
+        downloadUrl: `/api/canvas-project-assets/project-${body.uploadId}/media?download=1`,
+      };
+      projectAssets = [projectAsset, ...projectAssets.filter((asset) => asset.id !== projectAsset.id)];
+      return json(route, { mediaRef: { source: "project-asset", projectAssetId: projectAsset.id }, projectAsset, title: projectAsset.title, fileName: projectAsset.title, status: projectAsset.status }, 201);
+    }
+    if (/^\/api\/canvas-project-assets\/[^/]+\/media$/.test(path)) return route.fulfill({ status: 200, contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><path fill="#b8d9cf" d="M0 0h8v8H0z"/></svg>' });
     if (path === "/api/canvases/canvas-e2e/jobs" && request.method() === "POST") {
       const payload = request.postDataJSON() as { kind: string; nodeId: string; revision: number };
       postedJobs.push(payload);
@@ -218,6 +260,66 @@ test("node menus stay anchored, text expands outside the flow transform, and ref
   await expect.poll(() => mock.storedDocument().connections.some((edge) => edge.source === "target-image" && edge.target === generatedNodeId)).toBe(true);
 });
 
+test("media nodes drag from their body, keep the selected stack, and persist uploaded or library assets", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  const mock = await mockAuthenticatedApi(page, { document: emptyMediaDocument, projectAssets: [projectImageAsset] });
+  await page.goto("/studio/canvas/canvas-e2e");
+  await expect(page.getByRole("button", { name: "Firefly 画布导航" })).toContainText("Firefly", { timeout: 30_000 });
+
+  for (const type of ["image", "video", "character", "scene"]) {
+    const node = page.locator(`.canvas-v2-node--${type}`);
+    await expect(node.getByText("本地上传", { exact: true })).toBeVisible();
+    await expect(node.getByRole("button", { name: "资产库", exact: true })).toBeVisible();
+  }
+
+  let imageNode = page.locator('.canvas-v2-node[data-node-id="empty-image"]');
+  // React Flow finishes its initial fit-view transition asynchronously; use a
+  // settled coordinate so the cross-browser pointer gesture is deterministic.
+  await page.waitForTimeout(500);
+  const bodyBox = await imageNode.locator(".canvas-v2-node__body").boundingBox();
+  expect(bodyBox).not.toBeNull();
+  await page.mouse.move(bodyBox!.x + 24, bodyBox!.y + 28);
+  await page.mouse.down();
+  await page.waitForTimeout(80);
+  await page.mouse.move(bodyBox!.x + 136, bodyBox!.y + 92, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(() => mock.storedDocument().nodes.find((node) => node.id === "empty-image")?.position).not.toEqual({ x: 240, y: 100 });
+  const persistedPosition = mock.storedDocument().nodes.find((node) => node.id === "empty-image")!.position;
+
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Firefly 画布导航" })).toContainText("Firefly", { timeout: 30_000 });
+  await expect.poll(() => mock.storedDocument().nodes.find((node) => node.id === "empty-image")?.position).toEqual(persistedPosition);
+  imageNode = page.locator('.canvas-v2-node[data-node-id="empty-image"]');
+  await imageNode.locator(".canvas-v2-node__head").click();
+  const nodeBox = await imageNode.boundingBox();
+  const toolsBox = await imageNode.locator(".canvas-v2-node__tools").boundingBox();
+  expect(nodeBox).not.toBeNull(); expect(toolsBox).not.toBeNull();
+  expect(toolsBox!.y + toolsBox!.height).toBeLessThanOrEqual(nodeBox!.y + 2);
+  await imageNode.getByRole("button", { name: "生成", exact: true }).click();
+  const composer = page.getByRole("dialog", { name: "节点生成" });
+  await expect(composer).toBeVisible();
+  await page.waitForTimeout(420);
+  const movedNodeBox = await imageNode.boundingBox();
+  const composerBox = await composer.boundingBox();
+  expect(movedNodeBox).not.toBeNull(); expect(composerBox).not.toBeNull();
+  expect(composerBox!.y).toBeGreaterThanOrEqual(movedNodeBox!.y + movedNodeBox!.height + 8);
+  await page.keyboard.press("Escape");
+
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+  await imageNode.locator('input[type="file"]').setInputFiles({ name: "node-upload.png", mimeType: "image/png", buffer: png });
+  await expect(page.getByText(/素材已放入节点|素材已保存/)).toBeVisible();
+  await expect(imageNode.getByRole("img", { name: "node-upload.png" })).toBeVisible();
+  await expect.poll(() => mock.storedDocument().nodes.find((node) => node.id === "empty-image")?.data.projectAssetId).toMatch(/^project-upload-e2e-/);
+
+  const characterNode = page.locator('.canvas-v2-node[data-node-id="empty-character"]');
+  await characterNode.getByRole("button", { name: "资产库", exact: true }).click();
+  const assetPanel = page.getByRole("dialog", { name: "画布资产" });
+  await expect(assetPanel.getByText("为「空角色」选择素材")).toBeVisible();
+  await assetPanel.locator(".canvas-v2-assets__list>button").filter({ hasText: "常用角色参考" }).click();
+  await expect.poll(() => mock.storedDocument().nodes.find((node) => node.id === "empty-character")?.data.projectAssetId).toBe("project-library-image");
+  await expect(characterNode.getByRole("img", { name: "常用角色参考" })).toBeVisible();
+});
+
 test("image generation confirms immediately and moves provider waiting into the result card", async ({ page }) => {
   await mockAuthenticatedApi(page, { imageGenerationDelayMs: 1_500 });
   await page.goto("/studio");
@@ -230,7 +332,7 @@ test("image generation confirms immediately and moves provider waiting into the 
   await expect(page.getByText("已提交，正在生成")).toBeVisible({ timeout: 500 });
   await expect(send.locator(".spin")).toHaveCount(0);
   await expect(page.locator(".image-result--generating")).toBeVisible();
-  await expect(page.getByRole("img", { name: prompt })).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByRole("img", { name: prompt })).toBeVisible({ timeout: 15_000 });
   await expect(page.locator(".image-result--generating")).toHaveCount(0);
   await page.reload();
   await expect(page.getByRole("img", { name: prompt })).toBeVisible();

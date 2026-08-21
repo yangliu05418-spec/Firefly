@@ -33,6 +33,8 @@ const creatableTypes = ["character", "scene", "video", "image", "text"] as const
 const typeLabels: Record<CanvasNodeTypeV2, string> = { character: "角色", scene: "场景", video: "视频", image: "图片", text: "文本", group: "分组", "legacy-audio": "旧音频" };
 const typeIcons: Record<string, typeof ImageIcon> = { character: ScanFace, scene: LayoutDashboard, video: Video, image: ImageIcon, text: TextCursorInput, group: Users };
 const assetCategoryLabels: Record<AssetCategory, string> = { character: "角色", scene: "场景", prop: "道具", material: "素材" };
+const acceptsProjectAsset = (nodeType: CanvasNodeTypeV2, assetKind: CanvasProjectAsset["kind"]) =>
+  nodeType === "video" ? assetKind === "video" : ["image", "character", "scene"].includes(nodeType) ? assetKind === "image" : false;
 const shortcutGroups = [
   ["创作", [["成组", "Ctrl / Cmd + G"], ["解组", "Ctrl / Cmd + Shift + G"], ["生成", "Ctrl / Cmd + Enter"], ["新建节点", "Tab"], ["复制节点", "Alt / Option + 拖动"], ["复制选区", "Ctrl / Cmd + Alt / Option + 拖动"]]],
   ["视图", [["放大 / 缩小", "Ctrl / Cmd + + / −"], ["适应画布", "Ctrl / Cmd + 0"], ["移动画布", "Space + 拖动"], ["整理画布", "Alt / Option + Shift + F"]]],
@@ -81,6 +83,7 @@ function CanvasZoomControls() {
 
 function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; navigate: (path: string) => void; user: SessionUser; logout: () => void }) {
   const flow = useReactFlow<CanvasFlowNode, Edge>();
+  const viewport = useViewport();
   const [nodes, setNodes, onNodesChangeBase] = useNodesState<CanvasFlowNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [projectTitle, setProjectTitle] = useState("未命名画布");
@@ -97,6 +100,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   const [createMenu, setCreateMenu] = useState<CreateMenu | null>(null);
   const createMenuRef = useRef<HTMLDivElement>(null);
   const [assetPanel, setAssetPanel] = useState(false);
+  const [assetTargetNodeId, setAssetTargetNodeId] = useState<string | null>(null);
   const [assets, setAssets] = useState<CanvasProjectAsset[]>([]);
   const assetsRef = useRef<CanvasProjectAsset[]>([]);
   const [assetTab, setAssetTab] = useState<"project" | "global">("project");
@@ -142,6 +146,9 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   const dragCopy = useRef<{ draggedId: string; cloneIds: Set<string>; originalPositions: Map<string, { x: number; y: number }> } | null>(null);
   const extractFrameRef = useRef<(id: string) => void>(() => undefined);
   const deriveImageRef = useRef<(id: string, operation: { cropRatio?: number; rotation?: 90 | 180 | 270 }) => void>(() => undefined);
+  const uploadNodeFileRef = useRef<(id: string, file: File) => void>(() => undefined);
+  const openNodeAssetPickerRef = useRef<(id: string) => void>(() => undefined);
+  const composerRef = useRef<HTMLDivElement>(null);
   const textSelections = useRef(new Map<string, string>());
   const cid = useMemo(clientId, []);
 
@@ -273,11 +280,11 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     setCreateMenu({ sourceId: id, side, position, anchor, focusOnOpen: true });
   }, [flow]);
 
-  const attachCallbacks = useCallback((domain: CanvasNodeV2): CanvasFlowData => ({ domain, readOnly: readOnly || mobile, references: [], onChange: patchNode, onCreateFrom: openCreateFrom, onFocusReference: focusReference, onRemoveReference: removeReference, onGenerate: openComposer, onInspect: inspectNode, onCancel: cancelNodeJob, onExtractFrame: (id) => extractFrameRef.current(id), onCrop: (id) => setCropNodeId(id), onRotate: (id) => deriveImageRef.current(id, { rotation: 90 }), onSelection: (id, text) => { if (text) textSelections.current.set(id, text); else textSelections.current.delete(id); } }), [cancelNodeJob, focusReference, inspectNode, mobile, openComposer, openCreateFrom, patchNode, readOnly, removeReference]);
-  const makeFlowNode = useCallback((domain: CanvasNodeV2): CanvasFlowNode => ({ id: domain.id, type: domain.type, position: domain.position, parentId: domain.parentId, extent: domain.parentId ? "parent" : undefined, width: domain.width, height: domain.height, data: attachCallbacks(domain) }), [attachCallbacks]);
+  const attachCallbacks = useCallback((domain: CanvasNodeV2): CanvasFlowData => ({ domain, readOnly: readOnly || mobile, references: [], onChange: patchNode, onCreateFrom: openCreateFrom, onFocusReference: focusReference, onRemoveReference: removeReference, onGenerate: openComposer, onInspect: inspectNode, onCancel: cancelNodeJob, onExtractFrame: (id) => extractFrameRef.current(id), onCrop: (id) => setCropNodeId(id), onRotate: (id) => deriveImageRef.current(id, { rotation: 90 }), onUpload: (id, file) => uploadNodeFileRef.current(id, file), onPickAsset: (id) => openNodeAssetPickerRef.current(id), onSelection: (id, text) => { if (text) textSelections.current.set(id, text); else textSelections.current.delete(id); } }), [cancelNodeJob, focusReference, inspectNode, mobile, openComposer, openCreateFrom, patchNode, readOnly, removeReference]);
+  const makeFlowNode = useCallback((domain: CanvasNodeV2): CanvasFlowNode => ({ id: domain.id, type: domain.type, position: domain.position, parentId: domain.parentId, extent: domain.parentId ? "parent" : undefined, width: domain.width, height: domain.height, dragHandle: ".canvas-v2-node", data: attachCallbacks(domain) }), [attachCallbacks]);
 
   useEffect(() => {
-    setNodes((current) => current.map((node) => ({ ...node, data: attachCallbacks(node.data.domain), draggable: !(readOnly || mobile) })));
+    setNodes((current) => current.map((node) => ({ ...node, data: attachCallbacks(node.data.domain), dragHandle: ".canvas-v2-node", draggable: !(readOnly || mobile) })));
   }, [attachCallbacks, mobile, readOnly, setNodes]);
 
   const documentFromFlow = useCallback((override?: { nodes: readonly CanvasFlowNode[]; edges: readonly Edge[] }): CanvasDocumentV2 => {
@@ -568,6 +575,11 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
 
   const selectedVideoAssets = useMemo(() => nodes.filter((node) => node.selected && node.data.domain.type === "video" && node.data.domain.data.projectAssetId).map((node) => assets.find((asset) => asset.id === node.data.domain.data.projectAssetId)).filter((asset): asset is CanvasProjectAsset => Boolean(asset && asset.status === "ready")), [assets, nodes]);
   const selectedAssets = useMemo(() => nodes.filter((node) => node.selected && node.data.domain.data.projectAssetId).map((node) => assets.find((asset) => asset.id === node.data.domain.data.projectAssetId)).filter((asset): asset is CanvasProjectAsset => Boolean(asset)), [assets, nodes]);
+  const assetTargetNode = assetTargetNodeId ? nodes.find((node) => node.id === assetTargetNodeId) : undefined;
+  const visibleProjectAssets = useMemo(() => assets.filter((asset) =>
+    asset.title.toLowerCase().includes(assetSearch.toLowerCase())
+    && (!assetTargetNode || acceptsProjectAsset(assetTargetNode.data.domain.type, asset.kind))), [assetSearch, assetTargetNode, assets]);
+  const visibleGlobalAssets = assetTargetNode?.data.domain.type === "video" ? [] : globalAssets;
   const selectedNodeCount = useMemo(() => nodes.filter((node) => node.selected).length, [nodes]);
   const selectedGroupCount = useMemo(() => nodes.filter((node) => node.selected && node.data.domain.type === "group").length, [nodes]);
   const composerNode = composer?.kind === "video" ? nodes.find((node) => node.id === composer.nodeId) : undefined;
@@ -736,13 +748,45 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     catch (error) { setMessage(error instanceof Error ? error.message : "任务提交失败"); }
   };
 
+  const fillNodeWithAsset = useCallback((nodeId: string, asset: CanvasProjectAsset) => {
+    setNodes((current) => current.map((node) => node.id === nodeId ? {
+      ...node,
+      selected: true,
+      data: {
+        ...node.data,
+        domain: {
+          ...node.data.domain,
+          title: asset.title,
+          data: {
+            ...node.data.domain.data,
+            projectAssetId: asset.id,
+            mimeType: asset.contentType,
+            durationMs: asset.durationMs,
+            status: asset.status === "ready" ? "succeeded" : asset.status === "failed" ? "failed" : "running",
+            error: asset.status === "failed" ? "素材归档失败，请重新选择或上传" : undefined,
+          },
+        },
+      },
+    } : { ...node, selected: false }));
+  }, [setNodes]);
+
   const insertAsset = useCallback((asset: CanvasProjectAsset) => {
+    if (assetTargetNodeId) {
+      const target = flow.getNode(assetTargetNodeId);
+      if (!target) { setAssetTargetNodeId(null); setAssetPanel(false); return; }
+      if (!acceptsProjectAsset(target.data.domain.type, asset.kind)) { setMessage("这个素材类型不能放入当前节点"); return; }
+      fillNodeWithAsset(assetTargetNodeId, asset);
+      setAssetTargetNodeId(null);
+      setAssetPanel(false);
+      setMessage(`已将「${asset.title}」放入节点`);
+      return;
+    }
     const type = asset.kind === "video" ? "video" : asset.kind === "audio" ? "legacy-audio" : "image";
     const position = flow.screenToFlowPosition({ x: innerWidth / 2, y: innerHeight / 2 });
     const domain = createCanvasNodeV2(type === "legacy-audio" ? "video" : type, position, { title: asset.title, data: { projectAssetId: asset.id, mimeType: asset.contentType, durationMs: asset.durationMs, status: asset.status === "ready" ? "succeeded" : asset.status === "failed" ? "failed" : "running" } });
     if (type === "legacy-audio") domain.type = "legacy-audio";
     setNodes((current) => [...current, makeFlowNode(domain)]); setAssetPanel(false);
-  }, [flow, makeFlowNode, setNodes]);
+  }, [assetTargetNodeId, fillNodeWithAsset, flow, makeFlowNode, setNodes]);
 
   const createOptimisticImageNode = useCallback((sourceNode: CanvasFlowNode, title: string, blob: Blob) => {
     const position = { x: sourceNode.position.x + (sourceNode.measured?.width ?? sourceNode.data.domain.width) + 140, y: sourceNode.position.y };
@@ -851,6 +895,54 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     } finally { uploadBatchControllers.current.delete(controller); }
   };
 
+  const openNodeAssetPicker = useCallback((nodeId: string) => {
+    const nodeType = flow.getNode(nodeId)?.data.domain.type;
+    if (!nodeType || !["image", "video", "character", "scene"].includes(nodeType)) return;
+    setAssetTargetNodeId(nodeId);
+    setAssetTab("project");
+    setAssetSearch("");
+    if (nodeType === "character") setAssetCategory("character");
+    else if (nodeType === "scene") setAssetCategory("scene");
+    else setAssetCategory("all");
+    setAssetPanel(true);
+  }, [flow]);
+
+  const uploadIntoNode = useCallback(async (nodeId: string, file: File) => {
+    const target = flow.getNode(nodeId);
+    if (!target) return;
+    const kind = inferUploadType(file);
+    if (!kind || !acceptsProjectAsset(target.data.domain.type, kind)) {
+      setMessage(target.data.domain.type === "video" ? "视频节点仅支持 MP4 或 MOV" : "该节点仅支持图片素材");
+      return;
+    }
+    showLocalPreview(nodeId, file);
+    setNodes((current) => current.map((node) => node.id === nodeId ? {
+      ...node,
+      selected: true,
+      data: { ...node.data, domain: { ...node.data.domain, title: file.name, data: { ...node.data.domain.data, projectAssetId: undefined, mimeType: file.type, status: "running", error: undefined } } },
+    } : node));
+    setMessage("素材已放入节点，正在后台保存");
+    const controller = new AbortController();
+    uploadBatchControllers.current.add(controller);
+    try {
+      const uploaded = await uploadFile(file, kind, () => undefined, { signal: controller.signal });
+      const imported = await importCanvasProjectAsset(canvasId, { kind: "upload", uploadId: uploaded.uploadId ?? uploaded.id });
+      setAssets((current) => [imported.projectAsset, ...current.filter((asset) => asset.id !== imported.projectAsset.id)]);
+      fillNodeWithAsset(nodeId, imported.projectAsset);
+      if (imported.projectAsset.status === "ready") clearLocalPreview(nodeId);
+      setMessage(imported.projectAsset.status === "ready" ? "素材已保存，可直接引用" : "素材已上传，正在后台归档");
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      clearLocalPreview(nodeId);
+      patchNode(nodeId, { projectAssetId: undefined, status: "failed", error: error instanceof Error ? error.message : "素材上传失败" });
+      setMessage(error instanceof Error ? error.message : "素材上传失败，请重试");
+    } finally {
+      uploadBatchControllers.current.delete(controller);
+    }
+  }, [canvasId, clearLocalPreview, fillNodeWithAsset, flow, patchNode, setNodes, showLocalPreview]);
+  openNodeAssetPickerRef.current = openNodeAssetPicker;
+  uploadNodeFileRef.current = (nodeId, file) => { void uploadIntoNode(nodeId, file); };
+
   const loadGlobalAssets = useCallback(async () => {
     const category = assetCategory === "all" ? "" : `&category=${encodeURIComponent(assetCategory)}`;
     const result = await api.get<{ Items: LibraryAsset[] }>(`/api/assets?q=${encodeURIComponent(assetSearch)}&pageSize=100${category}`);
@@ -876,16 +968,45 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     const absolute = node?.internals.positionAbsolute ?? { x: 0, y: 0 };
     const width = Math.min(640, innerWidth - 30);
     const topLeft = flow.flowToScreenPosition(absolute);
-    const below = flow.flowToScreenPosition({ x: absolute.x, y: absolute.y + (node?.measured.height ?? 220) });
-    const top = below.y + 12 + 430 < innerHeight ? below.y + 12 : Math.max(66, topLeft.y - 442);
-    return { width, left: Math.max(15, Math.min(topLeft.x, innerWidth - width - 15)), top };
+    const nodeWidth = (node?.measured.width ?? 300) * viewport.zoom;
+    const belowY = topLeft.y + (node?.measured.height ?? 220) * viewport.zoom;
+    const top = belowY + 14;
+    return { width, left: Math.max(15, Math.min(topLeft.x + (nodeWidth - width) / 2, innerWidth - width - 15)), top, maxHeight: Math.max(120, innerHeight - top - 12) };
   })() : undefined;
+
+  useEffect(() => {
+    if (!composer) return;
+    const frame = requestAnimationFrame(() => {
+      const nodeElement = document.querySelector<HTMLElement>(`[data-node-id="${composer.nodeId}"]`);
+      const composerElement = composerRef.current;
+      if (!nodeElement || !composerElement) return;
+      const internal = flow.getInternalNode(composer.nodeId);
+      const stage = nodeElement.closest<HTMLElement>(".react-flow");
+      if (!internal || !stage) return;
+      const nodeBox = nodeElement.getBoundingClientRect();
+      const stageBox = stage.getBoundingClientRect();
+      const estimatedComposerHeight = composer.kind === "character_tool" ? 340 : composer.kind === "text" ? 270 : 310;
+      const safeNodeTop = stageBox.top + 50;
+      const availableNodeHeight = Math.max(120, innerHeight - safeNodeTop - estimatedComposerHeight - 26);
+      const current = flow.getViewport();
+      const zoom = Math.max(.08, Math.min(current.zoom, current.zoom * availableNodeHeight / Math.max(1, nodeBox.height)));
+      const absolute = internal.internals.positionAbsolute;
+      const domainWidth = internal.measured.width ?? internal.data.domain.width;
+      const currentCenterX = Math.max(stageBox.left + 170, Math.min(nodeBox.left + nodeBox.width / 2, stageBox.right - 170));
+      void flow.setViewport({
+        x: currentCenterX - stageBox.left - (absolute.x + domainWidth / 2) * zoom,
+        y: safeNodeTop - stageBox.top - absolute.y * zoom,
+        zoom,
+      }, { duration: 260 });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [composer?.kind, composer?.nodeId, flow]);
 
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (event.key === "Escape") {
-        setCreateMenu(null); setComposer(null); setAssetPanel(false); setInspectAsset(null); setCropNodeId(null); setMontageOpen(false); setHelpOpen(false); setShortcutOpen(false); setProfileOpen(false);
+        setCreateMenu(null); setComposer(null); setAssetPanel(false); setAssetTargetNodeId(null); setInspectAsset(null); setCropNodeId(null); setMontageOpen(false); setHelpOpen(false); setShortcutOpen(false); setProfileOpen(false);
         return;
       }
       if (target?.closest("input,textarea,[contenteditable=true],[role=dialog]") || readOnly) return;
@@ -898,7 +1019,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
       if (mod && event.key.toLowerCase() === "d") { event.preventDefault(); duplicateSelection(null); }
       if (mod && event.key.toLowerCase() === "g") { event.preventDefault(); event.shiftKey ? ungroupSelected() : groupSelected(); }
       if (mod && event.key === "Enter") { const selected = nodes.find((node) => node.selected && node.data.domain.type !== "group"); if (selected) { event.preventDefault(); openComposer(selected.id); } }
-      if (mod && event.key.toLowerCase() === "f") { event.preventDefault(); setAssetTab("project"); setAssetPanel(true); }
+      if (mod && event.key.toLowerCase() === "f") { event.preventDefault(); setAssetTargetNodeId(null); setAssetTab("project"); setAssetPanel(true); }
       if (mod && (event.key === "+" || event.key === "=")) { event.preventDefault(); void flow.zoomIn({ duration: 180 }); }
       if (mod && event.key === "-") { event.preventDefault(); void flow.zoomOut({ duration: 180 }); }
       if (event.key === "Delete" || event.key === "Backspace") {
@@ -935,8 +1056,8 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
       {!nodes.length && <div className="canvas-v2-empty"><span>点击快速新建</span><h1>让片段彼此照亮</h1><div>{creatableTypes.map((type) => { const Icon = typeIcons[type]; return <button key={type} onClick={() => createNode(type)}><Icon /><span>{typeLabels[type]}</span></button>; })}</div></div>}
       <nav className="canvas-v2-pill" aria-label="画布工具">
         <button className={`canvas-v2-pill__add${createMenu && !createMenu.sourceId ? " active" : ""}`} onMouseEnter={(event) => { if (!readOnly) { const box = event.currentTarget.getBoundingClientRect(); window.clearTimeout(rootMenuTimer.current); rootMenuTimer.current = window.setTimeout(() => setCreateMenu({ screen: { x: box.right + 12, y: box.top }, position: flow.screenToFlowPosition({ x: 150, y: innerHeight / 2 }) }), 180); } }} onMouseLeave={() => window.clearTimeout(rootMenuTimer.current)} onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); window.clearTimeout(rootMenuTimer.current); setCreateMenu({ screen: { x: box.right + 12, y: box.top }, position: flow.screenToFlowPosition({ x: 150, y: innerHeight / 2 }), focusOnOpen: true }); }} disabled={readOnly}><Plus /></button>
-        <button onClick={() => { setCreateMenu(null); setAssetTab("project"); setAssetPanel(true); }}><Library /><span>项目资产</span></button>
-        <button onClick={() => { setCreateMenu(null); setAssetTab("global"); setAssetPanel(true); }}><FolderOpen /><span>资产库</span></button>
+        <button onClick={() => { setCreateMenu(null); setAssetTargetNodeId(null); setAssetTab("project"); setAssetPanel(true); }}><Library /><span>项目资产</span></button>
+        <button onClick={() => { setCreateMenu(null); setAssetTargetNodeId(null); setAssetTab("global"); setAssetPanel(true); }}><FolderOpen /><span>资产库</span></button>
         <div className="canvas-v2-help" onMouseEnter={() => setHelpOpen(true)} onMouseLeave={() => setHelpOpen(false)}><button aria-expanded={helpOpen} onClick={() => { setCreateMenu(null); setHelpOpen((open) => !open); }}><CircleHelp /><span>帮助</span></button>{helpOpen && <div className="canvas-v2-help__menu"><button onClick={() => { setShortcutOpen(true); setHelpOpen(false); }}><Keyboard /> 快捷键</button><button onClick={() => navigate("/studio/canvas/tutorial")}><FolderOpen /> 使用教程</button></div>}</div>
       </nav>
       <div className="canvas-v2-toolbar">
@@ -949,11 +1070,23 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     {message && <div className="canvas-v2-toast" role="status">{message}<button onClick={() => setMessage("")} aria-label="关闭提示"><X /></button></div>}
     {createMenu && createMenuStyle && createPortal(<div ref={createMenuRef} className="canvas-v2-create-menu" data-placement={createMenuStyle.placement} style={createMenuStyle} role="menu" aria-label={createMenu.side === "left" ? "添加上下文" : createMenu.side === "right" ? "引用该节点生成" : "添加节点"} onKeyDown={(event) => { if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return; event.preventDefault(); const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")]; const current = items.indexOf(document.activeElement as HTMLButtonElement); const index = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : (current + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length; items[index]?.focus(); }}><header>{createMenu.side === "left" ? "添加上下文" : createMenu.side === "right" ? "引用该节点生成" : "添加节点"}</header>{allowedCreateTypes.map((type) => { const Icon = typeIcons[type]; return <button role="menuitem" key={type} onClick={() => createNode(type)}><Icon /><span>{typeLabels[type]}</span><ChevronDown /></button>; })}</div>, document.body)}
 
-    {assetPanel && <aside className="canvas-v2-assets" role="dialog" aria-label="画布资产"><header><div><b>{assetTab === "project" ? "项目资产" : "全局资产库"}</b><span>{assetTab === "project" ? "属于这个画布的素材不会随节点删除" : "从你的常用资产中插入并建立项目副本"}</span></div><button onClick={() => setAssetPanel(false)}><X /></button></header><nav><button className={assetTab === "project" ? "active" : ""} onClick={() => setAssetTab("project")}>项目资产</button><button className={assetTab === "global" ? "active" : ""} onClick={() => setAssetTab("global")}>全局资产库</button></nav>{assetTab === "global" && <div className="canvas-v2-assets__categories"><button className={assetCategory === "all" ? "active" : ""} onClick={() => setAssetCategory("all")}>全部</button>{(Object.entries(assetCategoryLabels) as Array<[AssetCategory, string]>).map(([category, label]) => <button key={category} className={assetCategory === category ? "active" : ""} onClick={() => setAssetCategory(category)}>{label}</button>)}</div>}<label className="canvas-v2-assets__search"><Search /><input autoFocus value={assetSearch} onChange={(event) => setAssetSearch(event.target.value)} placeholder="搜索素材" /></label>{assetTab === "project" && <label className="canvas-v2-assets__upload"><Upload /><b>上传到项目</b><span>支持多选，上传完成后可立即插入</span><input type="file" multiple accept="image/*,video/mp4,video/quicktime,audio/mpeg,audio/wav" onChange={(event) => { const selected = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void uploadAssets(selected); }} /></label>}<div className="canvas-v2-assets__list">{uploading.map((item) => <div className="canvas-v2-assets__progress" key={item.id}><span>{item.name}</span><i><em style={{ width: `${item.progress}%` }} /></i><small>{item.error ?? (item.phase === "preparing" ? "正在检查图片" : item.phase === "verifying" ? "上传完成 · 正在确认" : item.phase === "saving" ? "已上传 · 正在加入项目" : `${item.progress}%`)}</small></div>)}{assetTab === "project" ? assets.filter((asset) => asset.title.toLowerCase().includes(assetSearch.toLowerCase())).map((asset) => <button key={asset.id} onClick={() => insertAsset(asset)}><span className="canvas-v2-assets__thumb">{asset.kind === "video" ? <Video /> : asset.kind === "audio" ? <Sparkles /> : <img src={asset.mediaUrl} loading="lazy" alt="" />}</span><div><b>{asset.title}</b><small>{asset.kind === "video" ? "视频" : asset.kind === "audio" ? "音频" : "图片"}</small></div><Plus /></button>) : globalAssets.map((asset) => <button key={asset.Id} onClick={() => void importGlobal(asset)} disabled={asset.Status !== "Active"}><span className="canvas-v2-assets__thumb">{asset.URL ? <img src={asset.URL} loading="lazy" alt="" /> : <ImageIcon />}</span><div><b>{asset.Name}</b><small>{assetCategoryLabels[asset.Category]} · {asset.Status === "Active" ? "可用" : "处理中"}</small></div><Plus /></button>)}</div></aside>}
+    {assetPanel && <aside className="canvas-v2-assets" role="dialog" aria-label="画布资产">
+      <header><div><b>{assetTargetNode ? `为「${assetTargetNode.data.domain.title}」选择素材` : assetTab === "project" ? "项目资产" : "全局资产库"}</b><span>{assetTargetNode ? "选择后会填充当前节点，并保存为可持续引用的项目资产" : assetTab === "project" ? "属于这个画布的素材不会随节点删除" : "从你的常用资产中插入并建立项目副本"}</span></div><button aria-label="关闭资产库" onClick={() => { setAssetPanel(false); setAssetTargetNodeId(null); }}><X /></button></header>
+      <nav><button className={assetTab === "project" ? "active" : ""} onClick={() => setAssetTab("project")}>项目资产</button><button className={assetTab === "global" ? "active" : ""} onClick={() => setAssetTab("global")}>全局资产库</button></nav>
+      {assetTab === "global" && <div className="canvas-v2-assets__categories"><button className={assetCategory === "all" ? "active" : ""} onClick={() => setAssetCategory("all")}>全部</button>{(Object.entries(assetCategoryLabels) as Array<[AssetCategory, string]>).map(([category, label]) => <button key={category} className={assetCategory === category ? "active" : ""} onClick={() => setAssetCategory(category)}>{label}</button>)}</div>}
+      <label className="canvas-v2-assets__search"><Search /><input autoFocus value={assetSearch} onChange={(event) => setAssetSearch(event.target.value)} placeholder="搜索素材" /></label>
+      {assetTab === "project" && <label className="canvas-v2-assets__upload"><Upload /><b>上传到项目</b><span>支持多选，上传完成后可立即插入</span><input type="file" multiple accept={assetTargetNode?.data.domain.type === "video" ? "video/mp4,video/quicktime" : assetTargetNode ? "image/*" : "image/*,video/mp4,video/quicktime,audio/mpeg,audio/wav"} onChange={(event) => { const selected = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void uploadAssets(selected); }} /></label>}
+      <div className="canvas-v2-assets__list">
+        {uploading.map((item) => <div className="canvas-v2-assets__progress" key={item.id}><span>{item.name}</span><i><em style={{ width: `${item.progress}%` }} /></i><small>{item.error ?? (item.phase === "preparing" ? "正在检查图片" : item.phase === "verifying" ? "上传完成 · 正在确认" : item.phase === "saving" ? "已上传 · 正在加入项目" : `${item.progress}%`)}</small></div>)}
+        {assetTab === "project" ? visibleProjectAssets.map((asset) => <button key={asset.id} onClick={() => insertAsset(asset)} disabled={asset.status === "failed"}><span className="canvas-v2-assets__thumb">{asset.kind === "video" ? <Video /> : asset.kind === "audio" ? <Sparkles /> : <img src={asset.mediaUrl} loading="lazy" alt="" />}</span><div><b>{asset.title}</b><small>{asset.kind === "video" ? "视频" : asset.kind === "audio" ? "音频" : "图片"} · {asset.status === "ready" ? "可用" : asset.status === "copying" ? "正在归档" : "不可用"}</small></div><Plus /></button>) : visibleGlobalAssets.map((asset) => <button key={asset.Id} onClick={() => void importGlobal(asset)} disabled={asset.Status !== "Active"}><span className="canvas-v2-assets__thumb">{asset.URL ? <img src={asset.URL} loading="lazy" alt="" /> : <ImageIcon />}</span><div><b>{asset.Name}</b><small>{assetCategoryLabels[asset.Category]} · {asset.Status === "Active" ? "可用" : "处理中"}</small></div><Plus /></button>)}
+        {assetTab === "project" && visibleProjectAssets.length === 0 && <div className="canvas-v2-assets__empty"><Library /><b>暂无可用素材</b><span>可直接在节点中本地上传，或先上传到项目资产。</span></div>}
+        {assetTab === "global" && visibleGlobalAssets.length === 0 && <div className="canvas-v2-assets__empty"><Library /><b>{assetTargetNode?.data.domain.type === "video" ? "全局资产库暂不包含视频" : "暂无匹配素材"}</b><span>切换到项目资产，或调整分类与搜索条件。</span></div>}
+      </div>
+    </aside>}
 
     {shortcutOpen && <div className="canvas-v2-modal" role="dialog" aria-modal="true" aria-labelledby="canvas-shortcuts-title" onClick={() => setShortcutOpen(false)}><section className="canvas-v2-shortcuts" onClick={(event) => event.stopPropagation()}><header><div><span>KEYBOARD MAP</span><h2 id="canvas-shortcuts-title">画布快捷键</h2></div><button onClick={() => setShortcutOpen(false)} aria-label="关闭"><X /></button></header><div>{shortcutGroups.map(([group, items]) => <article key={group}><b>{group}</b><dl>{items.map(([label, keys]) => <div key={label}><dt>{label}</dt><dd>{keys}</dd></div>)}</dl></article>)}</div></section></div>}
 
-    {composer && <div className="canvas-v2-node-composer" style={composerAnchor} role="dialog" aria-label="节点生成">
+    {composer && <div ref={composerRef} className="canvas-v2-node-composer" style={composerAnchor} role="dialog" aria-label="节点生成">
       <div className="canvas-v2-composer">
         <header><span><WandSparkles /></span><div><b>{composer.kind === "text" ? "Polaris 文本助手" : composer.kind === "video" ? "生成视频" : composer.kind === "character_tool" ? "角色专用工具" : "生成图片"}</b><small>已连接的左侧节点会自动成为上下文</small></div><button onClick={() => setComposer(null)} aria-label="关闭"><X /></button></header>
         {composer.kind === "character_tool" && <div className="canvas-v2-character-tools">
