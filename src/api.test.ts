@@ -1,8 +1,79 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { inferUploadType } from "./api";
+import { api, ApiError, inferUploadType } from "./api";
 import { uploadFileUntilAccepted } from "./upload-acceptance";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
+
+const hangingFetch = () => vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+  const signal = init?.signal;
+  signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+}));
+
+describe("bounded API requests", () => {
+  it("ends a stalled read with a retryable client timeout", async () => {
+    vi.useFakeTimers();
+    const fetchMock = hangingFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const assertion = expect(api.get("/api/slow", { timeoutMs: 50 })).rejects.toMatchObject({
+      name: "ApiError", status: 0, code: "CLIENT_TIMEOUT", message: "网络响应超时，请重试",
+    } satisfies Partial<ApiError>);
+    await vi.advanceTimersByTimeAsync(50);
+    await assertion;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not replay an ambiguous timed-out mutation", async () => {
+    vi.useFakeTimers();
+    const fetchMock = hangingFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const assertion = expect(api.post("/api/generations", { prompt: "test" }, { timeoutMs: 50 })).rejects.toMatchObject({
+      status: 0, code: "CLIENT_TIMEOUT", message: "响应超时，操作可能已完成，请刷新确认",
+    } satisfies Partial<ApiError>);
+    await vi.advanceTimersByTimeAsync(50);
+    await assertion;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the deadline active while a partial JSON body is still streaming", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"partial":'));
+          init?.signal?.addEventListener("abort", () => controller.error(init.signal?.reason), { once: true });
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    const assertion = expect(api.get("/api/partial", { timeoutMs: 50 })).rejects.toMatchObject({ code: "CLIENT_TIMEOUT" });
+    await vi.advanceTimersByTimeAsync(50);
+    await assertion;
+  });
+
+  it("preserves an explicit caller cancellation", async () => {
+    const fetchMock = hangingFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    const request = api.get("/api/cancelled", { signal: controller.signal, timeoutMs: 1_000 });
+    controller.abort(new DOMException("页面已离开", "AbortError"));
+    await expect(request).rejects.toMatchObject({ name: "AbortError", message: "页面已离开" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears its deadline after a successful response", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } })));
+    await expect(api.get<{ ok: boolean }>("/api/fast", { timeoutMs: 50 })).resolves.toEqual({ ok: true });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("classifies a malformed successful response without exposing parser internals", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("not-json", { status: 200, headers: { "content-type": "application/json" } })));
+    await expect(api.get("/api/malformed", { timeoutMs: 50 })).rejects.toMatchObject({
+      status: 0, code: "INVALID_RESPONSE", message: "服务器响应格式异常，请稍后重试",
+    } satisfies Partial<ApiError>);
+  });
+});
 
 describe("inferUploadType", () => {
   it("uses a trusted browser media category when present", () => {
