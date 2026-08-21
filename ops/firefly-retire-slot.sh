@@ -4,6 +4,16 @@ set -eu
 slot=${1:-}
 case "$slot" in blue|green|legacy) ;; *) echo "invalid slot" >&2; exit 1 ;; esac
 
+# A delayed retirement timer from release N can fire while release N+1 is
+# validating the same slot. Never mutate either slot while the deployment
+# lock is held. Calls made by firefly-deploy itself opt in explicitly because
+# that process already owns the lock.
+if [ "${FIREFLY_DEPLOY_LOCK_HELD:-0}" != "1" ]; then
+  deploy_lock=${FIREFLY_DEPLOY_LOCK_FILE:-/run/lock/firefly-deploy.lock}
+  exec 8>"$deploy_lock"
+  flock -n 8 || exit 0
+fi
+
 release_env=/etc/firefly/release.env
 legacy_project=firefly
 [ -r "$release_env" ] || exit 0
