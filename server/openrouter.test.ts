@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildImageRequestBody, fetchOpenRouterJsonWithinDeadline, OpenRouterError, OpenRouterKeyPool, parseOpenRouterImages, parseOpenRouterTextDelta } from "./openrouter.js";
+import { buildImageRequestBody, fetchOpenRouterJsonWithinDeadline, isRetryableOpenRouterFailure, OpenRouterError, OpenRouterKeyPool, parseOpenRouterImages, parseOpenRouterTextDelta } from "./openrouter.js";
 import { computeImageSize, IMAGE_MODELS, imageModelById, openRouterResolution } from "./image-models.js";
 
 describe("OpenRouterKeyPool", () => {
@@ -78,6 +78,19 @@ describe("OpenRouter transport deadline", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("OpenRouter retry classification", () => {
+  it("retries transient transport and provider failures", () => {
+    expect(isRetryableOpenRouterFailure(new OpenRouterError("offline", "network"))).toBe(true);
+    expect(isRetryableOpenRouterFailure(new OpenRouterError("busy", 429))).toBe(true);
+    expect(isRetryableOpenRouterFailure(new OpenRouterError("unavailable", 503))).toBe(true);
+  });
+
+  it("does not retry deterministic request rejection", () => {
+    expect(isRetryableOpenRouterFailure(new OpenRouterError("unsupported", 400))).toBe(false);
+    expect(isRetryableOpenRouterFailure(new OpenRouterError("unauthorized", 401))).toBe(false);
   });
 });
 

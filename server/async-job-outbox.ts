@@ -22,10 +22,11 @@ export type AsyncJobQueues = Record<AsyncJobQueueName, OutboxQueue>;
 
 const retention = { age: 7 * 24 * 3600 };
 const queueOptions = (intent: AsyncJobOutbox): JobsOptions => {
-  const attempts = intent.queueName === "generation" ? 4 : intent.queueName === "image-generation" ? 5 : 3;
+  const imageWork = intent.queueName === "image-generation" || (intent.queueName === "canvas-jobs" && intent.jobName !== "text");
+  const attempts = intent.queueName === "generation" ? 4 : imageWork ? 5 : 3;
   // Image-key cooldowns last 30s for 5xx and 60s for 429. Keep retries
   // alive beyond that window instead of exhausting them while every key is cooling.
-  const delay = intent.queueName === "image-generation" ? 15_000 : intent.queueName === "canvas-jobs" && intent.jobName === "text" ? 3000 : 5000;
+  const delay = imageWork ? 15_000 : intent.queueName === "canvas-jobs" && intent.jobName === "text" ? 3000 : 5000;
   return {
     jobId: intent.jobId,
     attempts,

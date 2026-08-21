@@ -2,7 +2,7 @@ import { UnrecoverableError } from "bullmq";
 import type { ImageGenerationTask, MediaObject } from "./db.js";
 import { storeGeneratedImage } from "./generated-media.js";
 import { openRouterResolution } from "./image-models.js";
-import { downloadImageBuffer, generateSingleImage, OpenRouterError } from "./openrouter.js";
+import { downloadImageBuffer, generateSingleImage, isRetryableOpenRouterFailure, OpenRouterError } from "./openrouter.js";
 import type { ImageGenerationQueuePayload } from "./redis.js";
 import { users } from "./store.js";
 import { signedProviderObjectUrl } from "./tos.js";
@@ -35,12 +35,6 @@ const defaultDependencies = () => productionDependencies ??= {
   download: downloadImageBuffer,
   store: storeGeneratedImage,
   discard: (media) => users.upsertMedia({ ...media, status: "delete_pending", updatedAt: Date.now() }),
-};
-
-export const isRetryableImageGenerationError = (error: unknown) => {
-  if (!(error instanceof OpenRouterError)) return true;
-  if (error.status === "network") return true;
-  return error.status === 408 || error.status === 409 || error.status === 425 || error.status === 429 || error.status >= 500;
 };
 
 const imageContentType = (url: string) => url.startsWith("data:image/webp")
@@ -102,7 +96,7 @@ export const processImageGenerationAttempt = async (
       console.info(JSON.stringify({ type: "image_generation_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, mediaId: media.id, index, bytes: buffer.length }));
     } catch (error) {
       const message = errorMessage(error);
-      const retryable = isRetryableImageGenerationError(error);
+      const retryable = isRetryableOpenRouterFailure(error);
       if (retryable && job.attemptNumber < job.maxAttempts) {
         console.warn(JSON.stringify({
           type: "image_generation_item_retry", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId,

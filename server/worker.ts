@@ -2,7 +2,7 @@ import { UnrecoverableError, Worker, type Job } from "bullmq";
 import { Redis } from "ioredis";
 import { config } from "./config.js";
 import { shouldRecoverArchiveHandoff } from "./archive-state.js";
-import { createProviderTask, getProviderTask, validateGeneration, type GenerationInput } from "./provider.js";
+import { getProviderTask, validateGeneration, type GenerationInput } from "./provider.js";
 import { canvasQueue, generationQueue, imageGenerationQueue, mediaQueue, readTask, saveTask } from "./redis.js";
 import { AssetRegistrationRejected, isRetryableAssetRejection, prepareProviderAssets } from "./asset-registration.js";
 import { users } from "./store.js";
@@ -12,6 +12,7 @@ import { shouldFinalizeJobFailure } from "./job-failure.js";
 import { startWorkerHeartbeat } from "./worker-heartbeat.js";
 import { startAsyncJobOutboxDispatcher } from "./async-job-outbox.js";
 import { resolveCanvasGenerationReferences } from "./canvas-project-assets.js";
+import { submitProviderTaskOnce } from "./generation-submission.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -24,19 +25,17 @@ const processGenerationJob = async (job: Job<{ input: unknown }>) => {
   let task = await readTask(job.id!, true);
   if (!task || task.deletedAt) return;
   if (!task.providerId) {
-    task = { ...task, status: "submitting", updatedAt: Date.now() };
-    await saveTask(task);
-    console.info(JSON.stringify({ type: "generation_submitting", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt: job.attemptsMade + 1 }));
+    if (task.status === "submitting") {
+      await submitProviderTaskOnce(task, input, { save: saveTask });
+      return;
+    }
     if (!task.ownerId) throw new UnrecoverableError("任务缺少素材所有者信息");
     input = resolveCanvasGenerationReferences(input, task.ownerId);
     try { input = await prepareProviderAssets(input, task.ownerId); }
     catch (error) { if (error instanceof AssetRegistrationRejected && !isRetryableAssetRejection(error)) throw new UnrecoverableError(error.message); throw error; }
-    task = { ...task, request: input, updatedAt: Date.now() };
-    await saveTask(task);
-    const created = await createProviderTask(input);
-    task = { ...task, providerId: created.id, status: "running", updatedAt: Date.now() };
-    await saveTask(task);
-    console.info(JSON.stringify({ type: "generation_submitted", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, providerId: created.id }));
+    console.info(JSON.stringify({ type: "generation_submitting", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt: job.attemptsMade + 1 }));
+    task = await submitProviderTaskOnce(task, input, { save: saveTask });
+    console.info(JSON.stringify({ type: "generation_submitted", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, providerId: task.providerId }));
   } else if (task.status !== "running") {
     task = { ...task, status: "running", error: undefined, updatedAt: Date.now() };
     await saveTask(task);

@@ -89,6 +89,28 @@ describe("durable async job outbox", () => {
     store.close();
   });
 
+  it("keeps Canvas image retries alive beyond OpenRouter key cooldowns", async () => {
+    const { store, owner } = createStore();
+    const createdAt = 300;
+    const canvas = store.createCanvasProject({
+      id: "canvas-1", ownerId: owner.id, title: "画布", documentJson: "{}", revision: 0, createdAt, updatedAt: createdAt,
+    });
+    const canvasJob = {
+      id: "canvas-image-job", ownerId: owner.id, canvasId: canvas.id, nodeId: "node-1", kind: "image" as const,
+      status: "queued" as const, payload: { prompt: "雨夜", model: "google/image" }, partialText: "", createdAt, updatedAt: createdAt,
+    };
+    const payload = { canvasJobId: canvasJob.id, kind: "image", payload: canvasJob.payload };
+    store.createCanvasJobWithOutbox(canvasJob, { queueName: "canvas-jobs", jobId: canvasJob.id, jobName: "image", payload });
+
+    const add = vi.fn(async () => ({ id: canvasJob.id }));
+    await dispatchPendingAsyncJobs(store, queues(add), createdAt);
+    expect(add).toHaveBeenCalledWith("image", payload, expect.objectContaining({
+      attempts: 5,
+      backoff: expect.objectContaining({ type: "exponential", delay: 15_000 }),
+    }));
+    store.close();
+  });
+
   it("acknowledges a queue outage without losing the job and retries with the stable job id", async () => {
     const { store, owner } = createStore();
     const record = task("task-retry", owner.id);
