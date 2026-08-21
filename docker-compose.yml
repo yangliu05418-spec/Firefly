@@ -64,6 +64,27 @@ services:
       interval: 15s
       timeout: 5s
       retries: 3
+  image-worker:
+    build: .
+    restart: unless-stopped
+    command: ["node", "dist-server/image-worker.js"]
+    env_file:
+      - .env
+      - .env.feishu
+    volumes:
+      - /srv/firefly/data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 35s
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "node", "dist-server/worker-healthcheck.js", "image"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
   media-worker:
     build: .
     restart: unless-stopped

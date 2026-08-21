@@ -6,11 +6,6 @@ import { shouldFinalizeJobFailure } from "./job-failure.js";
 import type { ImageGenerationQueuePayload } from "./redis.js";
 import { users } from "./store.js";
 
-/**
- * The image queue has an independent processor and concurrency budget while
- * sharing the existing generation container until the host deployment
- * contract is bootstrapped with a dedicated image-worker role.
- */
 export const createImageGenerationWorker = (connection: Redis) => {
   const worker = new Worker<ImageGenerationQueuePayload>("image-generation", async (job) => {
     await processImageGenerationAttempt({

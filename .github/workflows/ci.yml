@@ -134,6 +134,8 @@ jobs:
           grep -q 'assert_legacy_container.*service' ops/firefly-deploy.sh
           grep -q '/api/health/workers' ops/firefly-deploy.sh
           grep -q 'failed_worker_readiness' ops/firefly-deploy.sh
+          grep -q 'image-worker:dist-server/image-worker.js' ops/firefly-deploy.sh
+          grep -q 'web worker image-worker media-worker canvas-worker' ops/firefly-retire-slot.sh
 
       - name: Verify co-hosted Nginx configuration is preserved
         shell: bash
@@ -282,7 +284,7 @@ jobs:
             -e DATABASE_PATH=/data/firefly.db \
             -e MEDIA_STORAGE_BACKEND=legacy \
             firefly-ci:${{ github.sha }} node dist-server/migrate.js
-          for role_command in 'worker:dist-server/worker.js' 'media:dist-server/media-worker.js' 'canvas:dist-server/canvas-worker.js'; do
+          for role_command in 'worker:dist-server/worker.js' 'image:dist-server/image-worker.js' 'media:dist-server/media-worker.js' 'canvas:dist-server/canvas-worker.js'; do
             role=${role_command%%:*}
             command=${role_command#*:}
             docker run -d --name "firefly-ci-$role" --network firefly-ci \
