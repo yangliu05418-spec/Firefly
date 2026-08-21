@@ -20,6 +20,10 @@ concurrency:
 jobs:
   source-gates:
     name: Source safety gates
+    # release/candidate-3 is protected with strict, admin-enforced required
+    # checks. The merge commit has already crossed this exact gate while based
+    # on the latest release head, so a push rerun adds latency, not coverage.
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -183,6 +187,7 @@ jobs:
 
   test-build:
     name: Node 22 test and build
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -224,6 +229,7 @@ jobs:
 
   container:
     name: Container build, smoke test and scan
+    if: github.event_name != 'push'
     # Production is ARM64-only. Native ARM CI avoids building and scanning an
     # unused AMD64 image and primes the same cache consumed by publish.
     runs-on: ubuntu-24.04-arm
@@ -363,9 +369,10 @@ jobs:
   deploy:
     name: Deploy production by digest
     if: github.event_name == 'push' && github.ref == 'refs/heads/release/candidate-3'
-    # Build the immutable image in parallel with the safety/test jobs, but do
-    # not deploy until every gate has succeeded.
-    needs: [source-gates, test-build, container, publish]
+    # Required PR checks are strict and admin-enforced on the protected release
+    # branch. After merge, deploy the one immutable ARM64 build without running
+    # the same source, test, browser and container gates a second time.
+    needs: [publish]
     runs-on: ubuntu-latest
     environment: production
     permissions:
