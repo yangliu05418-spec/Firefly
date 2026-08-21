@@ -1,4 +1,4 @@
-import { callAssetApi } from "./asset-api.js";
+import { AssetApiError, callAssetApi } from "./asset-api.js";
 import { ensureAutoReferenceGroup } from "./asset-registration.js";
 import type { UserAsset } from "./db.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
@@ -8,6 +8,8 @@ import { promoteUserAssetMedia } from "./asset-media.js";
 
 const ACTIVE_DEADLINE_MS = 3 * 60 * 1000;
 const POLL_INTERVAL_MS = 5000;
+const UNKNOWN_CREATE_DEADLINE_MS = 24 * 60 * 60 * 1000;
+const UNKNOWN_CREATE_MESSAGE = "素材已上传，正在确认生成引用";
 
 type ProviderAssetRecord = {
   Id: string;
@@ -16,6 +18,7 @@ type ProviderAssetRecord = {
   Status?: UserAsset["status"];
   URL?: string;
   GroupId?: string;
+  CreateTime?: string;
 };
 
 export type AssetIngestDependencies = {
@@ -51,6 +54,27 @@ export class AssetUploadPendingError extends Error {
   readonly code = "ASSET_UPLOAD_PENDING";
   constructor() { super("素材已传输，正在完成内容校验"); this.name = "AssetUploadPendingError"; }
 }
+
+export class AssetCreateUnknownError extends Error {
+  readonly code = "ASSET_CREATE_UNKNOWN";
+  constructor(message = UNKNOWN_CREATE_MESSAGE, options?: ErrorOptions) { super(message, options); this.name = "AssetCreateUnknownError"; }
+}
+
+const isAmbiguousCreateFailure = (error: unknown) => !(error instanceof AssetApiError) || error.status >= 500;
+
+const reconcileCreatedAsset = async (asset: UserAsset, groupId: string, providerName: string, deps: AssetIngestDependencies) => {
+  const result = await deps.callAsset<{ Items?: ProviderAssetRecord[] }>("ListAssets", {
+    Filter: { GroupIds: [groupId], Name: providerName },
+    PageNumber: 1,
+    PageSize: 100,
+  });
+  const exact = (result.Items ?? []).filter((candidate) => candidate.Name === providerName
+    && candidate.GroupId === groupId
+    && (!candidate.AssetType || candidate.AssetType === asset.assetType));
+  exact.sort((left, right) => String(right.CreateTime ?? "").localeCompare(String(left.CreateTime ?? "")));
+  if (exact.length > 1) console.warn(JSON.stringify({ type: "asset_ingest_reconcile_duplicates", at: new Date().toISOString(), assetId: asset.id, ownerId: asset.ownerId, count: exact.length }));
+  return exact[0];
+};
 
 const saved = (asset: UserAsset, patch: Partial<UserAsset>, deps: AssetIngestDependencies) => {
   const next = { ...asset, ...patch, updatedAt: deps.now() };
@@ -93,20 +117,49 @@ export const registerQueuedAsset = async (assetId: string, deps: AssetIngestDepe
   let providerAssetId = asset.providerAssetId;
   if (!providerAssetId) {
     const groupId = asset.groupId || await deps.ensureGroup();
+    const providerName = providerAssetName(asset.name, asset.uploadId);
     let created: ProviderAssetRecord;
-    try {
-      created = await deps.callAsset<ProviderAssetRecord>("CreateAsset", {
-        GroupId: groupId,
-        URL: await deps.resolveMediaUrl(media),
-        AssetType: asset.assetType,
-        Name: providerAssetName(asset.name)
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "素材服务暂时不可用";
-      // CreateAsset has no idempotency token. An ambiguous timeout must not be replayed automatically.
-      markAssetIngestFailed(asset.id, /timeout|aborted/i.test(message) ? "素材已上传，但生成引用建立超时，请稍后重试" : message, deps);
-      console.warn(JSON.stringify({ type: "asset_ingest_create_failed", at: new Date().toISOString(), assetId: asset.id, ownerId: asset.ownerId, code: (error as { code?: string }).code ?? "unknown" }));
-      return;
+    if (asset.lastError === UNKNOWN_CREATE_MESSAGE) {
+      if (deps.now() - asset.createdAt > UNKNOWN_CREATE_DEADLINE_MS) return markAssetIngestFailed(asset.id, "素材生成引用的创建结果长时间无法确认，请重新上传", deps);
+      try {
+        const reconciled = await reconcileCreatedAsset(asset, groupId, providerName, deps);
+        if (!reconciled) throw new AssetCreateUnknownError();
+        created = reconciled;
+      } catch (error) {
+        if (error instanceof AssetCreateUnknownError) throw error;
+        throw new AssetCreateUnknownError(UNKNOWN_CREATE_MESSAGE, { cause: error });
+      }
+    } else {
+      const reconciledBeforeCreate = await reconcileCreatedAsset(asset, groupId, providerName, deps);
+      if (reconciledBeforeCreate) created = reconciledBeforeCreate;
+      else {
+        try {
+          created = await deps.callAsset<ProviderAssetRecord>("CreateAsset", {
+            GroupId: groupId,
+            URL: await deps.resolveMediaUrl(media),
+            AssetType: asset.assetType,
+            Name: providerName
+          });
+        } catch (error) {
+          if (error instanceof AssetApiError && error.status === 429) throw error;
+          const message = error instanceof Error ? error.message : "素材服务暂时不可用";
+          if (!isAmbiguousCreateFailure(error)) {
+            markAssetIngestFailed(asset.id, message, deps);
+            console.warn(JSON.stringify({ type: "asset_ingest_create_failed", at: new Date().toISOString(), assetId: asset.id, ownerId: asset.ownerId, code: (error as { code?: string }).code ?? "unknown" }));
+            return;
+          }
+          asset = saved(asset, { groupId, status: "Processing", lastError: UNKNOWN_CREATE_MESSAGE }, deps);
+          console.warn(JSON.stringify({ type: "asset_ingest_create_unknown", at: new Date().toISOString(), assetId: asset.id, ownerId: asset.ownerId, code: (error as { code?: string }).code ?? "unknown" }));
+          try {
+            const reconciled = await reconcileCreatedAsset(asset, groupId, providerName, deps);
+            if (!reconciled) throw new AssetCreateUnknownError();
+            created = reconciled;
+          } catch (reconcileError) {
+            if (reconcileError instanceof AssetCreateUnknownError) throw reconcileError;
+            throw new AssetCreateUnknownError(UNKNOWN_CREATE_MESSAGE, { cause: reconcileError });
+          }
+        }
+      }
     }
     if (!created.Id?.startsWith("asset-")) return markAssetIngestFailed(asset.id, "素材服务未返回有效资产 ID", deps);
     providerAssetId = created.Id;

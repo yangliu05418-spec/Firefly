@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { AssetRegistrationRejected, isRetryableAssetRejection, prepareProviderAssets } from "./asset-registration.js";
+import { providerAssetName } from "./asset-name.js";
 import { buildProviderPayload, type GenerationInput } from "./provider.js";
 
 const input = (): GenerationInput => ({
@@ -17,6 +18,7 @@ describe("trusted asset registration", () => {
   it("registers a TOS upload, waits for Active, and passes asset URI metadata", async () => {
     const callAsset = vi.fn(async (action: string) => {
       if (action === "ListAssetGroups") return { Items: [{ Id: "group-1", Name: "Firefly Auto References" }] };
+      if (action === "ListAssets") return { Items: [] };
       if (action === "CreateAsset") return { Id: "asset-1" };
       if (action === "GetAsset") return { Id: "asset-1", Status: "Active" };
       throw new Error(action);
@@ -42,6 +44,45 @@ describe("trusted asset registration", () => {
     });
     expect(result.assets[0]?.assetId).toBe("asset-existing");
     expect(callAsset).toHaveBeenCalledTimes(1);
+  });
+
+  it("reconciles a CreateAsset response loss by deterministic upload name", async () => {
+    const expectedName = providerAssetName("actor.png", "upload-12345678901234567890");
+    let listCount = 0;
+    const cacheSet = vi.fn(async () => undefined);
+    const callAsset = vi.fn(async (action: string) => {
+      if (action === "ListAssetGroups") return { Items: [{ Id: "group-1", Name: "Firefly Auto References" }] };
+      if (action === "ListAssets") return { Items: ++listCount === 1 ? [] : [{ Id: "asset-reconciled", Name: expectedName, GroupId: "group-1", AssetType: "Image" }] };
+      if (action === "CreateAsset") throw new Error("connection reset after request");
+      if (action === "GetAsset") return { Id: "asset-reconciled", Status: "Active", GroupId: "group-1", AssetType: "Image" };
+      throw new Error(action);
+    });
+    const result = await prepareProviderAssets(input(), "owner-1", {
+      readUpload: vi.fn(() => ({ ownerId: "owner-1", status: "ready", contentType: "image/png", objectKey: "inputs/a.png", fileName: "actor.png" }) as never),
+      cacheGet: vi.fn(async () => null), cacheSet, callAsset: callAsset as never,
+      resolveMediaUrl: vi.fn(async () => "https://tos.example/asset") as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 10)
+    });
+    expect(result.assets[0]?.assetId).toBe("asset-reconciled");
+    expect(callAsset.mock.calls.filter(([action]) => action === "CreateAsset")).toHaveLength(1);
+    expect(cacheSet).toHaveBeenCalledWith(expect.any(String), "create-unknown:10");
+    expect(cacheSet).toHaveBeenLastCalledWith(expect.any(String), "asset-reconciled");
+  });
+
+  it("never repeats CreateAsset while an ambiguous result is being reconciled", async () => {
+    const callAsset = vi.fn(async (action: string) => {
+      if (action === "ListAssetGroups") return { Items: [{ Id: "group-1", Name: "Firefly Auto References" }] };
+      if (action === "ListAssets") return { Items: [] };
+      throw new Error(action);
+    });
+    const result = await prepareProviderAssets(input(), "owner-1", {
+      readUpload: vi.fn(() => ({ ownerId: "owner-1", status: "ready", contentType: "image/png", objectKey: "inputs/a.png", fileName: "actor.png" }) as never),
+      cacheGet: vi.fn(async () => "create-unknown:10"), cacheSet: vi.fn(async () => undefined), callAsset: callAsset as never,
+      resolveMediaUrl: vi.fn(async () => "https://tos.example/asset") as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 20)
+    }).catch((caught: unknown) => caught);
+    const error = result as AssetRegistrationRejected;
+    expect(error).toBeInstanceOf(AssetRegistrationRejected);
+    expect(error.code).toBe("ASSET_PROCESSING_TIMEOUT");
+    expect(callAsset.mock.calls.map(([action]) => action)).toEqual(["ListAssetGroups", "ListAssets"]);
   });
 
   it("validates selected assets and preserves prompt reference order under concurrent preparation", async () => {

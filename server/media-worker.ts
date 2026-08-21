@@ -8,7 +8,7 @@ import { createPoster, deleteObject, fetchObjectFromUrl, optimizePlaybackObject,
 import { MAX_MEDIA_RECOVERY_ATTEMPTS } from "./db.js";
 import { transcodePreview } from "./preview-transcode.js";
 import { closeWorkersWithin } from "./shutdown.js";
-import { AssetUploadPendingError, markAssetIngestFailed, registerQueuedAsset } from "./asset-ingest.js";
+import { AssetCreateUnknownError, AssetUploadPendingError, markAssetIngestFailed, registerQueuedAsset } from "./asset-ingest.js";
 import { deleteQueuedProviderAsset } from "./asset-cleanup.js";
 import { CanvasAssetUploadPendingError, copyPreparedCanvasAsset } from "./canvas-assets.js";
 import { startWorkerHeartbeat } from "./worker-heartbeat.js";
@@ -271,9 +271,9 @@ previewWorker.on("failed", (job, error) => {
 });
 
 assetWorker.on("failed", (job, error) => {
-  if (job?.name === "register" && error instanceof AssetUploadPendingError) {
+  if (job?.name === "register" && (error instanceof AssetUploadPendingError || error instanceof AssetCreateUnknownError)) {
     if (job.attemptsMade >= (job.opts.attempts ?? 1)) void job.remove().catch(() => undefined);
-    console.info(JSON.stringify({ type: "asset_ingest_waiting_for_upload", at: new Date().toISOString(), assetId: job.data.assetId, attempt: job.attemptsMade }));
+    console.info(JSON.stringify({ type: error instanceof AssetCreateUnknownError ? "asset_ingest_waiting_for_reconcile" : "asset_ingest_waiting_for_upload", at: new Date().toISOString(), assetId: job.data.assetId, attempt: job.attemptsMade }));
     return;
   }
   if (job?.name === "register" && job.attemptsMade >= (job.opts.attempts ?? 1)) markAssetIngestFailed(job.data.assetId, "素材已上传，但生成引用暂未准备完成");
