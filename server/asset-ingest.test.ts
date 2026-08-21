@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { registerQueuedAsset, type AssetIngestDependencies } from "./asset-ingest.js";
+import { AssetUploadPendingError, registerQueuedAsset, type AssetIngestDependencies } from "./asset-ingest.js";
 import type { UserAsset } from "./db.js";
 
 const pending = (): UserAsset => ({
@@ -19,6 +19,7 @@ const setup = (asset = pending()) => {
     readAsset: () => stored,
     recordDeletedProviderAsset: vi.fn(),
     readUpload: vi.fn(() => ({ ownerId: "owner-1", status: "ready", objectKey: "inputs/actor.png", uploadId: "upload-1", fileName: "actor.png" }) as never),
+    readUploadState: vi.fn(() => ({ ownerId: "owner-1", status: "ready", objectKey: "inputs/actor.png", uploadId: "upload-1", fileName: "actor.png" }) as never),
     saveAsset: (next) => { stored = next; },
     callAsset: callAsset as never,
     ensureGroup: vi.fn(async () => "group-1"),
@@ -44,6 +45,15 @@ describe("background asset ingestion", () => {
     await registerQueuedAsset("asset-local-1", context.deps);
     expect(context.deps.callAsset).toHaveBeenCalledTimes(1);
     expect(context.stored()).toMatchObject({ status: "Failed", lastError: expect.stringContaining("已上传") });
+  });
+
+  it("keeps a just-transported asset processing until deep upload validation completes", async () => {
+    const context = setup();
+    context.deps.readUpload = vi.fn(() => null);
+    context.deps.readUploadState = vi.fn(() => ({ ownerId: "owner-1", status: "uploading" }) as never);
+    await expect(registerQueuedAsset("asset-local-1", context.deps)).rejects.toBeInstanceOf(AssetUploadPendingError);
+    expect(context.stored()).toMatchObject({ status: "Processing" });
+    expect(context.callAsset).not.toHaveBeenCalled();
   });
 
   it("records a created provider id on the tombstone when deletion wins the registration race", async () => {

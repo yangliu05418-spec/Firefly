@@ -26,6 +26,7 @@ import { abortMultipartUpload, canvasExportObjectKey, completeMultipartUpload, c
 import { DependencyHealthGate } from "./dependency-health.js";
 import { canonicalUploadContentType, uploadKindFromContentType } from "./upload-policy.js";
 import { acquireUploadCompletionLock, claimUploadSlot, releaseUploadCompletionLock, releaseUploadSlot, renewUploadSlot, UPLOAD_SESSION_TTL_SECONDS } from "./upload-slots.js";
+import { canCreatePendingAsset } from "./asset-upload-admission.js";
 import { createCanvasAssetFromUpload, prepareCanvasAssetFromUpload } from "./canvas-assets.js";
 import { createCanvasMediaHandler } from "./canvas-media-route.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
@@ -616,8 +617,8 @@ app.post("/api/assets", requireAuth, async (req, res) => {
     if (body.uploadId) {
       const existing = users.readUserAssetByUpload(user.id, body.uploadId);
       if (existing) return res.status(202).json(publicUserAsset(existing));
-      const media = users.readUpload(body.uploadId);
-      if (!media || media.ownerId !== user.id || media.status !== "ready") return res.status(404).json({ error: "引用素材不存在或尚未上传完成" });
+      const media = users.readUploadState(body.uploadId);
+      if (!canCreatePendingAsset(media, user.id)) return res.status(404).json({ error: "引用素材不存在或尚未上传完成" });
       assetType = media.contentType.startsWith("video/") ? "Video" : media.contentType.startsWith("audio/") ? "Audio" : "Image";
       providerName = providerAssetName(body.name);
       const now = Date.now();
@@ -626,11 +627,13 @@ app.post("/api/assets", requireAuth, async (req, res) => {
       const stored = users.readUserAssetByUpload(user.id, body.uploadId);
       if (!stored) throw new Error("素材上传记录未能持久化");
       if (stored.id !== asset.id) return res.status(202).json(publicUserAsset(stored));
-      try {
-        await assetQueue.add("register", { assetId: asset.id }, { jobId: asset.id, attempts: 3, backoff: { type: "exponential", delay: 15_000 }, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } });
-      } catch (error) {
-        users.upsertUserAsset({ ...asset, lastError: "素材已上传，生成引用将在后台继续准备", updatedAt: Date.now() });
-        console.warn(JSON.stringify({ type: "asset_ingest_enqueue_failed", at: new Date().toISOString(), assetId: asset.id, userId: user.id, code: (error as { code?: string }).code ?? "unknown" }));
+      if (users.readUpload(body.uploadId)) {
+        try {
+          await assetQueue.add("register", { assetId: asset.id }, { jobId: asset.id, attempts: 3, backoff: { type: "exponential", delay: 15_000 }, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } });
+        } catch (error) {
+          users.upsertUserAsset({ ...asset, lastError: "素材已上传，生成引用将在后台继续准备", updatedAt: Date.now() });
+          console.warn(JSON.stringify({ type: "asset_ingest_enqueue_failed", at: new Date().toISOString(), assetId: asset.id, userId: user.id, code: (error as { code?: string }).code ?? "unknown" }));
+        }
       }
       console.info(JSON.stringify({ type: "user_asset_mutation", action: "queue_asset", userId: user.id, assetId: asset.id, at: new Date().toISOString() }));
       return res.status(202).json(publicUserAsset(users.readUserAsset(asset.id)!));

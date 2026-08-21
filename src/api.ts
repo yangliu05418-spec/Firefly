@@ -138,11 +138,12 @@ async function uploadTosPart(uploadId: string, initial: SignedPart, blob: Blob, 
   throw lastError ?? new Error("TOS 分片上传失败");
 }
 
-type UploadedFile = { id: string; uploadId?: string; name: string; type: UploadKind; size: number; url?: string; normalized?: boolean };
+export type UploadedFile = { id: string; uploadId?: string; name: string; type: UploadKind; size: number; url?: string; normalized?: boolean };
 type UploadCompletionResponse = UploadedFile & { state?: "processing" | "ready" };
 export type UploadProgressPhase = "preparing" | "uploading" | "verifying" | "ready";
+export type UploadFileOptions = { signal?: AbortSignal; onTransportComplete?: (upload: UploadedFile) => void; waitForReady?: boolean };
 
-const finalizeUpload = async (uploadId: string, body: unknown, signal?: AbortSignal, onTransportComplete?: (upload: UploadedFile) => void): Promise<UploadedFile> => {
+const finalizeUpload = async (uploadId: string, body: unknown, signal?: AbortSignal, onTransportComplete?: (upload: UploadedFile) => void, waitForReady = true): Promise<UploadCompletionResponse> => {
   const deadline = Date.now() + 240_000;
   let lastError: unknown;
   let accepted = false;
@@ -162,6 +163,7 @@ const finalizeUpload = async (uploadId: string, body: unknown, signal?: AbortSig
       if (result.state !== "processing") return result;
       accepted = true;
       if (!transportReported) { transportReported = true; onTransportComplete?.(result); }
+      if (!waitForReady) return result;
       lastError = new Error("素材已上传，正在准备生成引用");
     }
     catch (error) {
@@ -174,11 +176,19 @@ const finalizeUpload = async (uploadId: string, body: unknown, signal?: AbortSig
   throw lastError instanceof Error ? lastError : new Error("素材完成校验失败，请稍后重试");
 };
 
-export async function uploadFile(file: File, type: UploadKind, onProgress: (value: number, phase: UploadProgressPhase) => void, options: { signal?: AbortSignal; onTransportComplete?: (upload: UploadedFile) => void } = {}) {
+export async function uploadFile(file: File, type: UploadKind, onProgress: (value: number, phase: UploadProgressPhase) => void, options: UploadFileOptions = {}) {
   const signal = options.signal;
   onProgress(0, type === "image" ? "preparing" : "uploading");
   const prepared = type === "image" ? await prepareImageForUpload(file, signal) : { file, normalized: false };
   const upload = prepared.file;
+  let transportReported = false;
+  const reportTransportComplete = options.onTransportComplete
+    ? (accepted: UploadedFile) => {
+      if (transportReported) return;
+      transportReported = true;
+      options.onTransportComplete?.({ ...accepted, name: file.name, normalized: prepared.normalized });
+    }
+    : undefined;
   onProgress(0, "uploading");
   const init = await api.post<{ id: string; chunkSize: number; direct?: boolean; concurrency?: number; parts?: SignedPart[] }>("/api/uploads", { name: upload.name, size: upload.size, type, mime: upload.type });
   const heartbeat = globalThis.setInterval(() => { void api.post(`/api/uploads/${init.id}/heartbeat`).catch(() => undefined); }, 60_000);
@@ -199,8 +209,9 @@ export async function uploadFile(file: File, type: UploadKind, onProgress: (valu
     };
     await Promise.all(Array.from({ length: Math.min(init.concurrency ?? 3, parts.length) }, worker));
     onProgress(100, "verifying");
-    const completed = { ...(await finalizeUpload(init.id, { parts: results.sort((a, b) => a.partNumber - b.partNumber) }, signal, options.onTransportComplete)), name: file.name, normalized: prepared.normalized };
-    onProgress(100, "ready");
+    const completed = { ...(await finalizeUpload(init.id, { parts: results.sort((a, b) => a.partNumber - b.partNumber) }, signal, reportTransportComplete, options.waitForReady !== false)), name: file.name, normalized: prepared.normalized };
+    reportTransportComplete?.(completed);
+    if (completed.state !== "processing") onProgress(100, "ready");
     return completed;
   }
   let offset = 0;
@@ -209,8 +220,9 @@ export async function uploadFile(file: File, type: UploadKind, onProgress: (valu
     onProgress(Math.round(offset / upload.size * 100), "uploading");
   }
   onProgress(100, "verifying");
-  const completed = { ...(await finalizeUpload(init.id, {}, signal, options.onTransportComplete)), name: file.name, normalized: prepared.normalized };
-  onProgress(100, "ready");
+  const completed = { ...(await finalizeUpload(init.id, {}, signal, reportTransportComplete, options.waitForReady !== false)), name: file.name, normalized: prepared.normalized };
+  reportTransportComplete?.(completed);
+  if (completed.state !== "processing") onProgress(100, "ready");
   return completed;
   } catch (error) {
     // Cancellation is completion-lock-aware: it cannot delete an object that the server is finalizing
