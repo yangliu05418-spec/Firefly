@@ -60,6 +60,16 @@ describe("OpenRouterKeyPool", () => {
 });
 
 describe("parseOpenRouterImages", () => {
+  it("parses the dedicated Images API base64 response", () => {
+    const urls = parseOpenRouterImages({
+      data: [
+        { b64_json: "AAAA", media_type: "image/jpeg" },
+        { b64_json: "BBBB" },
+      ],
+    });
+    expect(urls).toEqual(["data:image/jpeg;base64,AAAA", "data:image/png;base64,BBBB"]);
+  });
+
   it("parses content arrays with image_url parts", () => {
     const urls = parseOpenRouterImages({
       choices: [{ message: { content: [
