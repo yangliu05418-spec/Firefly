@@ -195,6 +195,23 @@ export type CanvasExport = {
   updatedAt: number;
 };
 
+export type AsyncJobQueueName = "generation" | "image-generation" | "canvas-jobs";
+export type AsyncJobIntent = {
+  queueName: AsyncJobQueueName;
+  jobId: string;
+  jobName: string;
+  payload: unknown;
+};
+export type AsyncJobOutbox = AsyncJobIntent & {
+  status: "pending" | "dispatched" | "complete";
+  publishAttempts: number;
+  availableAt: number;
+  dispatchedAt?: number;
+  lastError?: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
 export type CanvasProject = {
   id: string;
   ownerId: string;
@@ -284,6 +301,12 @@ type CanvasExportRow = {
   error: string | null; created_at: number; updated_at: number;
 };
 
+type AsyncJobOutboxRow = {
+  queue_name: AsyncJobQueueName; job_id: string; job_name: string; payload_json: string;
+  status: AsyncJobOutbox["status"]; publish_attempts: number; available_at: number;
+  dispatched_at: number | null; last_error: string | null; created_at: number; updated_at: number;
+};
+
 const mapUser = (row?: UserRow): User | null => row ? ({
   id: row.id, feishuOpenId: row.feishu_open_id, feishuUnionId: row.feishu_union_id,
   tenantKey: row.tenant_key, email: row.email, name: row.name, avatarUrl: row.avatar_url,
@@ -368,6 +391,13 @@ const mapCanvasExport = (row?: CanvasExportRow): CanvasExport | null => row ? ({
   createdAt: row.created_at, updatedAt: row.updated_at,
 }) : null;
 
+const mapAsyncJobOutbox = (row?: AsyncJobOutboxRow): AsyncJobOutbox | null => row ? ({
+  queueName: row.queue_name, jobId: row.job_id, jobName: row.job_name, payload: JSON.parse(row.payload_json),
+  status: row.status, publishAttempts: row.publish_attempts, availableAt: row.available_at,
+  dispatchedAt: row.dispatched_at ?? undefined, lastError: row.last_error ?? undefined,
+  createdAt: row.created_at, updatedAt: row.updated_at,
+}) : null;
+
 export class UserStore {
   private readonly database: Database.Database;
 
@@ -432,6 +462,92 @@ export class UserStore {
     return this.readTask(task.id, true)!;
   }
 
+  private insertAsyncJobIntent(intent: AsyncJobIntent, now = Date.now()) {
+    this.database.prepare(`
+      INSERT INTO async_job_outbox
+        (queue_name, job_id, job_name, payload_json, status, publish_attempts, available_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+    `).run(intent.queueName, intent.jobId, intent.jobName, JSON.stringify(intent.payload), now, now, now);
+  }
+
+  readAsyncJobIntent(queueName: AsyncJobQueueName, jobId: string) {
+    return mapAsyncJobOutbox(this.database.prepare("SELECT * FROM async_job_outbox WHERE queue_name = ? AND job_id = ?").get(queueName, jobId) as AsyncJobOutboxRow | undefined);
+  }
+
+  listPendingAsyncJobIntents(now = Date.now(), limit = 50) {
+    return (this.database.prepare(`
+      SELECT * FROM async_job_outbox
+      WHERE status = 'pending' AND available_at <= ?
+      ORDER BY available_at ASC, created_at ASC LIMIT ?
+    `).all(now, limit) as AsyncJobOutboxRow[]).map((row) => mapAsyncJobOutbox(row)!);
+  }
+
+  listStaleDispatchedAsyncJobIntents(staleBefore: number, limit = 50) {
+    return (this.database.prepare(`
+      SELECT * FROM async_job_outbox
+      WHERE status = 'dispatched' AND dispatched_at < ?
+      ORDER BY dispatched_at ASC LIMIT ?
+    `).all(staleBefore, limit) as AsyncJobOutboxRow[]).map((row) => mapAsyncJobOutbox(row)!);
+  }
+
+  markAsyncJobDispatched(queueName: AsyncJobQueueName, jobId: string, now = Date.now()) {
+    return this.database.prepare(`
+      UPDATE async_job_outbox
+      SET status = 'dispatched', publish_attempts = publish_attempts + 1, dispatched_at = ?,
+          last_error = NULL, updated_at = ?
+      WHERE queue_name = ? AND job_id = ? AND status != 'complete'
+    `).run(now, now, queueName, jobId).changes > 0;
+  }
+
+  recordAsyncJobDispatchFailure(queueName: AsyncJobQueueName, jobId: string, error: string, availableAt: number, now = Date.now()) {
+    return this.database.prepare(`
+      UPDATE async_job_outbox
+      SET status = 'pending', publish_attempts = publish_attempts + 1, available_at = ?,
+          last_error = ?, updated_at = ?
+      WHERE queue_name = ? AND job_id = ? AND status != 'complete'
+    `).run(availableAt, error.slice(0, 500), now, queueName, jobId).changes > 0;
+  }
+
+  requeueAsyncJobIntent(queueName: AsyncJobQueueName, jobId: string, now = Date.now()) {
+    return this.database.prepare(`
+      UPDATE async_job_outbox
+      SET status = 'pending', available_at = ?, dispatched_at = NULL, updated_at = ?
+      WHERE queue_name = ? AND job_id = ? AND status = 'dispatched'
+    `).run(now, now, queueName, jobId).changes > 0;
+  }
+
+  completeAsyncJobIntent(queueName: AsyncJobQueueName, jobId: string, now = Date.now()) {
+    return this.database.prepare(`
+      UPDATE async_job_outbox
+      SET status = 'complete', payload_json = '{}', last_error = NULL, updated_at = ?
+      WHERE queue_name = ? AND job_id = ? AND status != 'complete'
+    `).run(now, queueName, jobId).changes > 0;
+  }
+
+  isAsyncJobIntentActive(queueName: AsyncJobQueueName, jobId: string) {
+    if (queueName === "generation") {
+      const task = this.readTask(jobId, true);
+      return Boolean(task && !task.deletedAt && ["queued", "submitting", "running"].includes(task.status));
+    }
+    if (queueName === "image-generation") return this.readImageGeneration(jobId)?.status === "running";
+    return ["queued", "running"].includes(this.readCanvasJob(jobId)?.status ?? "");
+  }
+
+  asyncJobOutboxStats() {
+    const row = this.database.prepare(`
+      SELECT
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+        SUM(CASE WHEN status = 'dispatched' THEN 1 ELSE 0 END) AS dispatched,
+        MIN(CASE WHEN status = 'pending' THEN created_at END) AS oldest_pending_at
+      FROM async_job_outbox
+    `).get() as { pending: number | null; dispatched: number | null; oldest_pending_at: number | null };
+    return { pending: row.pending ?? 0, dispatched: row.dispatched ?? 0, oldestPendingAt: row.oldest_pending_at ?? undefined };
+  }
+
+  purgeCompletedAsyncJobIntents(completedBefore: number) {
+    return this.database.prepare("DELETE FROM async_job_outbox WHERE status = 'complete' AND updated_at < ?").run(completedBefore).changes;
+  }
+
   readTask(id: string, includeDeleted = false) {
     const row = this.database.prepare(`SELECT * FROM generation_tasks WHERE id = ?${includeDeleted ? "" : " AND deleted_at IS NULL"}`).get(id) as TaskRow | undefined;
     return mapTask(row);
@@ -488,10 +604,11 @@ export class UserStore {
   }
 
   /** Atomically reserves one active generation slot and persists the queued task. */
-  createTaskWithinLimit(task: StoredTask, limit: number) {
+  createTaskWithinLimit(task: StoredTask, limit: number, intent?: AsyncJobIntent) {
     return this.database.transaction(() => {
       if (!task.ownerId || this.countActiveTasksForUser(task.ownerId) >= limit) return false;
       this.saveTask(task);
+      if (intent) this.insertAsyncJobIntent(intent, task.createdAt);
       return true;
     })();
   }
@@ -617,11 +734,12 @@ export class UserStore {
       .map((row) => mapImageGeneration(row)!);
   }
 
-  createImageGenerationWithinLimit(task: ImageGenerationTask, limit: number) {
+  createImageGenerationWithinLimit(task: ImageGenerationTask, limit: number, intent?: AsyncJobIntent) {
     return this.database.transaction(() => {
       const count = (this.database.prepare("SELECT COUNT(*) AS count FROM image_generation_tasks WHERE owner_id = ? AND status = 'running' AND deleted_at IS NULL").get(task.ownerId) as { count: number }).count;
       if (count >= limit) return false;
       this.createImageGeneration(task);
+      if (intent) this.insertAsyncJobIntent(intent, task.createdAt);
       return true;
     })();
   }
@@ -929,7 +1047,15 @@ export class UserStore {
     return job;
   }
 
-  createCanvasImageJobWithinLimit(job: CanvasJob, limit: number) {
+  createCanvasJobWithOutbox(job: CanvasJob, intent: AsyncJobIntent) {
+    return this.database.transaction(() => {
+      this.createCanvasJob(job);
+      this.insertAsyncJobIntent(intent, job.createdAt);
+      return job;
+    })();
+  }
+
+  createCanvasImageJobWithinLimit(job: CanvasJob, limit: number, intent?: AsyncJobIntent) {
     return this.database.transaction(() => {
       const active = (this.database.prepare(`
         SELECT COUNT(*) AS count FROM canvas_jobs
@@ -937,6 +1063,18 @@ export class UserStore {
       `).get(job.ownerId) as { count: number }).count;
       if (active >= limit) return false;
       this.createCanvasJob(job);
+      if (intent) this.insertAsyncJobIntent(intent, job.createdAt);
+      return true;
+    })();
+  }
+
+  createCanvasVideoJobWithinLimit(task: StoredTask, job: CanvasJob, limit: number, intent: AsyncJobIntent) {
+    return this.database.transaction(() => {
+      if (!task.ownerId || task.ownerId !== job.ownerId || job.providerTaskId !== task.id) throw new Error("画布任务与生成任务归属不一致");
+      if (this.countActiveTasksForUser(task.ownerId) >= limit) return false;
+      this.saveTask(task);
+      this.createCanvasJob(job);
+      this.insertAsyncJobIntent(intent, task.createdAt);
       return true;
     })();
   }

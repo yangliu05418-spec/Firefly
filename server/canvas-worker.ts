@@ -9,6 +9,7 @@ import { canvasProjectAssetProviderUrl } from "./canvas-project-assets.js";
 import { closeWorkersWithin } from "./shutdown.js";
 import { startWorkerHeartbeat } from "./worker-heartbeat.js";
 import { canvasGeneratedAssetId, canvasGeneratedMediaId } from "./canvas-job-media.js";
+import { shouldFinalizeJobFailure } from "./job-failure.js";
 
 type TextPayload = { instruction: string; currentText: string; context: string };
 type ImagePayload = { prompt: string; model: string; ratio: string; resolution: string; referenceAssetIds: string[] };
@@ -109,7 +110,10 @@ const processCanvasJob = async (bullJob: Job<CanvasQueuePayload>) => {
   }
 };
 
-const worker = new Worker<CanvasQueuePayload>("canvas-jobs", processCanvasJob, {
+const worker = new Worker<CanvasQueuePayload>("canvas-jobs", async (job) => {
+  await processCanvasJob(job);
+  users.completeAsyncJobIntent("canvas-jobs", job.id!);
+}, {
   connection: redis,
   concurrency: 2,
   lockDuration: Math.max(300_000, config.openrouterRequestTimeoutMs + 60_000),
@@ -117,7 +121,10 @@ const worker = new Worker<CanvasQueuePayload>("canvas-jobs", processCanvasJob, {
 await worker.waitUntilReady();
 const heartbeat = await startWorkerHeartbeat(redis, "canvas");
 
-worker.on("failed", (job, error) => console.error(JSON.stringify({ type: "canvas_job_failed", at: new Date().toISOString(), jobId: job?.id, code: (error as { code?: string }).code ?? "unknown", message: error.message })));
+worker.on("failed", (job, error) => {
+  if (job?.id && shouldFinalizeJobFailure(error, job.attemptsMade, job.opts.attempts ?? 1)) users.completeAsyncJobIntent("canvas-jobs", job.id);
+  console.error(JSON.stringify({ type: "canvas_job_failed", at: new Date().toISOString(), jobId: job?.id, code: (error as { code?: string }).code ?? "unknown", message: error.message }));
+});
 
 let shuttingDown = false;
 const shutdown = async () => {

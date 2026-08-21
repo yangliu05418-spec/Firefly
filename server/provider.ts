@@ -21,8 +21,9 @@ export const GenerationSchema = z.object({
     url: z.string().url().optional(),
     uploadId: z.string().min(20).max(100).optional(),
     assetId: z.string().regex(/^asset-/).optional(),
+    canvasProjectAssetId: z.string().min(1).max(180).optional(),
     name: z.string()
-  }).refine((asset) => Boolean(asset.url || asset.uploadId || asset.assetId), "素材缺少可用地址"))
+  }).refine((asset) => Boolean(asset.url || asset.uploadId || asset.assetId || asset.canvasProjectAssetId), "素材缺少可用地址"))
   .default([])
 });
 export type GenerationInput = z.infer<typeof GenerationSchema>;

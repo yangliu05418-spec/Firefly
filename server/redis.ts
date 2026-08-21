@@ -25,13 +25,9 @@ export type ImageGenerationQueuePayload = {
 
 export type { StoredTask } from "./db.js";
 
-export const saveTask = async (task: StoredTask) => {
-  const stored = users.saveTask(task);
-  await redis.set(`task-cache:${task.id}`, JSON.stringify(stored), "EX", 24 * 3600).catch((error) => {
-    console.warn(JSON.stringify({ type: "task_cache_write_failed", at: new Date().toISOString(), taskId: task.id, code: (error as { code?: string }).code ?? "unknown" }));
-  });
-  return stored;
-};
+// SQLite is the task source of truth. The former write-only Redis cache had no
+// readers and could hold a durable state transition open during a Redis retry.
+export const saveTask = async (task: StoredTask) => users.saveTask(task);
 export const readTask = async (id: string, includeDeleted = false) => users.readTask(id, includeDeleted);
 
 export const listTasksForUser = async (userId: string, limit = 50) => users.listTasksForUser(userId, limit);
