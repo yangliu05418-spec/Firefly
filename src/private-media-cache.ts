@@ -36,7 +36,7 @@ export async function forgetPrivateMediaCacheUser() {
 }
 
 export function registerPrivateMediaCache() {
-  if (!import.meta.env.PROD || typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+  if (!import.meta.env.PROD || import.meta.env.VITE_DISABLE_PRIVATE_MEDIA_CACHE === "true" || typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
   window.addEventListener("load", () => {
     void navigator.serviceWorker.register("/firefly-media-sw.js", { scope: "/", updateViaCache: "none" }).catch(() => undefined);
   }, { once: true });
