@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PRIVATE_MEDIA_CACHE_NAME, PRIVATE_MEDIA_SERVICE_WORKER_URL, forgetPrivateMediaCacheUser, scopePrivateMediaCacheToUser } from "./private-media-cache";
+import { PRIVATE_MEDIA_CACHE_NAME, PRIVATE_MEDIA_SERVICE_WORKER_URL, forgetPrivateMediaCacheUser, persistPrivateMediaStorage, scopePrivateMediaCacheToUser } from "./private-media-cache";
 
 const browser = () => {
   const values = new Map<string, string>();
@@ -42,5 +42,17 @@ describe("private media cache account scope", () => {
     await forgetPrivateMediaCacheUser();
     expect(state.deleted).toEqual([PRIVATE_MEDIA_CACHE_NAME]);
     expect(state.values.size).toBe(0);
+  });
+
+  it("asks the browser to protect native asset caches from automatic eviction", async () => {
+    const persisted = vi.fn(async () => false);
+    const persist = vi.fn(async () => true);
+    vi.stubGlobal("navigator", { storage: { persisted, persist } });
+
+    await expect(persistPrivateMediaStorage()).resolves.toBe(true);
+    await expect(persistPrivateMediaStorage()).resolves.toBe(true);
+
+    expect(persisted).toHaveBeenCalledTimes(1);
+    expect(persist).toHaveBeenCalledTimes(1);
   });
 });
