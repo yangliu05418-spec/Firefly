@@ -2,6 +2,7 @@ import { UnrecoverableError, Worker, type Job } from "bullmq";
 import { Redis } from "ioredis";
 import { config } from "./config.js";
 import { shouldRecoverArchiveHandoff } from "./archive-state.js";
+import type { StoredTask } from "./db.js";
 import { validateGeneration, type GenerationInput } from "./provider.js";
 import { canvasQueue, generationQueue, imageGenerationQueue, mediaQueue, readTask, saveTask } from "./redis.js";
 import { AssetRegistrationRejected, isRetryableAssetRejection, prepareProviderAssets } from "./asset-registration.js";
@@ -14,15 +15,33 @@ import { startAsyncJobOutboxDispatcher } from "./async-job-outbox.js";
 import { resolveCanvasGenerationReferences } from "./canvas-project-assets.js";
 import { submitProviderTaskOnce } from "./generation-submission.js";
 import { pollProviderTaskUntilTerminal, ProviderPollingTerminalError } from "./provider-polling.js";
+import { generationReplayAction } from "./generation-replay.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const archiveRecoveryBucketMs = 15 * 60 * 1000;
 const outputFormatFor = (task: { request?: unknown }) => (task.request as { outputFormat?: unknown } | undefined)?.outputFormat === "mov" ? "mov" as const : "mp4" as const;
+const enqueueArchiveHandoff = async (task: StoredTask) => {
+  if (!shouldRecoverArchiveHandoff(task, config.mediaStorageBackend)) return false;
+  const archiving = { ...task, status: "succeeded" as const, mediaStatus: "archiving" as const, error: undefined, updatedAt: Date.now() };
+  await saveTask(archiving);
+  await mediaQueue.add("archive-output", { taskId: task.id, sourceUrl: task.sourceVideoUrl, outputFormat: outputFormatFor(task) }, {
+    jobId: `archive-handoff-${task.id}-${Math.floor(Date.now() / archiveRecoveryBucketMs)}`,
+    attempts: 4, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 24 * 3600 }
+  });
+  return true;
+};
 
 const processGenerationJob = async (job: Job<{ input: unknown }>) => {
   let input = validateGeneration(job.data.input) as GenerationInput;
   let task = await readTask(job.id!, true);
   if (!task || task.deletedAt) return;
+  const replayAction = generationReplayAction(task, config.mediaStorageBackend);
+  if (replayAction === "complete") return;
+  if (replayAction === "archive") {
+    await enqueueArchiveHandoff(task);
+    console.warn(JSON.stringify({ type: "generation_archive_handoff_replayed", at: new Date().toISOString(), taskId: task.id }));
+    return;
+  }
   if (!task.providerId) {
     if (task.status === "submitting") {
       await submitProviderTaskOnce(task, input, { save: saveTask });
@@ -113,11 +132,7 @@ worker.on("failed", async (job, error) => {
     const task = await readTask(job.id);
     if (!task) return;
     if (shouldRecoverArchiveHandoff(task, config.mediaStorageBackend)) {
-      await saveTask({ ...task, status: "succeeded", mediaStatus: "archiving", error: undefined, updatedAt: Date.now() });
-      await mediaQueue.add("archive-output", { taskId: task.id, sourceUrl: task.sourceVideoUrl, outputFormat: outputFormatFor(task) }, {
-        jobId: `archive-handoff-${task.id}-${Math.floor(Date.now() / archiveRecoveryBucketMs)}`,
-        attempts: 4, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 24 * 3600 }
-      });
+      await enqueueArchiveHandoff(task);
       console.warn(JSON.stringify({ type: "generation_archive_handoff_recovered", at: new Date().toISOString(), taskId: task.id }));
       users.completeAsyncJobIntent("generation", job.id);
       return;
