@@ -72,11 +72,19 @@ export const validateGeneration = (input: unknown) => {
 
 const endpoint = "https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks";
 const headers = () => ({ "Content-Type": "application/json", Authorization: `Bearer ${config.apiKey}` });
+
+export class ProviderRequestError extends Error {
+  constructor(message: string, readonly status: number | "network") {
+    super(message);
+    this.name = "ProviderRequestError";
+  }
+}
+
 const providerFetch = async (url: string, init: RequestInit = {}) => {
   try { return await fetch(url, { ...init, signal: AbortSignal.timeout(config.providerRequestTimeoutMs) }); }
   catch (error) {
-    if ((error as Error).name === "TimeoutError" || (error as Error).name === "AbortError") throw new Error("上游模型服务请求超时，系统将自动重试");
-    throw error;
+    const timedOut = (error as Error).name === "TimeoutError" || (error as Error).name === "AbortError";
+    throw new ProviderRequestError(timedOut ? "上游模型服务请求超时" : error instanceof Error ? error.message : "上游模型服务网络异常", "network");
   }
 };
 
@@ -110,12 +118,12 @@ export const buildProviderPayload = (input: GenerationInput) => {
 export const createProviderTask = async (input: GenerationInput) => {
   if (!config.apiKey) throw new Error("服务器尚未配置 ARK_API_KEY");
   const response = await providerFetch(endpoint, { method: "POST", headers: headers(), body: JSON.stringify(buildProviderPayload(input)) });
-  if (!response.ok) throw new Error(await providerError(response));
+  if (!response.ok) throw new ProviderRequestError(await providerError(response), response.status);
   return await response.json() as { id: string };
 };
 
 export const getProviderTask = async (id: string) => {
   const response = await providerFetch(`${endpoint}/${encodeURIComponent(id)}`, { headers: headers() });
-  if (!response.ok) throw new Error(await providerError(response));
+  if (!response.ok) throw new ProviderRequestError(await providerError(response), response.status);
   return await response.json() as { status: string; content?: { video_url?: string }; error?: { message?: string } | null };
 };

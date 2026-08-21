@@ -1,10 +1,10 @@
-import { Worker, type Job } from "bullmq";
+import { UnrecoverableError, Worker, type Job } from "bullmq";
 import { Redis } from "ioredis";
 import { config } from "./config.js";
 import { users } from "./store.js";
 import { mediaQueue } from "./redis.js";
 import { imageModelById, openRouterResolution } from "./image-models.js";
-import { downloadImageBuffer, generateCanvasText, generateSingleImage } from "./openrouter.js";
+import { downloadImageBuffer, generateCanvasText, generateSingleImage, isRetryableOpenRouterFailure } from "./openrouter.js";
 import { storeGeneratedImage } from "./generated-media.js";
 import { canvasProjectAssetProviderUrl } from "./canvas-project-assets.js";
 import { closeWorkersWithin } from "./shutdown.js";
@@ -101,13 +101,16 @@ const processCanvasJob = async (bullJob: Job<CanvasQueuePayload>) => {
     const current = users.readCanvasJob(record.id);
     if (current?.status === "cancelled") return;
     const finalAttempt = bullJob.attemptsMade + 1 >= (bullJob.opts.attempts ?? 1);
+    const retryable = isRetryableOpenRouterFailure(error);
+    const terminal = finalAttempt || !retryable;
     const next = users.transitionActiveCanvasJob(record.id, {
-      status: finalAttempt ? "failed" : "running",
-      error: finalAttempt ? (error instanceof Error ? error.message.slice(0, 500) : "画布任务失败") : null,
+      status: terminal ? "failed" : "running",
+      error: terminal ? (error instanceof Error ? error.message.slice(0, 500) : "画布任务失败") : null,
     });
     if (!next) return;
-    if (finalAttempt && bullJob.data.kind !== "text") await discardUncommittedMedia(canvasGeneratedMediaId(record.id), record.ownerId);
+    if (terminal && bullJob.data.kind !== "text") await discardUncommittedMedia(canvasGeneratedMediaId(record.id), record.ownerId);
     await publish(record.canvasId, { type: "canvas_job", job: next });
+    if (!retryable) throw new UnrecoverableError(error instanceof Error ? error.message : "画布任务失败");
     throw error;
   }
 };

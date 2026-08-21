@@ -72,6 +72,12 @@ export class OpenRouterError extends Error {
   }
 }
 
+export const isRetryableOpenRouterFailure = (error: unknown) => {
+  if (!(error instanceof OpenRouterError)) return true;
+  if (error.status === "network") return true;
+  return error.status === 408 || error.status === 409 || error.status === 425 || error.status === 429 || error.status >= 500;
+};
+
 const pool = new OpenRouterKeyPool(config.openrouterApiKeys);
 
 export const openRouterPool = () => pool;
