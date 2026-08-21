@@ -634,13 +634,20 @@ export class UserStore {
   }
 
   /** Atomically reserves one active generation slot and persists the queued task. */
-  createTaskWithinLimit(task: StoredTask, limit: number, intent?: AsyncJobIntent) {
+  admitTaskWithinLimit(task: StoredTask, limit: number, intent?: AsyncJobIntent) {
     return this.database.transaction(() => {
-      if (!task.ownerId || this.countActiveTasksForUser(task.ownerId) >= limit) return false;
-      this.saveTask(task);
+      const existing = this.readTask(task.id, true);
+      if (existing) return { status: "existing" as const, task: existing };
+      if (!task.ownerId || this.countActiveTasksForUser(task.ownerId) >= limit) return { status: "limit" as const };
+      const created = this.saveTask(task);
       if (intent) this.insertAsyncJobIntent(intent, task.createdAt);
-      return true;
+      return { status: "created" as const, task: created };
     })();
+  }
+
+  /** Backward-compatible boolean admission used by maintenance code and older tests. */
+  createTaskWithinLimit(task: StoredTask, limit: number, intent?: AsyncJobIntent) {
+    return this.admitTaskWithinLimit(task, limit, intent).status === "created";
   }
 
   healthCheck() { return (this.database.prepare("SELECT 1 AS ok").get() as { ok: number }).ok === 1; }

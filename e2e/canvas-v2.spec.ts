@@ -33,12 +33,18 @@ const imageModels = [{ id: "google/gemini-3.1-flash-lite-image", name: "Nano Ban
 
 const json = (route: Route, body: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
-async function mockAuthenticatedApi(page: Page, options: { leaseHeld?: boolean; expireLeaseOnce?: boolean; document?: CanvasDocumentV2; imageGenerationDelayMs?: number; projectAssets?: CanvasProjectAsset[] } = {}) {
+async function mockAuthenticatedApi(page: Page, options: {
+  leaseHeld?: boolean; expireLeaseOnce?: boolean; document?: CanvasDocumentV2; imageGenerationDelayMs?: number; projectAssets?: CanvasProjectAsset[];
+  creationSessions?: Array<{ id: string; title: string; createdAt: number; updatedAt: number }>;
+  imageHistory?: Array<Record<string, unknown>>; imageSessionFailures?: string[]; generationAdmissionResponseLost?: boolean;
+} = {}) {
   let revision = 0;
   let storedDocument = structuredClone(options.document ?? documentV2);
   let leaseReleaseCount = 0;
-  let imageHistory: unknown[] = [];
-  let creationSessions = [{ id: "session-e2e", title: "新创作", createdAt: Date.now(), updatedAt: Date.now() }];
+  let imageHistory: Array<Record<string, unknown>> = structuredClone(options.imageHistory ?? []);
+  let videoHistory: Array<Record<string, unknown>> = [];
+  let creationSessions = structuredClone(options.creationSessions ?? [{ id: "session-e2e", title: "新创作", createdAt: Date.now(), updatedAt: Date.now() }]);
+  const postedGenerations: Array<Record<string, unknown>> = [];
   let leasePostCount = 0;
   let leaseRenewCount = 0;
   const saveLeaseTokens: string[] = [];
@@ -66,16 +72,39 @@ async function mockAuthenticatedApi(page: Page, options: { leaseHeld?: boolean; 
       const id = decodeURIComponent(path.slice("/api/creation-sessions/".length)); creationSessions = creationSessions.filter((session) => session.id !== id);
       return route.fulfill({ status: 204 });
     }
-    if (path === "/api/image-generations" && request.method() === "GET") return json(route, imageHistory);
+    if (path === "/api/image-generations" && request.method() === "GET") {
+      const sessionId = url.searchParams.get("sessionId");
+      if (sessionId && options.imageSessionFailures?.includes(sessionId)) return json(route, { error: "image history unavailable" }, 503);
+      return json(route, sessionId ? imageHistory.filter((item) => item.sessionId === sessionId) : imageHistory);
+    }
+    if (/^\/api\/image-generations\/[^/]+$/.test(path) && request.method() === "GET") {
+      const task = imageHistory.find((item) => item.id === decodeURIComponent(path.split("/").at(-1)!));
+      return task ? json(route, task) : json(route, { error: "图片任务不存在" }, 404);
+    }
     if (path === "/api/image-generation" && request.method() === "POST") {
       const body = request.postDataJSON() as { requestId: string; sessionId: string; prompt: string; ratio: string; resolution: string; count: number };
       const pending = { id: body.requestId, sessionId: body.sessionId, modelName: imageModels[0].name, ratio: body.ratio, resolution: body.resolution, prompt: body.prompt, requestedCount: body.count, status: "generating", items: [], failed: [], createdAt: Date.now() };
-      imageHistory = [pending];
-      setTimeout(() => { imageHistory = [{ ...pending, status: "succeeded", items: [{ mediaId: "image-e2e" }] }]; }, options.imageGenerationDelayMs ?? 0);
+      imageHistory = [pending, ...imageHistory.filter((item) => item.id !== pending.id)];
+      setTimeout(() => { imageHistory = imageHistory.map((item) => item.id === pending.id ? { ...pending, status: "succeeded", items: [{ mediaId: "image-e2e" }] } : item); }, options.imageGenerationDelayMs ?? 0);
       return json(route, { Id: body.requestId, Items: [], Model: imageModels[0].id, Ratio: body.ratio, Resolution: body.resolution, Failed: [], Status: "generating" }, 202);
     }
     if (path === "/api/image-media/image-e2e") return route.fulfill({ status: 200, contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><path fill="#b8d9cf" d="M0 0h8v8H0z"/></svg>' });
-    if (path === "/api/generations") return json(route, []);
+    if (path === "/api/generations" && request.method() === "GET") {
+      const sessionId = url.searchParams.get("sessionId");
+      return json(route, sessionId ? videoHistory.filter((item) => item.sessionId === sessionId) : videoHistory);
+    }
+    if (path === "/api/generations" && request.method() === "POST") {
+      const body = request.postDataJSON() as Record<string, unknown>;
+      postedGenerations.push(body);
+      const now = Date.now();
+      const pending = { id: body.requestId, sessionId: body.sessionId, caseId: body.requestId, ownerId: "user-e2e", visibility: "private", status: "queued", mediaStatus: "none", prompt: body.prompt, model: body.model, mode: body.mode, ratio: body.ratio, resolution: body.resolution, duration: body.duration, createdAt: now, updatedAt: now };
+      videoHistory = [pending, ...videoHistory.filter((item) => item.id !== pending.id)];
+      return options.generationAdmissionResponseLost ? json(route, { error: "response lost" }, 503) : json(route, pending, 202);
+    }
+    if (/^\/api\/generations\/[^/]+$/.test(path) && request.method() === "GET") {
+      const task = videoHistory.find((item) => item.id === decodeURIComponent(path.split("/").at(-1)!));
+      return task ? json(route, task) : json(route, { error: "任务不存在" }, 404);
+    }
     if (path === "/api/assets") return json(route, { Items: [], HasMore: false });
     if (path === "/api/canvas/config") return json(route, { enabled: true });
     if (path === "/api/canvases/canvas-e2e/lease" && request.method() === "POST") {
@@ -140,6 +169,7 @@ async function mockAuthenticatedApi(page: Page, options: { leaseHeld?: boolean; 
     leaseRenewCount: () => leaseRenewCount,
     saveLeaseTokens: () => [...saveLeaseTokens],
     postedJobs: () => [...postedJobs],
+    postedGenerations: () => [...postedGenerations],
     storedDocument: () => structuredClone(storedDocument),
   };
 }
@@ -354,7 +384,7 @@ test("media nodes drag from their body, keep the selected stack, and persist upl
   await imageNode.locator('input[type="file"]').setInputFiles("public/ciridae/video-placeholder.webp");
   await expect(page.getByText(/素材已放入节点|素材已保存/)).toBeVisible();
   await expect(imageNode.getByRole("img", { name: "node-upload.png" })).toBeVisible();
-  await expect.poll(() => mock.storedDocument().nodes.find((node) => node.id === "empty-image")?.data.projectAssetId).toMatch(/^project-upload-e2e-/);
+  await expect.poll(() => mock.storedDocument().nodes.find((node) => node.id === "empty-image")?.data.projectAssetId, { timeout: 15_000 }).toMatch(/^project-upload-e2e-/);
 
   const characterNode = page.locator('.canvas-v2-node[data-node-id="empty-character"]');
   await characterNode.getByRole("button", { name: "资产库", exact: true }).click();
@@ -408,6 +438,44 @@ test("new creation sessions isolate the stage and can be renamed or removed with
   await page.getByRole("button", { name: "删除会话" }).click();
   await expect(page.getByText("雨夜分镜", { exact: true })).toHaveCount(0);
   await expect.poll(() => new URL(page.url()).pathname).toBe("/studio/sessions/session-e2e");
+});
+
+test("session switching uses the isolated cached snapshot when one history feed is unavailable", async ({ page }) => {
+  const now = Date.now();
+  await mockAuthenticatedApi(page, {
+    creationSessions: [
+      { id: "session-a", title: "会话 A", createdAt: now, updatedAt: now },
+      { id: "session-b", title: "会话 B", createdAt: now - 1, updatedAt: now - 1 },
+    ],
+    imageHistory: [
+      { id: "image-a", sessionId: "session-a", modelName: "Image", ratio: "1:1", resolution: "1024", prompt: "只属于会话 A", items: [], createdAt: now, status: "failed", error: "fixture" },
+      { id: "image-b", sessionId: "session-b", modelName: "Image", ratio: "1:1", resolution: "1024", prompt: "只属于会话 B", items: [], createdAt: now - 1, status: "failed", error: "fixture" },
+    ],
+    imageSessionFailures: ["session-b"],
+  });
+  await page.goto("/studio/sessions/session-a");
+  await expect(page.getByText("「只属于会话 A」")).toBeVisible();
+
+  await page.locator(".session-item").filter({ hasText: "会话 B" }).locator(".session-item__main").click();
+  await expect(page.getByText("「只属于会话 B」")).toBeVisible();
+  await expect(page.getByText("「只属于会话 A」")).toHaveCount(0);
+  await expect(page.getByText("同步暂时中断")).toBeVisible();
+});
+
+test("a lost video admission response reconciles by client id without creating a duplicate", async ({ page }) => {
+  const mock = await mockAuthenticatedApi(page, { generationAdmissionResponseLost: true });
+  await page.goto("/studio/sessions/session-e2e");
+  await page.getByRole("button", { name: "全能参考", exact: true }).click();
+  await page.getByRole("button", { name: /文本生成/ }).click();
+  const prompt = "雨夜车站缓慢推进的长镜头";
+  await page.getByRole("textbox", { name: "创作提示词" }).fill(prompt);
+  await page.locator(".send-button").click();
+
+  await expect(page.locator(".task-card").filter({ hasText: prompt })).toBeVisible();
+  await expect(page.locator(".task-card")).toHaveCount(1);
+  await expect(page.locator(".composer-dock").getByRole("textbox", { name: "创作提示词" })).toHaveText("");
+  await expect.poll(() => mock.postedGenerations()).toHaveLength(1);
+  expect(mock.postedGenerations()[0]?.requestId).toMatch(/^[0-9a-f-]{36}$/);
 });
 
 test("a fast text edit is committed to the browser draft before the page leaves", async ({ page }) => {

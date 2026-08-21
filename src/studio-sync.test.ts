@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ImageResultBundle, Task } from "./types";
-import { hasActiveStudioWork, replaceSessionSnapshot } from "./studio-sync";
+import { hasActiveStudioWork, isAmbiguousSubmissionFailure, replaceSessionSnapshot, selectSessionSnapshot, upsertStudioItem } from "./studio-sync";
 
 const task = (patch: Partial<Task> = {}): Task => ({
   id: "task-1", sessionId: "session-a", caseId: "task-1", status: "succeeded", mediaStatus: "ready",
@@ -20,10 +20,33 @@ describe("studio synchronization", () => {
     expect(replaceSessionSnapshot(current, "session-a", snapshot).map((item) => item.id)).toEqual(["fresh", "other"]);
   });
 
+  it("selects an isolated session snapshot and never carries cards from the previous session", () => {
+    const snapshot = selectSessionSnapshot(
+      [task({ id: "a", sessionId: "session-a" }), task({ id: "b", sessionId: "session-b" })],
+      [image({ id: "ia", sessionId: "session-a" }), image({ id: "ib", sessionId: "session-b" })],
+      "session-b",
+    );
+    expect(snapshot.tasks.map((item) => item.id)).toEqual(["b"]);
+    expect(snapshot.images.map((item) => item.id)).toEqual(["ib"]);
+  });
+
+  it("upserts an optimistic task when the authoritative admission arrives", () => {
+    const optimistic = task({ id: "same", status: "queued", updatedAt: 1 });
+    const authoritative = task({ id: "same", status: "running", updatedAt: 2 });
+    expect(upsertStudioItem([optimistic], authoritative)).toEqual([authoritative]);
+  });
+
   it("treats video generation, TOS archiving and image generation as active work", () => {
     expect(hasActiveStudioWork([task({ status: "running" })], [])).toBe(true);
     expect(hasActiveStudioWork([task({ mediaStatus: "archiving" })], [])).toBe(true);
     expect(hasActiveStudioWork([], [image({ status: "generating" })])).toBe(true);
     expect(hasActiveStudioWork([task()], [image()])).toBe(false);
+  });
+
+  it("distinguishes ambiguous transport/server failures from deterministic rejection", () => {
+    expect(isAmbiguousSubmissionFailure({ status: 0, code: "CLIENT_TIMEOUT" })).toBe(true);
+    expect(isAmbiguousSubmissionFailure({ status: 503 })).toBe(true);
+    expect(isAmbiguousSubmissionFailure({ status: 400 })).toBe(false);
+    expect(isAmbiguousSubmissionFailure({ status: 429 })).toBe(false);
   });
 });
