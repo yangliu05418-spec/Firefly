@@ -8,6 +8,7 @@ import "@xyflow/react/dist/style.css";
 import dagre from "@dagrejs/dagre";
 import { Archive, Check, ChevronDown, CircleHelp, Copy, Download, FolderOpen, Grid2X2, Group as GroupIcon, Home, ImageIcon, Keyboard, LayoutDashboard, Library, LoaderCircle, LockKeyhole, LogOut, Map as MapIcon, MousePointer2, Move, Plus, Redo2, RefreshCw, ScanFace, Scissors, Search, Sparkles, TextCursorInput, Undo2, Ungroup, Upload, Users, Video, WandSparkles, X, ZoomIn, ZoomOut } from "lucide-react";
 import { api, inferUploadType, uploadFile } from "../../../api";
+import { filterCachedAssets, loadAssetsCacheFirst } from "../../../asset-metadata-cache";
 import { runWithConcurrency } from "../../../concurrency";
 import type { AssetCategory, ImageModel, LibraryAsset, ModelCapability, SessionUser } from "../../../types";
 import {
@@ -106,6 +107,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   const [assetTab, setAssetTab] = useState<"project" | "global">("project");
   const [assetCategory, setAssetCategory] = useState<"all" | AssetCategory>("all");
   const [globalAssets, setGlobalAssets] = useState<LibraryAsset[]>([]);
+  const globalAssetRequest = useRef(0);
   const [videoModels, setVideoModels] = useState<ModelCapability[]>([]);
   const [imageModels, setImageModels] = useState<ImageModel[]>([]);
   const [imageRatios, setImageRatios] = useState<string[]>([]);
@@ -944,10 +946,21 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   uploadNodeFileRef.current = (nodeId, file) => { void uploadIntoNode(nodeId, file); };
 
   const loadGlobalAssets = useCallback(async () => {
+    const sequence = ++globalAssetRequest.current;
     const category = assetCategory === "all" ? "" : `&category=${encodeURIComponent(assetCategory)}`;
-    const result = await api.get<{ Items: LibraryAsset[] }>(`/api/assets?q=${encodeURIComponent(assetSearch)}&pageSize=100${category}`);
-    setGlobalAssets(result.Items);
-  }, [assetCategory, assetSearch]);
+    try {
+      const result = await loadAssetsCacheFirst({
+        userId: user.id,
+        loadFresh: () => api.get<{ Items: LibraryAsset[] }>(`/api/assets?q=${encodeURIComponent(assetSearch)}&pageSize=100${category}`).then((response) => response.Items),
+        selectCached: (assets) => filterCachedAssets(assets, { query: assetSearch, category: assetCategory }).slice(0, 100),
+        onCached: (assets) => { if (sequence === globalAssetRequest.current) setGlobalAssets(assets); },
+      });
+      if (sequence !== globalAssetRequest.current) return;
+      setGlobalAssets(result.assets);
+    } catch {
+      if (sequence === globalAssetRequest.current) setMessage("素材库暂时无法同步，请稍后重试");
+    }
+  }, [assetCategory, assetSearch, user.id]);
   useEffect(() => { if (assetPanel && assetTab === "global") void loadGlobalAssets(); }, [assetPanel, assetTab, loadGlobalAssets]);
 
   const importGlobal = async (asset: LibraryAsset) => {
