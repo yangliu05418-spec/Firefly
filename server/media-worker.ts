@@ -47,8 +47,8 @@ const finalizeCanvasVideoPreview = async (taskId: string) => {
   if (!canvasJob || canvasJob.status === "cancelled") return;
   const projectAsset = users.readCanvasProjectAssetBySource(canvasJob.canvasId, "generation", taskId);
   if (!projectAsset) return;
-  const completedJob = users.updateCanvasJob(canvasJob.id, { status: "succeeded", resultAssetId: projectAsset.id, error: null });
-  await connection.publish(`canvas:events:${canvasJob.canvasId}`, JSON.stringify({ type: "canvas_job", job: completedJob }));
+  const completedJob = users.transitionActiveCanvasJob(canvasJob.id, { status: "succeeded", resultAssetId: projectAsset.id, error: null });
+  if (completedJob) await connection.publish(`canvas:events:${canvasJob.canvasId}`, JSON.stringify({ type: "canvas_job", job: completedJob }));
 };
 
 const createTaskPreview = async (taskId: string) => {
@@ -74,14 +74,12 @@ const createTaskPreview = async (taskId: string) => {
     );
     const optimized = await optimizePlaybackObject(previewKey, { contentType: "video/mp4", fileName: "preview.mp4", cacheSeconds: config.tosPreviewTtlSeconds });
     const structure = await verifyProgressiveMp4(previewKey); mediaVerified = true;
-    const current = await readTask(task.id, true);
-    if (!current || current.deletedAt) { await deleteObject(previewKey); return false; }
     const previewData = optimized.data as unknown as { contentLength?: number; etag?: string };
     const previewHeaders = optimized.headers as Record<string, string | undefined>;
     const now = Date.now();
     const size = numberHeader(previewData.contentLength ?? previewHeaders["content-length"]);
-    users.upsertMedia({ id: `${task.id}:preview`, ownerId: task.ownerId, taskId: task.id, kind: "preview", objectKey: previewKey, status: "ready", fileName: "preview.mp4", contentType: "video/mp4", size, etag: String(previewData.etag ?? previewHeaders.etag ?? "").replace(/^"|"$/g, ""), createdAt: now, updatedAt: now });
-    await saveTask({ ...current, mediaRevision: (current.mediaRevision ?? 0) + 1, updatedAt: now });
+    const committed = users.commitTaskMediaIfActive(task.id, { id: `${task.id}:preview`, ownerId: task.ownerId, taskId: task.id, kind: "preview", objectKey: previewKey, status: "ready", fileName: "preview.mp4", contentType: "video/mp4", size, etag: String(previewData.etag ?? previewHeaders.etag ?? "").replace(/^"|"$/g, ""), createdAt: now, updatedAt: now });
+    if (!committed) { await deleteObject(previewKey); return false; }
     await finalizeCanvasVideoPreview(task.id);
     console.info(JSON.stringify({ type: "tos_preview_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, sourceBytes: output.size, previewBytes: size, ratio: output.size ? Number((size / output.size).toFixed(3)) : undefined, atoms: structure.atoms, elapsedMs: Date.now() - startedAt, requestId: previewHead.requestId }));
     return true;
@@ -101,13 +99,11 @@ const createTaskPoster = async (taskId: string) => {
   const posterKey = posterObjectKey(task.ownerId, task.id);
   await createPoster(output.objectKey, posterKey);
   const posterHead = await optimizePlaybackObject(posterKey, { contentType: "image/webp", fileName: "poster.webp", cacheSeconds: 86400 });
-  const current = await readTask(task.id, true);
-  if (!current || current.deletedAt) { await deleteObject(posterKey); return false; }
   const posterData = posterHead.data as unknown as { contentLength?: number; etag?: string };
   const posterHeaders = posterHead.headers as Record<string, string | undefined>;
   const now = Date.now();
-  users.upsertMedia({ id: `${task.id}:poster`, ownerId: task.ownerId, taskId: task.id, kind: "poster", objectKey: posterKey, status: "ready", fileName: "poster.webp", contentType: "image/webp", size: numberHeader(posterData.contentLength ?? posterHeaders["content-length"]), etag: String(posterData.etag ?? posterHeaders.etag ?? "").replace(/^"|"$/g, ""), createdAt: now, updatedAt: now });
-  await saveTask({ ...current, mediaRevision: (current.mediaRevision ?? 0) + 1, updatedAt: now });
+  const committed = users.commitTaskMediaIfActive(task.id, { id: `${task.id}:poster`, ownerId: task.ownerId, taskId: task.id, kind: "poster", objectKey: posterKey, status: "ready", fileName: "poster.webp", contentType: "image/webp", size: numberHeader(posterData.contentLength ?? posterHeaders["content-length"]), etag: String(posterData.etag ?? posterHeaders.etag ?? "").replace(/^"|"$/g, ""), createdAt: now, updatedAt: now });
+  if (!committed) { await deleteObject(posterKey); return false; }
   console.info(JSON.stringify({ type: "tos_poster_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, elapsedMs: Date.now() - startedAt, requestId: posterHead.requestId }));
   return true;
 };
@@ -145,15 +141,14 @@ const archiveOutput = async (data: { taskId: string; sourceUrl: string; outputFo
       });
     }
     const head = await optimizePlaybackObject(objectKey, { contentType: data.outputFormat === "mov" ? "video/quicktime" : "video/mp4", fileName: `result.${data.outputFormat}`, cacheSeconds: config.tosPreviewTtlSeconds });
-    const current = await readTask(task.id, true);
-    if (!current || current.deletedAt) { await deleteObject(objectKey); return; }
     const dataOut = head.data as unknown as { contentLength?: number; etag?: string; contentType?: string };
     const headers = head.headers as Record<string, string | undefined>;
     const now = Date.now();
     const size = numberHeader(dataOut.contentLength ?? headers["content-length"]);
     const etag = String(dataOut.etag ?? headers.etag ?? "").replace(/^"|"$/g, "");
     const contentType = String(dataOut.contentType ?? headers["content-type"] ?? (data.outputFormat === "mov" ? "video/quicktime" : "video/mp4"));
-    users.upsertMedia({ id: `${task.id}:output`, ownerId: task.ownerId, taskId: task.id, kind: "output", objectKey, status: "ready", fileName: `result.${data.outputFormat}`, contentType, size, etag, createdAt: now, updatedAt: now });
+    const committed = users.commitTaskMediaIfActive(task.id, { id: `${task.id}:output`, ownerId: task.ownerId, taskId: task.id, kind: "output", objectKey, status: "ready", fileName: `result.${data.outputFormat}`, contentType, size, etag, createdAt: now, updatedAt: now }, true);
+    if (!committed) { await deleteObject(objectKey); return; }
     let posterReady = false;
     try {
       posterReady = await createTaskPoster(task.id);
@@ -161,10 +156,9 @@ const archiveOutput = async (data: { taskId: string; sourceUrl: string; outputFo
       console.warn(JSON.stringify({ type: "tos_poster_failed", at: new Date().toISOString(), taskId: task.id, code: (error as { code?: string }).code ?? "unknown" }));
       await enqueuePosterRecovery(task.id).catch(() => undefined);
     }
-    await saveTask({ ...current, status: "succeeded", mediaStatus: "ready", mediaRevision: (current.mediaRevision ?? 0) + 1, mediaLastError: undefined, updatedAt: Date.now() });
     const canvasJob = users.readCanvasJobByProviderTask(task.id);
     if (canvasJob && canvasJob.status !== "cancelled" && canvasJob.ownerId === task.ownerId) {
-      const projectAsset = users.upsertCanvasProjectAsset({
+      const attached = users.attachCanvasProjectAssetToActiveJob(canvasJob.id, {
         id: `canvas-project-asset-${crypto.randomUUID()}`,
         ownerId: canvasJob.ownerId,
         canvasId: canvasJob.canvasId,
@@ -177,12 +171,8 @@ const archiveOutput = async (data: { taskId: string; sourceUrl: string; outputFo
         status: config.tosPreviewTranscodeEnabled ? "copying" : "ready",
         createdAt: now,
         updatedAt: now,
-      });
-      if (config.tosPreviewTranscodeEnabled) users.updateCanvasJob(canvasJob.id, { resultAssetId: projectAsset.id, error: null });
-      else {
-        const completedJob = users.updateCanvasJob(canvasJob.id, { status: "succeeded", resultAssetId: projectAsset.id, error: null });
-        await connection.publish(`canvas:events:${canvasJob.canvasId}`, JSON.stringify({ type: "canvas_job", job: completedJob }));
-      }
+      }, !config.tosPreviewTranscodeEnabled);
+      if (attached && !config.tosPreviewTranscodeEnabled) await connection.publish(`canvas:events:${canvasJob.canvasId}`, JSON.stringify({ type: "canvas_job", job: attached.job }));
     }
     await enqueueLivePreview(task.id).catch((error) => console.warn(JSON.stringify({ type: "tos_preview_queue_failed", at: new Date().toISOString(), taskId: task.id, code: (error as { code?: string }).code ?? "unknown" })));
     console.info(JSON.stringify({ type: "tos_fetch_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, strategy: finalAttempt ? "stream_multipart" : "url_fetch", size, posterReady, elapsedMs: Date.now() - startedAt, requestId: head.requestId }));

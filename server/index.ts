@@ -39,6 +39,7 @@ import { providerAssetName } from "./asset-name.js";
 import { acquireCanvasLease, releaseCanvasLease, renewCanvasLease, validateCanvasLease } from "./canvas-lease.js";
 import { canvasProjectAssetProviderUrl, canvasProjectAssetSignedUrl, createCanvasProjectMediaHandler, publicCanvasProjectAsset } from "./canvas-project-assets.js";
 import { readWorkerHealth, type WorkerHealthSnapshot } from "./worker-heartbeat.js";
+import { canvasGeneratedMediaId } from "./canvas-job-media.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -1174,7 +1175,7 @@ app.post("/api/canvases/:id/jobs", requireAuth, async (req, res) => {
       users.createCanvasJob(canvasJob);
       try {
         await canvasQueue.add("text", { canvasJobId: canvasJob.id, kind: "text", payload: { instruction: body.payload.instruction, currentText: context.target.data.markdown ?? "", context: context.text } }, { jobId: canvasJob.id, attempts: 3, backoff: { type: "exponential", delay: 3000 }, removeOnComplete: { age: 7 * 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } });
-      } catch (error) { users.updateCanvasJob(canvasJob.id, { status: "failed", error: "任务进入文本队列失败" }); throw error; }
+      } catch (error) { users.transitionActiveCanvasJob(canvasJob.id, { status: "failed", error: "任务进入文本队列失败" }); throw error; }
       return res.status(202).json(publicCanvasJob(canvasJob));
     }
 
@@ -1184,7 +1185,7 @@ app.post("/api/canvases/:id/jobs", requireAuth, async (req, res) => {
       const prompt = [context.text, body.kind === "character_tool" ? characterToolPrompts[body.payload.tool] : "", body.payload.prompt].filter(Boolean).join("\n\n");
       try {
         await canvasQueue.add(body.kind, { canvasJobId: canvasJob.id, kind: body.kind, payload: { prompt, model: body.payload.model, ratio: body.payload.ratio, resolution: body.payload.resolution, referenceAssetIds: references.map((asset) => asset.id) } }, { jobId: canvasJob.id, attempts: 3, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: { age: 7 * 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } });
-      } catch (error) { users.updateCanvasJob(canvasJob.id, { status: "failed", error: "任务进入图片队列失败" }); throw error; }
+      } catch (error) { users.transitionActiveCanvasJob(canvasJob.id, { status: "failed", error: "任务进入图片队列失败" }); throw error; }
       return res.status(202).json(publicCanvasJob(canvasJob));
     }
 
@@ -1206,7 +1207,7 @@ app.post("/api/canvases/:id/jobs", requireAuth, async (req, res) => {
     try {
       await generationQueue.add("generate", { input }, { jobId: taskId, attempts: 4, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: { age: 7 * 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } });
     } catch (error) {
-      users.updateCanvasJob(canvasJob.id, { status: "failed", error: "任务进入生成队列失败" });
+      users.transitionActiveCanvasJob(canvasJob.id, { status: "failed", error: "任务进入生成队列失败" });
       await saveTask({ ...task, status: "failed", error: "任务进入生成队列失败", updatedAt: Date.now() });
       throw error;
     }
@@ -1271,13 +1272,25 @@ app.post("/api/canvases/:id/jobs/:jobId/cancel", requireAuth, async (req, res) =
     const job = users.readCanvasJob(param(req.params.jobId));
     if (!job || job.canvasId !== canvasId || job.ownerId !== user.id || !accessibleCanvas(canvasId, user.id)) return res.status(404).json({ error: "画布任务不存在" });
     if (["succeeded", "failed", "cancelled"].includes(job.status)) return res.json(publicCanvasJob(job));
-    const cancelled = users.updateCanvasJob(job.id, { status: "cancelled", cancelledAt: Date.now(), error: null })!;
-    await canvasQueue.getJob(job.id).then((queued) => queued?.remove()).catch(() => undefined);
-    if (job.providerTaskId) {
-      const task = await readTask(job.providerTaskId, true);
-      if (task && task.ownerId === user.id) {
-        await saveTask({ ...task, deletedAt: Date.now(), updatedAt: Date.now() });
-        await generationQueue.getJob(task.id).then((queued) => queued?.remove()).catch(() => undefined);
+    const cancellation = users.cancelCanvasJob(job.id);
+    const cancelled = cancellation.job;
+    if (!cancelled) return res.status(404).json({ error: "画布任务不存在" });
+    if (cancellation.changed) {
+      await canvasQueue.getJob(job.id).then((queued) => queued?.remove()).catch(() => undefined);
+      if (job.kind === "image" || job.kind === "character_tool") {
+        const mediaId = canvasGeneratedMediaId(job.id);
+        if (users.markUnreferencedGeneratedMediaForDeletion(mediaId, user.id)) {
+          await mediaQueue.add("reconcile-deletes", {}, { jobId: `canvas-generated-cleanup-${mediaId}`, removeOnComplete: true, removeOnFail: true }).catch(() => undefined);
+        }
+      }
+      if (job.providerTaskId) {
+        const task = await readTask(job.providerTaskId, true);
+        if (task && task.ownerId === user.id) {
+          users.softDeleteCanvasProjectAssetBySource(canvasId, user.id, "generation", task.id);
+          users.softDeleteTask(task.id, user.id);
+          await generationQueue.getJob(task.id).then((queued) => queued?.remove()).catch(() => undefined);
+          await mediaQueue.add("delete-task-media", { taskId: task.id }, { jobId: `delete-${task.id}`, attempts: 5, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: true }).catch(() => undefined);
+        }
       }
     }
     await redis.publish(`canvas:events:${canvasId}`, JSON.stringify({ type: "canvas_job", job: cancelled }));

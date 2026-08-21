@@ -25,10 +25,11 @@ export type ImageGenerationQueuePayload = {
 export type { StoredTask } from "./db.js";
 
 export const saveTask = async (task: StoredTask) => {
-  users.saveTask(task);
-  await redis.set(`task-cache:${task.id}`, JSON.stringify(task), "EX", 24 * 3600).catch((error) => {
+  const stored = users.saveTask(task);
+  await redis.set(`task-cache:${task.id}`, JSON.stringify(stored), "EX", 24 * 3600).catch((error) => {
     console.warn(JSON.stringify({ type: "task_cache_write_failed", at: new Date().toISOString(), taskId: task.id, code: (error as { code?: string }).code ?? "unknown" }));
   });
+  return stored;
 };
 export const readTask = async (id: string, includeDeleted = false) => users.readTask(id, includeDeleted);
 

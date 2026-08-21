@@ -12,8 +12,13 @@ import { putObjectBuffer, shard, signedObjectUrl } from "./tos.js";
 export const generatedObjectKey = (ownerId: string, mediaId: string, extension: string) =>
   `generated/${shard(mediaId)}/${ownerId}/${mediaId}.${extension.replace(/^\./, "")}`;
 
-export const storeGeneratedImage = async (input: { ownerId: string; body: Buffer; contentType: string; fileName: string }): Promise<MediaObject> => {
-  const mediaId = "gen-" + crypto.randomUUID();
+export const storeGeneratedImage = async (input: { ownerId: string; body: Buffer; contentType: string; fileName: string; mediaId?: string }): Promise<MediaObject> => {
+  const mediaId = input.mediaId ?? "gen-" + crypto.randomUUID();
+  const existing = users.readMedia(mediaId);
+  if (existing) {
+    if (existing.ownerId !== input.ownerId || existing.kind !== "generated" || existing.status !== "ready") throw new Error("生成媒体幂等键已被占用");
+    return existing;
+  }
   const extension = (input.contentType.includes("png") ? "png" : input.contentType.includes("webp") ? "webp" : input.contentType.includes("jpeg") || input.contentType.includes("jpg") ? "jpg" : "png");
   const objectKey = generatedObjectKey(input.ownerId, mediaId, extension);
   const stored = await putObjectBuffer(objectKey, input.body, input.contentType, input.fileName);
