@@ -1,5 +1,5 @@
 import { config } from "./config.js";
-import { callAssetApi } from "./asset-api.js";
+import { AssetApiError, callAssetApi } from "./asset-api.js";
 import { users } from "./store.js";
 import { redis } from "./redis.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
@@ -12,6 +12,8 @@ const GROUP_NAME = "Firefly Auto References";
 const CACHE_TTL_SECONDS = 7 * 24 * 3600;
 const ACTIVE_DEADLINE_MS = 3 * 60 * 1000;
 const POLL_INTERVAL_MS = 5000;
+const UNKNOWN_CREATE_TTL_MS = 24 * 60 * 60 * 1000;
+const UNKNOWN_CREATE_CACHE_PREFIX = "create-unknown:";
 
 export type AssetRejectionCode = "ASSET_REAL_PERSON" | "ASSET_NOT_OWNED" | "ASSET_PROVIDER_FAILED" | "ASSET_PROCESSING_TIMEOUT";
 
@@ -25,7 +27,7 @@ export class AssetRegistrationRejected extends Error {
 }
 export const isRetryableAssetRejection = (error: AssetRegistrationRejected) => error.code === "ASSET_PROCESSING_TIMEOUT";
 
-type AssetRecord = { Id: string; Status?: string; Name?: string; AssetType?: "Image" | "Video" | "Audio"; GroupId?: string; URL?: string };
+type AssetRecord = { Id: string; Status?: string; Name?: string; AssetType?: "Image" | "Video" | "Audio"; GroupId?: string; URL?: string; CreateTime?: string };
 type GroupRecord = { Id: string; Name?: string };
 
 type RegistrationDeps = {
@@ -93,9 +95,29 @@ const waitForActive = async (assetId: string, name: string, deps: RegistrationDe
   throw new AssetRegistrationRejected(`参考素材「${name}」仍在可信资产处理中（已等待 ${Math.round(ACTIVE_DEADLINE_MS / 1000)} 秒），请稍后重试`, "ASSET_PROCESSING_TIMEOUT");
 };
 
+const readCachedRegistration = (value: string | null) => {
+  if (!value?.startsWith(UNKNOWN_CREATE_CACHE_PREFIX)) return { assetId: value, unknownSince: undefined };
+  const parsed = Number(value.slice(UNKNOWN_CREATE_CACHE_PREFIX.length));
+  return { assetId: null, unknownSince: Number.isFinite(parsed) ? parsed : 0 };
+};
+
+const reconcileUploadAsset = async (groupId: string, providerName: string, assetType: AssetRecord["AssetType"], deps: RegistrationDeps) => {
+  const listed = await deps.callAsset<{ Items?: AssetRecord[] }>("ListAssets", {
+    Filter: { GroupIds: [groupId], Name: providerName }, PageNumber: 1, PageSize: 100
+  });
+  const exact = (listed.Items ?? []).filter((candidate) => candidate.Name === providerName
+    && candidate.GroupId === groupId
+    && (!candidate.AssetType || candidate.AssetType === assetType));
+  exact.sort((left, right) => String(right.CreateTime ?? "").localeCompare(String(left.CreateTime ?? "")));
+  if (exact.length > 1) console.warn(JSON.stringify({ type: "provider_asset_reconcile_duplicates", at: new Date().toISOString(), groupId, providerName, count: exact.length }));
+  return exact[0];
+};
+
 const registerUpload = async (uploadId: string, ownerId: string, name: string, inputType: "image" | "video" | "audio", deps: RegistrationDeps) => {
   const cacheKey = `provider-asset:${ownerId}:${uploadId}`;
-  let assetId = await deps.cacheGet(cacheKey);
+  let cached = readCachedRegistration(await deps.cacheGet(cacheKey));
+  let assetId = cached.assetId;
+  let unknownSince = cached.unknownSince;
   let creationLock: { key: string; token: string } | null = null;
   let registrationPending = false;
   let groupId = "";
@@ -105,7 +127,9 @@ const registerUpload = async (uploadId: string, ownerId: string, name: string, i
       creationLock = await deps.acquireAssetLock(ownerId, uploadId);
       if (!creationLock) throw new AssetRegistrationRejected(`参考素材「${name}」正在可信资产注册中，请稍后重试`, "ASSET_PROCESSING_TIMEOUT");
       const registered = deps.readRegisteredAsset?.(ownerId, uploadId);
-      assetId = registered?.providerAssetId ?? (registered && !registered.id.startsWith("asset-local-") ? registered.id : undefined) ?? await deps.cacheGet(cacheKey) ?? null;
+      cached = readCachedRegistration(await deps.cacheGet(cacheKey));
+      assetId = registered?.providerAssetId ?? (registered && !registered.id.startsWith("asset-local-") ? registered.id : undefined) ?? cached.assetId;
+      unknownSince = cached.unknownSince;
       registrationPending = Boolean(registered && !assetId);
     }
   }
@@ -116,24 +140,42 @@ const registerUpload = async (uploadId: string, ownerId: string, name: string, i
     if (!media || media.ownerId !== ownerId || media.status !== "ready") throw new Error(`参考素材「${name}」不存在或尚未完成上传`);
     groupId = await ensureGroupId(deps);
     assetType = media.contentType.startsWith("video/") ? "Video" : media.contentType.startsWith("audio/") ? "Audio" : "Image";
-    let created: { Id: string };
-    try {
-      created = await deps.callAsset<{ Id: string }>("CreateAsset", {
-        GroupId: groupId,
-        URL: await deps.resolveMediaUrl(media),
-        AssetType: assetType,
-        Name: providerAssetName(name)
-      });
-    } catch (error) {
-      if (/real[ -]?person|real human|真人|人脸/i.test(error instanceof Error ? error.message : String(error))) {
-        throw new AssetRegistrationRejected(`参考素材「${name}」包含真人面孔，请先完成真人认证并加入真人资产库`, "ASSET_REAL_PERSON");
+    const providerName = providerAssetName(name, uploadId);
+    let created = await reconcileUploadAsset(groupId, providerName, assetType, deps);
+    if (!created) {
+      if (unknownSince !== undefined && deps.now() - unknownSince < UNKNOWN_CREATE_TTL_MS) {
+        throw new AssetRegistrationRejected(`参考素材「${name}」已上传，正在确认生成引用，请稍后重试`, "ASSET_PROCESSING_TIMEOUT");
       }
-      throw error;
+      try {
+        created = await deps.callAsset<AssetRecord>("CreateAsset", {
+          GroupId: groupId,
+          URL: await deps.resolveMediaUrl(media),
+          AssetType: assetType,
+          Name: providerName
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/real[ -]?person|real human|真人|人脸/i.test(message)) {
+          throw new AssetRegistrationRejected(`参考素材「${name}」包含真人面孔，请先完成真人认证并加入真人资产库`, "ASSET_REAL_PERSON");
+        }
+        if (error instanceof AssetApiError && error.status < 500 && error.status !== 429) {
+          throw new AssetRegistrationRejected(`参考素材「${name}」注册失败：${message}`, "ASSET_PROVIDER_FAILED");
+        }
+        if (error instanceof AssetApiError && error.status === 429) {
+          throw new AssetRegistrationRejected(`参考素材服务繁忙，「${name}」将在稍后继续处理`, "ASSET_PROCESSING_TIMEOUT");
+        }
+        const markedAt = deps.now();
+        await deps.cacheSet(cacheKey, `${UNKNOWN_CREATE_CACHE_PREFIX}${markedAt}`);
+        console.warn(JSON.stringify({ type: "provider_asset_create_unknown", at: new Date().toISOString(), ownerId, uploadId, groupId, code: (error as { code?: string }).code ?? "unknown" }));
+        try { created = await reconcileUploadAsset(groupId, providerName, assetType, deps); }
+        catch { throw new AssetRegistrationRejected(`参考素材「${name}」已上传，正在确认生成引用，请稍后重试`, "ASSET_PROCESSING_TIMEOUT"); }
+        if (!created) throw new AssetRegistrationRejected(`参考素材「${name}」已上传，正在确认生成引用，请稍后重试`, "ASSET_PROCESSING_TIMEOUT");
+      }
     }
     assetId = created.Id;
     await deps.cacheSet(cacheKey, assetId);
-    deps.saveAsset?.({ id: assetId, providerAssetId: assetId, ownerId, groupId, uploadId, name, assetType, status: "Processing", createdAt: deps.now(), updatedAt: deps.now() });
-    console.info(JSON.stringify({ type: "provider_asset_created", at: new Date().toISOString(), ownerId, uploadId, assetId, groupId }));
+    deps.saveAsset?.({ id: assetId, providerAssetId: assetId, ownerId, groupId: created.GroupId ?? groupId, uploadId, name, assetType: created.AssetType ?? assetType, status: created.Status === "Active" ? "Active" : "Processing", url: created.URL, createdAt: deps.now(), updatedAt: deps.now() });
+    console.info(JSON.stringify({ type: "provider_asset_registered", at: new Date().toISOString(), ownerId, uploadId, assetId, groupId }));
   }
   } finally { if (creationLock && deps.releaseAssetLock) await deps.releaseAssetLock(creationLock).catch(() => undefined); }
   const active = await waitForActive(assetId, name, deps);

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { AssetUploadPendingError, registerQueuedAsset, type AssetIngestDependencies } from "./asset-ingest.js";
+import { AssetCreateUnknownError, AssetUploadPendingError, registerQueuedAsset, type AssetIngestDependencies } from "./asset-ingest.js";
+import { providerAssetName } from "./asset-name.js";
 import type { UserAsset } from "./db.js";
 
 const pending = (): UserAsset => ({
@@ -41,10 +42,58 @@ describe("background asset ingestion", () => {
 
   it("never blindly replays an ambiguous CreateAsset timeout", async () => {
     const context = setup();
-    context.deps.callAsset = vi.fn(async () => { throw new Error("The operation was aborted due to timeout"); }) as never;
+    context.deps.callAsset = vi.fn(async (action: string) => {
+      if (action === "ListAssets") return { Items: [] };
+      throw new Error("The operation was aborted due to timeout");
+    }) as never;
+    await expect(registerQueuedAsset("asset-local-1", context.deps)).rejects.toBeInstanceOf(AssetCreateUnknownError);
+    expect(context.deps.callAsset).toHaveBeenCalledTimes(3);
+    expect(context.stored()).toMatchObject({ status: "Processing", lastError: "素材已上传，正在确认生成引用" });
+  });
+
+  it("reconciles an ambiguous CreateAsset response by deterministic name", async () => {
+    const context = setup();
+    const name = providerAssetName("actor.png", "upload-1");
+    let listCount = 0;
+    const callAsset = vi.fn(async (action: string) => {
+      if (action === "CreateAsset") throw new Error("socket closed after request");
+      if (action === "ListAssets") return { Items: ++listCount === 1 ? [] : [{ Id: "asset-provider-1", Name: name, GroupId: "group-1", AssetType: "Image", Status: "Processing" }] };
+      if (action === "GetAsset") return { Id: "asset-provider-1", Status: "Active", URL: "https://provider.example/actor.png" };
+      return {};
+    });
+    context.deps.callAsset = callAsset as never;
+
     await registerQueuedAsset("asset-local-1", context.deps);
-    expect(context.deps.callAsset).toHaveBeenCalledTimes(1);
-    expect(context.stored()).toMatchObject({ status: "Failed", lastError: expect.stringContaining("已上传") });
+
+    expect(callAsset.mock.calls.map(([action]) => action)).toEqual(["ListAssets", "CreateAsset", "ListAssets", "GetAsset"]);
+    expect(context.stored()).toMatchObject({ providerAssetId: "asset-provider-1", status: "Active" });
+  });
+
+  it("reuses a provider asset after a worker crash instead of creating a duplicate", async () => {
+    const context = setup();
+    const name = providerAssetName("actor.png", "upload-1");
+    const callAsset = vi.fn(async (action: string) => {
+      if (action === "ListAssets") return { Items: [{ Id: "asset-provider-existing", Name: name, GroupId: "group-1", AssetType: "Image", Status: "Processing" }] };
+      if (action === "GetAsset") return { Id: "asset-provider-existing", Status: "Active" };
+      throw new Error(action);
+    });
+    context.deps.callAsset = callAsset as never;
+
+    await registerQueuedAsset("asset-local-1", context.deps);
+
+    expect(callAsset.mock.calls.map(([action]) => action)).toEqual(["ListAssets", "GetAsset"]);
+    expect(context.stored()).toMatchObject({ providerAssetId: "asset-provider-existing", status: "Active" });
+  });
+
+  it("keeps reconciling an unknown create result without issuing another create", async () => {
+    const context = setup({ ...pending(), groupId: "group-1", lastError: "素材已上传，正在确认生成引用" });
+    const callAsset = vi.fn(async (_action: string, _body: Record<string, unknown>) => ({ Items: [] }));
+    context.deps.callAsset = callAsset as never;
+
+    await expect(registerQueuedAsset("asset-local-1", context.deps)).rejects.toBeInstanceOf(AssetCreateUnknownError);
+
+    expect(callAsset.mock.calls.map(([action]) => action)).toEqual(["ListAssets"]);
+    expect(context.stored()).toMatchObject({ status: "Processing" });
   });
 
   it("keeps a just-transported asset processing until deep upload validation completes", async () => {
@@ -63,7 +112,7 @@ describe("background asset ingestion", () => {
       .mockReturnValueOnce(null);
     await registerQueuedAsset("asset-local-1", context.deps);
     expect(context.deps.recordDeletedProviderAsset).toHaveBeenCalledWith("asset-local-1", "asset-provider-1");
-    expect(context.callAsset.mock.calls.map(([action]) => action)).toEqual(["CreateAsset"]);
+    expect(context.callAsset.mock.calls.map(([action]) => action)).toEqual(["ListAssets", "CreateAsset"]);
   });
 
   it("resumes polling from a persisted provider id without creating another asset", async () => {
