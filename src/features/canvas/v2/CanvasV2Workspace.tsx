@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import {
-  addEdge, Background, BackgroundVariant, MarkerType, MiniMap, ReactFlow, ReactFlowProvider, useEdgesState, useNodesState, useReactFlow,
+  addEdge, Background, BackgroundVariant, MarkerType, MiniMap, ReactFlow, ReactFlowProvider, useEdgesState, useNodesState, useReactFlow, useViewport,
   type Connection, type Edge, type NodeChange,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -16,13 +17,15 @@ import {
 import { canCreateFromNode, createCanvasNodeV2, defaultCanvasDocumentV2, NODE_CONNECTION_MATRIX, toCanvasDocumentV2, type CanvasDocumentV2, type CanvasNodeTypeV2, type CanvasNodeV2 } from "../canvas-v2-types";
 import { deleteCanvasDraft, readCanvasDraft, writeCanvasDraft } from "./canvas-draft";
 import { CanvasV2Node, type CanvasFlowData, type CanvasFlowNode } from "./CanvasV2Node";
-import { CanvasMontage } from "./CanvasMontage";
 import { canvasAssetDownloadName } from "./canvas-download";
 import { canvasVideoModeForReferences, canvasVideoModelsForReferences, type CanvasVideoReferenceKind } from "./canvas-video-capability";
 import { hasCanvasConnection, incomingCanvasReferences, placeCanvasMenu, withoutEphemeralCanvasElements, type CanvasMenuAnchor } from "./canvas-ux";
 
+const CanvasMontage = lazy(() => import("./CanvasMontage").then((module) => ({ default: module.CanvasMontage })));
+
 type SaveState = "saved" | "draft" | "saving" | "offline" | "conflict" | "error";
 type CreateMenu = { sourceId?: string; side?: "left" | "right"; anchor?: CanvasMenuAnchor; screen?: { x: number; y: number }; position?: { x: number; y: number }; focusOnOpen?: boolean };
+type CreateMenuStyle = CSSProperties & { placement?: "left" | "right"; "--canvas-menu-arrow-top"?: string };
 type ComposerState = { nodeId: string; prompt: string; kind: "text" | "image" | "video" | "character_tool"; model: string; ratio: string; resolution: string; duration: number; tool: "turnaround" | "closeup" | "expressions" | "portrait"; portraitStyle: string; strength: "轻" | "标准" | "强"; textAction: "replace_selection" | "append" | "overwrite"; selectionText: string };
 type CanvasUploadItem = { id: string; name: string; progress: number; phase: "preparing" | "uploading" | "verifying" | "saving"; error?: string };
 const nodeTypes = { character: CanvasV2Node, scene: CanvasV2Node, text: CanvasV2Node, image: CanvasV2Node, video: CanvasV2Node, group: CanvasV2Node, "legacy-audio": CanvasV2Node };
@@ -65,6 +68,16 @@ const canvasReferenceKinds = (targetId: string, nodes: readonly CanvasFlowNode[]
   }
   return [...byAsset.values()];
 };
+
+function CanvasZoomControls() {
+  const flow = useReactFlow<CanvasFlowNode, Edge>();
+  const { zoom } = useViewport();
+  return <>
+    <button type="button" onClick={() => flow.zoomOut({ duration: 180 })} title="缩小画布" aria-label="缩小画布"><ZoomOut /></button>
+    <output aria-label="画布缩放比例">{Math.round(zoom * 100)}%</output>
+    <button type="button" onClick={() => flow.zoomIn({ duration: 180 })} title="放大画布" aria-label="放大画布"><ZoomIn /></button>
+  </>;
+}
 
 function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; navigate: (path: string) => void; user: SessionUser; logout: () => void }) {
   const flow = useReactFlow<CanvasFlowNode, Edge>();
@@ -327,7 +340,13 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
       if (!target?.closest(".canvas-v2-help")) setHelpOpen(false);
       if (!target?.closest(".canvas-v2-create-menu,.canvas-v2-node__plus,.canvas-v2-pill__add")) setCreateMenu(null);
     };
-    document.addEventListener("pointerdown", dismiss); return () => document.removeEventListener("pointerdown", dismiss);
+    const dismissOnResize = () => setCreateMenu(null);
+    document.addEventListener("pointerdown", dismiss);
+    window.addEventListener("resize", dismissOnResize);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss);
+      window.removeEventListener("resize", dismissOnResize);
+    };
   }, []);
   useEffect(() => {
     if (!createMenu?.focusOnOpen) return;
@@ -421,6 +440,20 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   }, [canvasId, documentFromFlow, flushSave, readOnly]);
 
   useEffect(() => { if (initialized.current) scheduleSave(); }, [nodes, edges, edgesHidden, minimapOpen, panMode, scheduleSave, snapToGrid]);
+  useEffect(() => {
+    const persistLocalDraft = () => {
+      if (!initialized.current || readOnly) return;
+      window.clearTimeout(localDraftTimer.current);
+      const document = documentFromFlow();
+      latestDocument.current = document;
+      void writeCanvasDraft({ canvasId, revision: revisionRef.current, document, savedAt: Date.now() }).catch(() => undefined);
+    };
+    window.addEventListener("pagehide", persistLocalDraft);
+    return () => {
+      window.removeEventListener("pagehide", persistLocalDraft);
+      persistLocalDraft();
+    };
+  }, [canvasId, documentFromFlow, readOnly]);
   useEffect(() => {
     if (!leaseToken) return;
     const renew = () => void recoverLease();
@@ -519,12 +552,12 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   }, [edges, localPreviews, nodes]);
   const renderedEdges = useMemo(() => edges.map((edge) => ({ ...edge, hidden: edgesHidden })), [edges, edgesHidden]);
 
-  const createMenuStyle = useMemo(() => {
+  const createMenuStyle = useMemo<CreateMenuStyle | undefined>(() => {
     if (!createMenu) return undefined;
     const height = 54 + allowedCreateTypes.length * 40;
     if (createMenu.anchor) {
       const placed = placeCanvasMenu(createMenu.anchor, { width: 224, height }, { width: innerWidth, height: innerHeight }, createMenu.side === "left" ? "left" : "right");
-      return { left: placed.left, top: placed.top, placement: placed.placement };
+      return { left: placed.left, top: placed.top, placement: placed.placement, "--canvas-menu-arrow-top": `${placed.arrowTop}px` };
     }
     return {
       left: Math.max(12, Math.min(createMenu.screen?.x ?? innerWidth / 2 - 112, innerWidth - 236)),
@@ -617,6 +650,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   };
 
   const beginNodeDrag = (event: MouseEvent | TouchEvent, dragged: CanvasFlowNode) => {
+    setCreateMenu(null);
     if (!(event instanceof MouseEvent) || !event.altKey || readOnly) { dragCopy.current = null; return; }
     const selected = flow.getNodes().filter((node) => node.selected || node.id === dragged.id);
     const cloneIds = new Set((event.ctrlKey || event.metaKey ? selected : [dragged]).map((node) => node.id));
@@ -891,7 +925,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     <section className="canvas-v2-stage">
       <ReactFlow<CanvasFlowNode, Edge>
         nodes={renderedNodes} edges={renderedEdges} nodeTypes={nodeTypes} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect}
-        onNodeDragStart={beginNodeDrag} onNodeDragStop={finishNodeDrag}
+        onNodeDragStart={beginNodeDrag} onNodeDragStop={finishNodeDrag} onMoveStart={() => setCreateMenu(null)}
         onPaneContextMenu={(event) => { event.preventDefault(); if (!readOnly) setCreateMenu({ screen: { x: event.clientX, y: event.clientY }, position: flow.screenToFlowPosition({ x: event.clientX, y: event.clientY }), focusOnOpen: true }); }}
         onPaneClick={() => setCreateMenu(null)} snapToGrid={snapToGrid} snapGrid={[20, 20]} panOnDrag={panMode ? true : [1, 2]} selectionOnDrag={!panMode} nodesDraggable={!readOnly && !mobile}
         minZoom={.08} maxZoom={3} onlyRenderVisibleElements fitView deleteKeyCode={null} proOptions={{ hideAttribution: true }}>
@@ -906,14 +940,14 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
         <div className="canvas-v2-help" onMouseEnter={() => setHelpOpen(true)} onMouseLeave={() => setHelpOpen(false)}><button aria-expanded={helpOpen} onClick={() => { setCreateMenu(null); setHelpOpen((open) => !open); }}><CircleHelp /><span>帮助</span></button>{helpOpen && <div className="canvas-v2-help__menu"><button onClick={() => { setShortcutOpen(true); setHelpOpen(false); }}><Keyboard /> 快捷键</button><button onClick={() => navigate("/studio/canvas/tutorial")}><FolderOpen /> 使用教程</button></div>}</div>
       </nav>
       <div className="canvas-v2-toolbar">
-        <button onClick={() => restoreHistoryAt(historyCursor.current - 1)} disabled={historyCursor.current <= 0} title="撤销"><Undo2 /></button><button onClick={() => restoreHistoryAt(historyCursor.current + 1)} disabled={historyCursor.current >= history.current.length - 1} title="重做"><Redo2 /></button><i /><button onClick={() => void flow.setViewport({ x: 0, y: 0, zoom: 1 }, { duration: 350 })} title="重置视角"><RefreshCw /></button><button onClick={() => setEdgesHidden((value) => !value)} className={edgesHidden ? "active" : ""} title="隐藏连线"><Sparkles /></button><button onClick={layout} title="整理画布"><LayoutDashboard /></button><button onClick={() => setMinimapOpen((value) => !value)} className={minimapOpen ? "active" : ""} title="小地图"><MapIcon /></button><button onClick={() => setSnapToGrid((value) => !value)} className={snapToGrid ? "active" : ""} title="网格吸附"><Grid2X2 /></button><button onClick={() => setPanMode((value) => !value)} className={panMode ? "active" : ""} title="移动画布">{panMode ? <Move /> : <MousePointer2 />}</button><i /><button onClick={() => flow.zoomOut({ duration: 180 })}><ZoomOut /></button><span>{Math.round(flow.getZoom() * 100)}%</span><button onClick={() => flow.zoomIn({ duration: 180 })}><ZoomIn /></button>
+        <button onClick={() => restoreHistoryAt(historyCursor.current - 1)} disabled={historyCursor.current <= 0} title="撤销"><Undo2 /></button><button onClick={() => restoreHistoryAt(historyCursor.current + 1)} disabled={historyCursor.current >= history.current.length - 1} title="重做"><Redo2 /></button><i /><button onClick={() => void flow.setViewport({ x: 0, y: 0, zoom: 1 }, { duration: 350 })} title="重置视角"><RefreshCw /></button><button onClick={() => setEdgesHidden((value) => !value)} className={edgesHidden ? "active" : ""} title="隐藏连线"><Sparkles /></button><button onClick={layout} title="整理画布"><LayoutDashboard /></button><button onClick={() => setMinimapOpen((value) => !value)} className={minimapOpen ? "active" : ""} title="小地图"><MapIcon /></button><button onClick={() => setSnapToGrid((value) => !value)} className={snapToGrid ? "active" : ""} title="网格吸附"><Grid2X2 /></button><button onClick={() => setPanMode((value) => !value)} className={panMode ? "active" : ""} title="移动画布">{panMode ? <Move /> : <MousePointer2 />}</button><i /><CanvasZoomControls />
       </div>
       {selectedNodeCount > 0 && <div className="canvas-v2-selection-tools"><span>{selectedNodeCount} 个节点</span>{selectedNodeCount > 1 && !selectedGroupCount && <button onClick={groupSelected}><GroupIcon /> 成组</button>}{selectedGroupCount > 0 && <button onClick={ungroupSelected}><Ungroup /> 解组</button>}<button onClick={copySelection}><Copy /> 复制</button>{selectedAssets.length > 0 && <button onClick={() => void downloadSelected()}><Download /> 下载</button>}{selectedVideoAssets.length > 0 && <button onClick={() => setMontageOpen(true)}><Scissors /> Montage</button>}</div>}
     </section>
 
     {draftCandidate && <div className="canvas-v2-notice"><b>发现未同步的本地草稿</b><span>上次编辑可能在刷新或断网前尚未写入服务器。</span><button onClick={() => { hydrate(draftCandidate.document); setRevision(draftCandidate.revision); revisionRef.current = draftCandidate.revision; setDraftCandidate(null); setSaveState("draft"); }}>恢复草稿</button><button onClick={() => { void deleteCanvasDraft(canvasId); setDraftCandidate(null); }}>忽略</button></div>}
     {message && <div className="canvas-v2-toast" role="status">{message}<button onClick={() => setMessage("")} aria-label="关闭提示"><X /></button></div>}
-    {createMenu && createMenuStyle && <div ref={createMenuRef} className="canvas-v2-create-menu" data-placement={createMenuStyle.placement} style={{ left: createMenuStyle.left, top: createMenuStyle.top }} role="menu" aria-label={createMenu.side === "left" ? "添加上下文" : createMenu.side === "right" ? "引用该节点生成" : "添加节点"} onKeyDown={(event) => { if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return; event.preventDefault(); const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")]; const current = items.indexOf(document.activeElement as HTMLButtonElement); const index = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : (current + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length; items[index]?.focus(); }}><header>{createMenu.side === "left" ? "添加上下文" : createMenu.side === "right" ? "引用该节点生成" : "添加节点"}</header>{allowedCreateTypes.map((type) => { const Icon = typeIcons[type]; return <button role="menuitem" key={type} onClick={() => createNode(type)}><Icon /><span>{typeLabels[type]}</span><ChevronDown /></button>; })}</div>}
+    {createMenu && createMenuStyle && createPortal(<div ref={createMenuRef} className="canvas-v2-create-menu" data-placement={createMenuStyle.placement} style={createMenuStyle} role="menu" aria-label={createMenu.side === "left" ? "添加上下文" : createMenu.side === "right" ? "引用该节点生成" : "添加节点"} onKeyDown={(event) => { if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return; event.preventDefault(); const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")]; const current = items.indexOf(document.activeElement as HTMLButtonElement); const index = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : (current + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length; items[index]?.focus(); }}><header>{createMenu.side === "left" ? "添加上下文" : createMenu.side === "right" ? "引用该节点生成" : "添加节点"}</header>{allowedCreateTypes.map((type) => { const Icon = typeIcons[type]; return <button role="menuitem" key={type} onClick={() => createNode(type)}><Icon /><span>{typeLabels[type]}</span><ChevronDown /></button>; })}</div>, document.body)}
 
     {assetPanel && <aside className="canvas-v2-assets" role="dialog" aria-label="画布资产"><header><div><b>{assetTab === "project" ? "项目资产" : "全局资产库"}</b><span>{assetTab === "project" ? "属于这个画布的素材不会随节点删除" : "从你的常用资产中插入并建立项目副本"}</span></div><button onClick={() => setAssetPanel(false)}><X /></button></header><nav><button className={assetTab === "project" ? "active" : ""} onClick={() => setAssetTab("project")}>项目资产</button><button className={assetTab === "global" ? "active" : ""} onClick={() => setAssetTab("global")}>全局资产库</button></nav>{assetTab === "global" && <div className="canvas-v2-assets__categories"><button className={assetCategory === "all" ? "active" : ""} onClick={() => setAssetCategory("all")}>全部</button>{(Object.entries(assetCategoryLabels) as Array<[AssetCategory, string]>).map(([category, label]) => <button key={category} className={assetCategory === category ? "active" : ""} onClick={() => setAssetCategory(category)}>{label}</button>)}</div>}<label className="canvas-v2-assets__search"><Search /><input autoFocus value={assetSearch} onChange={(event) => setAssetSearch(event.target.value)} placeholder="搜索素材" /></label>{assetTab === "project" && <label className="canvas-v2-assets__upload"><Upload /><b>上传到项目</b><span>支持多选，上传完成后可立即插入</span><input type="file" multiple accept="image/*,video/mp4,video/quicktime,audio/mpeg,audio/wav" onChange={(event) => { const selected = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void uploadAssets(selected); }} /></label>}<div className="canvas-v2-assets__list">{uploading.map((item) => <div className="canvas-v2-assets__progress" key={item.id}><span>{item.name}</span><i><em style={{ width: `${item.progress}%` }} /></i><small>{item.error ?? (item.phase === "preparing" ? "正在检查图片" : item.phase === "verifying" ? "上传完成 · 正在确认" : item.phase === "saving" ? "已上传 · 正在加入项目" : `${item.progress}%`)}</small></div>)}{assetTab === "project" ? assets.filter((asset) => asset.title.toLowerCase().includes(assetSearch.toLowerCase())).map((asset) => <button key={asset.id} onClick={() => insertAsset(asset)}><span className="canvas-v2-assets__thumb">{asset.kind === "video" ? <Video /> : asset.kind === "audio" ? <Sparkles /> : <img src={asset.mediaUrl} loading="lazy" alt="" />}</span><div><b>{asset.title}</b><small>{asset.kind === "video" ? "视频" : asset.kind === "audio" ? "音频" : "图片"}</small></div><Plus /></button>) : globalAssets.map((asset) => <button key={asset.Id} onClick={() => void importGlobal(asset)} disabled={asset.Status !== "Active"}><span className="canvas-v2-assets__thumb">{asset.URL ? <img src={asset.URL} loading="lazy" alt="" /> : <ImageIcon />}</span><div><b>{asset.Name}</b><small>{assetCategoryLabels[asset.Category]} · {asset.Status === "Active" ? "可用" : "处理中"}</small></div><Plus /></button>)}</div></aside>}
 
@@ -950,7 +984,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     </div>}
     {inspectAsset && <div className="canvas-v2-modal" role="dialog" aria-modal="true" onClick={() => setInspectAsset(null)}><div className="canvas-v2-inspect" onClick={(event) => event.stopPropagation()}>{inspectAsset.kind === "video" ? <video src={inspectAsset.mediaUrl} controls autoPlay /> : <img src={inspectAsset.mediaUrl} alt={inspectAsset.title} />}<footer><b>{inspectAsset.title}</b><a href={inspectAsset.downloadUrl}><Download /> 下载</a><button onClick={() => setInspectAsset(null)}><X /></button></footer></div></div>}
     {cropNodeId && <div className="canvas-v2-modal" role="dialog" aria-modal="true" aria-label="裁剪图片" onClick={() => setCropNodeId(null)}><div className="canvas-v2-crop" onClick={(event) => event.stopPropagation()}><header><b>选择裁剪画幅</b><span>原图会保留，结果将作为新节点连接在右侧</span></header><div>{[[16 / 9, "16:9"], [4 / 3, "4:3"], [1, "1:1"], [3 / 4, "3:4"], [9 / 16, "9:16"]].map(([ratio, label]) => <button key={label} onClick={() => deriveImage(cropNodeId, { cropRatio: ratio as number })}>{label}</button>)}</div><footer><button onClick={() => setCropNodeId(null)}>取消</button></footer></div></div>}
-    {montageOpen && <CanvasMontage canvasId={canvasId} initialAssets={selectedVideoAssets} allAssets={assets} onClose={() => setMontageOpen(false)} onComplete={(asset) => {
+    {montageOpen && <Suspense fallback={<div className="canvas-v2-modal" role="dialog" aria-modal="true" aria-label="正在载入 Montage"><div className="canvas-v2-crop"><LoaderCircle className="spin" /> 正在载入 Montage</div></div>}><CanvasMontage canvasId={canvasId} initialAssets={selectedVideoAssets} allAssets={assets} onClose={() => setMontageOpen(false)} onComplete={(asset) => {
       setAssets((current) => [asset, ...current.filter((item) => item.id !== asset.id)]);
       const selected = flow.getNodes().filter((node) => node.selected && node.data.domain.type === "video");
       const x = Math.max(...selected.map((node) => node.position.x + (node.measured?.width ?? node.data.domain.width)), 0) + 150;
@@ -959,7 +993,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
       setNodes((current) => [...current.map((node) => ({ ...node, selected: false })), { ...makeFlowNode(domain), selected: true }]);
       setEdges((current) => [...current, ...selected.map((node) => toEdge({ id: `edge-${crypto.randomUUID()}`, source: node.id, target: domain.id, sourceHandle: "right", targetHandle: "left", relation: "context" }))]);
       setMontageOpen(false);
-    }} />}
+    }} /></Suspense>}
   </main>;
 }
 

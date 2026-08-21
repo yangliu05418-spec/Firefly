@@ -152,6 +152,7 @@ test("node menus stay anchored, text expands outside the flow transform, and ref
   await plus.click();
   const menu = page.getByRole("menu", { name: "引用该节点生成" });
   await expect(menu).toBeVisible();
+  expect(await menu.evaluate((element) => element.parentElement === document.body)).toBe(true);
   await expect(menu.getByRole("menuitem").first()).toBeFocused();
   await page.keyboard.press("ArrowDown");
   await expect(menu.getByRole("menuitem").nth(1)).toBeFocused();
@@ -162,7 +163,16 @@ test("node menus stay anchored, text expands outside the flow transform, and ref
   expect(Math.abs(menuBox!.x - anchoredX)).toBeLessThanOrEqual(2);
   expect(plusBox!.y + plusBox!.height / 2).toBeGreaterThan(menuBox!.y);
   expect(plusBox!.y + plusBox!.height / 2).toBeLessThan(menuBox!.y + menuBox!.height);
-  await page.keyboard.press("Escape");
+  const arrowTop = Number.parseFloat(await menu.evaluate((element) => getComputedStyle(element).getPropertyValue("--canvas-menu-arrow-top")));
+  expect(Math.abs(menuBox!.y + arrowTop - (plusBox!.y + plusBox!.height / 2))).toBeLessThanOrEqual(1);
+  await page.locator(".react-flow__pane").hover();
+  await page.mouse.wheel(0, -180);
+  await expect(menu).toHaveCount(0);
+
+  const zoom = page.getByLabel("画布缩放比例");
+  const zoomBefore = await zoom.textContent();
+  await page.getByRole("button", { name: "放大画布" }).click();
+  await expect(zoom).not.toHaveText(zoomBefore ?? "");
 
   const source = page.locator(".canvas-v2-node--text");
   await source.getByTitle("放大编辑").click();
@@ -197,4 +207,28 @@ test("node menus stay anchored, text expands outside the flow transform, and ref
   await expect(target.getByLabel("引用来源")).toHaveCount(0);
   await expect.poll(() => mock.storedDocument().connections.some((edge) => edge.source === "source-text" && edge.target === "target-image")).toBe(false);
   await expect.poll(() => mock.storedDocument().connections.some((edge) => edge.source === "target-image" && edge.target === generatedNodeId)).toBe(true);
+});
+
+test("a fast text edit is committed to the browser draft before the page leaves", async ({ page }) => {
+  await mockAuthenticatedApi(page, { document: relationDocument });
+  await page.goto("/studio/canvas/canvas-e2e");
+  await expect(page.getByRole("button", { name: "Firefly 画布导航" })).toContainText("Firefly", { timeout: 30_000 });
+
+  const editor = page.locator(".canvas-v2-node--text").getByLabel("文本节点内容");
+  await editor.fill("这一笔必须先留在本地");
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide")));
+
+  await expect.poll(() => page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("firefly-canvas-v2", 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    return await new Promise<string>((resolve, reject) => {
+      const transaction = database.transaction("drafts", "readonly");
+      const request = transaction.objectStore("drafts").get("canvas-e2e");
+      request.onsuccess = () => resolve(request.result?.document?.nodes?.find((node: { id: string }) => node.id === "source-text")?.data?.markdown ?? "");
+      request.onerror = () => reject(request.error);
+    });
+  })).toBe("这一笔必须先留在本地");
 });

@@ -1,7 +1,7 @@
 import type { CanvasNodeTypeV2, CanvasNodeV2 } from "../canvas-v2-types";
 
 export type CanvasMenuAnchor = { left: number; right: number; top: number; bottom: number };
-export type CanvasMenuPlacement = { left: number; top: number; placement: "left" | "right" };
+export type CanvasMenuPlacement = { left: number; top: number; arrowTop: number; placement: "left" | "right" };
 export type CanvasReferenceSummary = { sourceId: string; title: string; type: CanvasNodeTypeV2 };
 
 const clamp = (value: number, minimum: number, maximum: number) => Math.min(Math.max(value, minimum), maximum);
@@ -23,9 +23,11 @@ export const placeCanvasMenu = (
     : fitsLeft || !fitsRight ? "left" : "right";
   const idealLeft = placement === "right" ? right : left;
   const anchorCenter = (anchor.top + anchor.bottom) / 2;
+  const top = clamp(anchorCenter - panel.height / 2, padding, Math.max(padding, viewport.height - panel.height - padding));
   return {
     left: clamp(idealLeft, padding, Math.max(padding, viewport.width - panel.width - padding)),
-    top: clamp(anchorCenter - panel.height / 2, padding, Math.max(padding, viewport.height - panel.height - padding)),
+    top,
+    arrowTop: clamp(anchorCenter - top, 18, Math.max(18, panel.height - 18)),
     placement,
   };
 };
