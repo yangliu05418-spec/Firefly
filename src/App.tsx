@@ -20,7 +20,7 @@ import { reconcileComposerAssets } from "./composer-assets";
 import { uploadFileUntilAccepted } from "./upload-acceptance";
 import { assetPreviewSource } from "./asset-preview-source";
 import { forgetPrivateMediaCacheUser, scopePrivateMediaCacheToUser } from "./private-media-cache";
-import { readPendingAssetPreview, removePendingAssetPreview, storePendingAssetPreview } from "./pending-asset-preview-cache";
+import { usePendingAssetPreviews } from "./use-pending-asset-previews";
 
 const modeLabels: Record<CreationMode, string> = { omni: "全能参考", first_frame: "首帧生成", first_last: "首尾帧", edit: "视频编辑", extend: "视频续写", text: "文本生成" };
 const modeNotes: Record<CreationMode, string> = { omni: "自由组合图片、视频和音频", first_frame: "锁定开场画面继续创作", first_last: "精确控制起点与落点", edit: "替换、增删或重绘画面", extend: "向前、向后或多段衔接", text: "只用提示词生成镜头" };
@@ -499,10 +499,11 @@ function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
   const userId = useAssetCacheUserId();
   const [groups, setGroups] = useState<LibraryGroup[]>([]); const [assets, setAssets] = useState<LibraryAsset[]>([]); const [loading, setLoading] = useState(true); const [error, setError] = useState(""); const [notice, setNotice] = useState(""); const [creating, setCreating] = useState(false); const [batchProgress, setBatchProgress] = useState<{ done: number; uploaded: number; total: number } | null>(null); const [groupName, setGroupName] = useState(""); const [rights, setRights] = useState(false); const libraryFile = useRef<HTMLInputElement>(null);
   const batchControllers = useRef(new Set<AbortController>());
+  const pendingPreviews = usePendingAssetPreviews(userId, assets);
   useEffect(() => {
     let active = true;
     void (async () => {
-      const freshRequest = Promise.allSettled([api.get<{ Items?: LibraryGroup[] }>("/api/assets/groups"), api.get<{ Items?: LibraryAsset[] }>("/api/assets?pageSize=100")]);
+      const freshRequest = Promise.allSettled([api.get<{ Items?: LibraryGroup[] }>("/api/assets/groups"), api.get<{ Items?: LibraryAsset[]; HasMore?: boolean }>("/api/assets?pageSize=100")]);
       const cached = await assetMetadataCache.read(userId);
       if (active && cached.length) { setAssets(cached); setLoading(false); }
       const [groupResult, assetResult] = await freshRequest;
@@ -510,7 +511,7 @@ function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
       if (groupResult.status === "fulfilled") setGroups(groupResult.value.Items ?? []);
       if (assetResult.status === "fulfilled") {
         const fresh = assetResult.value.Items ?? [];
-        setAssets(fresh); void assetMetadataCache.merge(userId, fresh);
+        setAssets(fresh); void (assetResult.value.HasMore ? assetMetadataCache.merge(userId, fresh) : assetMetadataCache.replace(userId, fresh));
       }
       if (groupResult.status === "rejected" && assetResult.status === "rejected") setError(cached.length ? "素材同步暂时中断，已显示本地缓存" : "素材空间暂时不可用");
       setLoading(false);
@@ -539,9 +540,12 @@ function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
         try {
           const type = inferUploadType(file);
           if (!type) throw new Error("不支持此素材格式");
-           const uploaded = await uploadFileUntilAccepted(file, type, () => undefined, { signal: controller.signal, onTransportComplete: () => setBatchProgress((progress) => progress ? { ...progress, uploaded: progress.uploaded + 1 } : progress) });
+           let preparedPreview: Blob | undefined;
+           const uploaded = await uploadFileUntilAccepted(file, type, () => undefined, { signal: controller.signal, onPreparedPreview: type === "image" ? (blob) => { preparedPreview = blob; } : undefined, onTransportComplete: () => setBatchProgress((progress) => progress ? { ...progress, uploaded: progress.uploaded + 1 } : progress) });
            if (uploaded.normalized) normalizedCount += 1;
            const result = await api.post<LibraryAsset>("/api/assets", { groupId: groups[0].Id, uploadId: uploaded.uploadId ?? uploaded.id, url: "url" in uploaded ? uploaded.url : undefined, type: `${type[0].toUpperCase()}${type.slice(1)}`, name: file.name, category: "character" });
+           const previewBlob = preparedPreview ?? (type === "image" && file.size <= 2 * 1024 * 1024 ? file : undefined);
+           if (previewBlob) pendingPreviews.remember(result.Id, previewBlob);
            setAssets((old) => [result, ...old]); void assetMetadataCache.merge(userId, [result]);
         } catch (uploadError) { failures.push(`${file.name}（${uploadError instanceof Error ? uploadError.message.split(" · ")[0].slice(0, 60) : "上传失败"}）`); }
         finally { batchControllers.current.delete(controller); setBatchProgress((progress) => progress ? { ...progress, done: progress.done + 1 } : progress); }
@@ -556,7 +560,7 @@ function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
       setCreating(false); setBatchProgress(null); if (libraryFile.current) libraryFile.current.value = "";
     }
   };
-  return <Popover className="library-pop"><div className="popover-title"><span><Library /> 可信角色库</span><small>AI 角色素材</small></div>{loading ? <div className="panel-state"><LoaderCircle className="spin" /> 正在读取角色库</div> : error && !groups.length ? <div className="panel-state panel-state--error">{error}</div> : <>{assets.length ? <div className="library-list">{assets.map((asset) => <button key={asset.Id} disabled={asset.Status !== "Active"} title={asset.Error} onClick={() => add({ id: asset.Id, uploadId: asset.UploadId, assetId: asset.Id, name: asset.Name || asset.Id, type: asset.AssetType.toLowerCase() as UploadAsset["type"], size: 0, role: asset.AssetType === "Image" ? "reference_image" : asset.AssetType === "Video" ? "reference_video" : "reference_audio", progress: 100, preview: asset.URL, status: asset.Status })}>{assetPreviewSource(asset) && asset.AssetType === "Image" ? <img src={assetPreviewSource(asset)} loading="lazy" decoding="async" /> : <span className="library-thumb"><Sparkles /></span>}<span><b>{asset.Name || "未命名角色"}</b><small>{asset.Status === "Processing" ? "已上传 · 引用准备中" : asset.Status === "Failed" ? "已上传 · 引用准备失败" : groups.find((g) => g.Id === asset.GroupId)?.Name ?? asset.AssetType}</small></span><i className={`status-dot status-${asset.Status.toLowerCase()}`} /> </button>)}</div> : <div className="panel-state panel-state--short"><Library /><b>还没有可用角色</b><small>创建分组后上传你的 AI 角色素材</small></div>}<div className="library-create">{groups.length ? <><label><input type="checkbox" checked={rights} onChange={(e) => setRights(e.target.checked)} /> 我确认素材为 AI 角色且拥有完整权利</label><button disabled={!rights || creating} onClick={() => libraryFile.current?.click()}>{creating ? <LoaderCircle className="spin" /> : <Upload />} {creating && batchProgress ? batchProgress.uploaded > batchProgress.done ? `已上传 ${batchProgress.uploaded}/${batchProgress.total} · 正在准备引用` : `正在上传 ${batchProgress.done}/${batchProgress.total}` : `批量上传到「${groups[0].Name}」`}</button><input hidden ref={libraryFile} type="file" multiple accept="image/*,video/mp4,video/quicktime,audio/mpeg,audio/wav" onChange={(e) => void ingest(e.target.files)} /></> : <><input value={groupName} onChange={(e) => setGroupName(e.target.value)} placeholder="输入第一个角色分组名称" /><button disabled={creating || !groupName.trim()} onClick={createGroup}><Plus /> 创建角色分组</button></>}{notice && <small className="library-success">{notice}</small>}{error && <small className="library-error">{error}</small>}</div></>}</Popover>;
+  return <Popover className="library-pop"><div className="popover-title"><span><Library /> 可信角色库</span><small>AI 角色素材</small></div>{loading ? <div className="panel-state"><LoaderCircle className="spin" /> 正在读取角色库</div> : error && !groups.length ? <div className="panel-state panel-state--error">{error}</div> : <>{assets.length ? <div className="library-list">{assets.map((asset) => { const preview = assetPreviewSource(asset, pendingPreviews.get(asset.Id)); return <button key={asset.Id} disabled={asset.Status !== "Active"} title={asset.Error} onClick={() => add({ id: asset.Id, uploadId: asset.UploadId, assetId: asset.Id, name: asset.Name || asset.Id, type: asset.AssetType.toLowerCase() as UploadAsset["type"], size: 0, role: asset.AssetType === "Image" ? "reference_image" : asset.AssetType === "Video" ? "reference_video" : "reference_audio", progress: 100, preview: asset.URL, status: asset.Status })}>{preview && asset.AssetType === "Image" ? <img src={preview} loading="lazy" decoding="async" /> : <span className="library-thumb"><Sparkles /></span>}<span><b>{asset.Name || "未命名角色"}</b><small>{asset.Status === "Processing" ? "已上传 · 引用准备中" : asset.Status === "Failed" ? "已上传 · 引用准备失败" : groups.find((g) => g.Id === asset.GroupId)?.Name ?? asset.AssetType}</small></span><i className={`status-dot status-${asset.Status.toLowerCase()}`} /> </button>; })}</div> : <div className="panel-state panel-state--short"><Library /><b>还没有可用角色</b><small>创建分组后上传你的 AI 角色素材</small></div>}<div className="library-create">{groups.length ? <><label><input type="checkbox" checked={rights} onChange={(e) => setRights(e.target.checked)} /> 我确认素材为 AI 角色且拥有完整权利</label><button disabled={!rights || creating} onClick={() => libraryFile.current?.click()}>{creating ? <LoaderCircle className="spin" /> : <Upload />} {creating && batchProgress ? batchProgress.uploaded > batchProgress.done ? `已上传 ${batchProgress.uploaded}/${batchProgress.total} · 正在准备引用` : `正在上传 ${batchProgress.done}/${batchProgress.total}` : `批量上传到「${groups[0].Name}」`}</button><input hidden ref={libraryFile} type="file" multiple accept="image/*,video/mp4,video/quicktime,audio/mpeg,audio/wav" onChange={(e) => void ingest(e.target.files)} /></> : <><input value={groupName} onChange={(e) => setGroupName(e.target.value)} placeholder="输入第一个角色分组名称" /><button disabled={creating || !groupName.trim()} onClick={createGroup}><Plus /> 创建角色分组</button></>}{notice && <small className="library-success">{notice}</small>}{error && <small className="library-error">{error}</small>}</div></>}</Popover>;
 }
 
 type MediaState = "idle" | "loading" | "ready" | "buffering" | "error";
@@ -766,7 +770,7 @@ function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: Library
   const [loading, setLoading] = useState(true); const [loadingMore, setLoadingMore] = useState(false); const [uploading, setUploading] = useState(false); const [progress, setProgress] = useState<{ done: number; total: number } | null>(null); const [error, setError] = useState(""); const [notice, setNotice] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set()); const [editingId, setEditingId] = useState<string | null>(null); const [draftName, setDraftName] = useState(""); const [categorizing, setCategorizing] = useState<Set<string>>(new Set()); const [confirmDelete, setConfirmDelete] = useState(false); const [deleting, setDeleting] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null); const requestSequence = useRef(0); const renaming = useRef(new Set<string>()); const cancelRename = useRef(false); const uploadControllers = useRef(new Set<AbortController>());
-  const localPreviews = useRef(new Map<string, string>()); const [, setPreviewRevision] = useState(0);
+  const pendingPreviews = usePendingAssetPreviews(userId, assets);
   const loadPage = async (requestedPage: number, replace: boolean, search = query) => {
     const sequence = ++requestSequence.current; replace ? setLoading(true) : setLoadingMore(true); setError("");
     const categoryQuery = category === "all" ? "" : `&category=${category}`;
@@ -790,35 +794,7 @@ function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: Library
     finally { if (sequence === requestSequence.current) { setLoading(false); setLoadingMore(false); } }
   };
   useEffect(() => { void api.get<{ Items?: LibraryGroup[] }>("/api/assets/groups").then((result) => setGroup(result.Items?.[0] ?? null)).catch((loadError) => setError(loadError instanceof Error ? loadError.message : "素材空间暂时不可用")); }, []);
-  useEffect(() => () => { for (const controller of uploadControllers.current) controller.abort(); uploadControllers.current.clear(); for (const url of localPreviews.current.values()) URL.revokeObjectURL(url); localPreviews.current.clear(); }, []);
-  useEffect(() => {
-    let cancelled = false;
-    const restore = async () => {
-      let changed = false;
-      for (const asset of assets) {
-        if (asset.Status === "Active" || localPreviews.current.has(asset.Id)) continue;
-        const blob = await readPendingAssetPreview(userId, asset.Id);
-        if (!blob) continue;
-        const url = URL.createObjectURL(blob);
-        if (cancelled || localPreviews.current.has(asset.Id)) { URL.revokeObjectURL(url); continue; }
-        localPreviews.current.set(asset.Id, url); changed = true;
-      }
-      if (changed && !cancelled) setPreviewRevision((revision) => revision + 1);
-    };
-    void restore();
-    return () => { cancelled = true; };
-  }, [userId, assets.map((asset) => `${asset.Id}:${asset.Status}`).join("|")]);
-  useEffect(() => {
-    let changed = false;
-    const visible = new Map(assets.map((asset) => [asset.Id, asset.Status]));
-    for (const [id, url] of localPreviews.current) {
-      const status = visible.get(id);
-      if (status !== "Active") continue;
-      URL.revokeObjectURL(url); localPreviews.current.delete(id); changed = true;
-      void removePendingAssetPreview(userId, id);
-    }
-    if (changed) setPreviewRevision((revision) => revision + 1);
-  }, [userId, assets.map((asset) => `${asset.Id}:${asset.Status}`).join("|")]);
+  useEffect(() => () => { for (const controller of uploadControllers.current) controller.abort(); uploadControllers.current.clear(); }, []);
   useEffect(() => { const timer = window.setTimeout(() => void loadPage(1, true, query), query ? 260 : 0); return () => window.clearTimeout(timer); }, [query, category]);
   useEffect(() => {
     const processing = assets.filter((asset) => asset.Status === "Processing");
@@ -837,7 +813,7 @@ function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: Library
     if (images.length > 50) { setError("单次最多上传 50 张图片"); if (fileInput.current) fileInput.current.value = ""; return; }
     setUploading(true); setProgress({ done: 0, total: images.length }); setError(""); setNotice(""); const created: LibraryAsset[] = []; let normalizedCount = 0; const failures: string[] = selectedFiles.filter((file) => !images.includes(file)).map((file) => `${file.name}（不支持的格式）`); let cursor = 0;
     const uploadCategory: AssetCategory = category === "all" ? "material" : category;
-    const next = async () => { while (cursor < images.length) { const file = images[cursor++]; if (!file) continue; const controller = new AbortController(); let preparedPreview: Blob | undefined; uploadControllers.current.add(controller); try { const uploaded = await uploadFileUntilAccepted(file, "image", () => undefined, { signal: controller.signal, onPreparedPreview: (blob) => { preparedPreview = blob; } }); if (uploaded.normalized) normalizedCount += 1; const asset = await api.post<LibraryAsset>("/api/assets", { groupId: group.Id, uploadId: uploaded.uploadId ?? uploaded.id, type: "Image", name: file.name, category: uploadCategory }); created.push(asset); const previewBlob = preparedPreview ?? (file.size <= 2 * 1024 * 1024 ? file : undefined); if (previewBlob) { const preview = URL.createObjectURL(previewBlob); localPreviews.current.set(asset.Id, preview); void storePendingAssetPreview(userId, asset.Id, previewBlob); } setAssets((current) => [asset, ...current.filter((item) => item.Id !== asset.Id)]); setPreviewRevision((revision) => revision + 1); void assetMetadataCache.merge(userId, [asset]); } catch (uploadError) { failures.push(`${file.name}（${uploadError instanceof Error ? uploadError.message.split(" · ")[0].slice(0, 60) : "上传失败"}）`); } finally { uploadControllers.current.delete(controller); setProgress((current) => current ? { ...current, done: current.done + 1 } : current); } } };
+    const next = async () => { while (cursor < images.length) { const file = images[cursor++]; if (!file) continue; const controller = new AbortController(); let preparedPreview: Blob | undefined; uploadControllers.current.add(controller); try { const uploaded = await uploadFileUntilAccepted(file, "image", () => undefined, { signal: controller.signal, onPreparedPreview: (blob) => { preparedPreview = blob; } }); if (uploaded.normalized) normalizedCount += 1; const asset = await api.post<LibraryAsset>("/api/assets", { groupId: group.Id, uploadId: uploaded.uploadId ?? uploaded.id, type: "Image", name: file.name, category: uploadCategory }); created.push(asset); const previewBlob = preparedPreview ?? (file.size <= 2 * 1024 * 1024 ? file : undefined); if (previewBlob) pendingPreviews.remember(asset.Id, previewBlob); setAssets((current) => [asset, ...current.filter((item) => item.Id !== asset.Id)]); void assetMetadataCache.merge(userId, [asset]); } catch (uploadError) { failures.push(`${file.name}（${uploadError instanceof Error ? uploadError.message.split(" · ")[0].slice(0, 60) : "上传失败"}）`); } finally { uploadControllers.current.delete(controller); setProgress((current) => current ? { ...current, done: current.done + 1 } : current); } } };
     try {
       await Promise.all(Array.from({ length: Math.min(3, images.length) }, next));
       if (created.length) setNotice(`${created.length} 张图片已上传，生成引用正在后台准备${normalizedCount ? `，${normalizedCount} 张已自动补白` : ""}`);
@@ -871,7 +847,7 @@ function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: Library
   };
   const deleteSelection = async () => {
     const ids = [...selected]; if (!ids.length) return; setDeleting(true); setError("");
-    try { const result = await api.post<{ deleted: string[]; failed: string[] }>("/api/assets/bulk-delete", { ids }); setAssets((current) => current.filter((asset) => !result.deleted.includes(asset.Id))); for (const id of result.deleted) { const preview = localPreviews.current.get(id); if (preview) URL.revokeObjectURL(preview); localPreviews.current.delete(id); void removePendingAssetPreview(userId, id); } void assetMetadataCache.remove(userId, result.deleted); setSelected(new Set(result.failed)); setConfirmDelete(false); setNotice(`${result.deleted.length} 个素材已删除`); if (result.failed.length) setError(`${result.failed.length} 个素材删除失败，可再次重试`); }
+    try { const result = await api.post<{ deleted: string[]; failed: string[] }>("/api/assets/bulk-delete", { ids }); setAssets((current) => current.filter((asset) => !result.deleted.includes(asset.Id))); for (const id of result.deleted) pendingPreviews.remove(id); void assetMetadataCache.remove(userId, result.deleted); setSelected(new Set(result.failed)); setConfirmDelete(false); setNotice(`${result.deleted.length} 个素材已删除`); if (result.failed.length) setError(`${result.failed.length} 个素材删除失败，可再次重试`); }
     catch (deleteError) { setError(deleteError instanceof Error ? deleteError.message : "删除失败，请稍后重试"); }
     finally { setDeleting(false); }
   };
@@ -879,7 +855,7 @@ function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: Library
     <nav className="asset-category-tabs" aria-label="图片资产标签"><button className={category === "all" ? "active" : ""} onClick={() => setCategory("all")}>全部</button>{assetCategories.map((item) => <button key={item} className={category === item ? "active" : ""} onClick={() => setCategory(item)}>{assetCategoryLabels[item]}</button>)}</nav>
     <div className="image-assets__toolbar"><label><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索图片名称" aria-label="搜索图片资产" /></label><div>{assets.length > 0 && <button className="quiet" onClick={toggleAll}>{allSelected ? <CheckSquare2 /> : <Square />}{allSelected ? "取消全选" : "全选当前页"}</button>}{selected.size > 0 && <button className="quiet danger" onClick={() => setConfirmDelete(true)}><Trash2 /> 删除 {selected.size} 项</button>}<button className="asset-upload" disabled={!group || uploading} onClick={() => fileInput.current?.click()}>{uploading ? <LoaderCircle className="spin" /> : <Upload />}{progress ? `上传 ${progress.done}/${progress.total}` : "上传图片"}</button><input ref={fileInput} hidden multiple type="file" accept="image/*" onChange={(event) => void uploadImages(event.target.files)} /></div></div>
     {(notice || error) && <div className={`image-assets__feedback ${error ? "is-error" : ""}`} role="status">{error || notice}</div>}
-    {loading ? <div className="image-assets__state"><LoaderCircle className="spin" /> 正在整理你的图片资产</div> : !assets.length ? <div className="image-assets__empty"><ImageIcon /><h2>{query ? "没有匹配的图片" : category === "all" ? "把常用参考图放在这里" : `${assetCategoryLabels[category]}标签下还没有图片`}</h2><p>{query ? "换一个关键词，或清除搜索。" : "支持一次选择多张图片；上传时会自动归入当前标签。"}</p>{query ? <button onClick={() => setQuery("")}>清除搜索</button> : <button disabled={!group} onClick={() => fileInput.current?.click()}><Upload /> 上传第一批图片</button>}</div> : <><div className="image-assets__grid">{assets.map((asset) => { const preview = assetPreviewSource(asset, localPreviews.current.get(asset.Id)); return <article key={asset.Id} className={`image-asset-card ${selected.has(asset.Id) ? "is-selected" : ""}`}>
+    {loading ? <div className="image-assets__state"><LoaderCircle className="spin" /> 正在整理你的图片资产</div> : !assets.length ? <div className="image-assets__empty"><ImageIcon /><h2>{query ? "没有匹配的图片" : category === "all" ? "把常用参考图放在这里" : `${assetCategoryLabels[category]}标签下还没有图片`}</h2><p>{query ? "换一个关键词，或清除搜索。" : "支持一次选择多张图片；上传时会自动归入当前标签。"}</p>{query ? <button onClick={() => setQuery("")}>清除搜索</button> : <button disabled={!group} onClick={() => fileInput.current?.click()}><Upload /> 上传第一批图片</button>}</div> : <><div className="image-assets__grid">{assets.map((asset) => { const preview = assetPreviewSource(asset, pendingPreviews.get(asset.Id)); return <article key={asset.Id} className={`image-asset-card ${selected.has(asset.Id) ? "is-selected" : ""}`}>
       <button className="image-asset-card__media" aria-pressed={selected.has(asset.Id)} aria-label={`${selected.has(asset.Id) ? "取消选择" : "选择"} ${asset.Name}`} onClick={() => toggle(asset.Id)}>{preview ? <img src={preview} alt="" loading="lazy" decoding="async" /> : <span><ImageIcon /></span>}<i>{selected.has(asset.Id) ? <Check /> : null}</i>{asset.Status !== "Active" && <small className={`status-${asset.Status.toLowerCase()}`} title={asset.Error}>{asset.Status === "Processing" ? "已上传 · 引用准备中" : "已上传 · 引用失败"}</small>}</button>
       <div className="image-asset-card__body">{editingId === asset.Id ? <input autoFocus value={draftName} maxLength={80} onChange={(event) => setDraftName(event.target.value)} onBlur={() => void saveRename(asset)} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); if (event.key === "Escape") { cancelRename.current = true; setEditingId(null); event.currentTarget.blur(); } }} aria-label="图片名称" /> : <><span className="image-asset-card__meta"><h3 title={asset.Name}>{asset.Name || "未命名图片"}</h3><select value={asset.Category} disabled={categorizing.has(asset.Id)} onChange={(event) => void saveCategory(asset, event.target.value as AssetCategory)} aria-label={`修改 ${asset.Name} 的标签`}>{assetCategories.map((item) => <option value={item} key={item}>{assetCategoryLabels[item]}</option>)}</select></span><span className="image-asset-card__actions"><button aria-label={`插入画布 ${asset.Name}`} disabled={!asset.UploadId || asset.Status !== "Active"} title={!asset.UploadId ? "外部链接素材暂不支持插入画布" : asset.Status !== "Active" ? "素材仍在处理中" : "插入画布"} onClick={() => onInsertCanvas(asset)}><LayoutGrid /></button><button aria-label={`重命名 ${asset.Name}`} onClick={() => startRename(asset)}><Pencil /></button></span></>}</div>
     </article>; })}</div>{hasMore && <button className="image-assets__more" disabled={loadingMore} onClick={() => void loadPage(page + 1, false)}>{loadingMore ? <LoaderCircle className="spin" /> : <Plus />} 加载更多</button>}</>}
