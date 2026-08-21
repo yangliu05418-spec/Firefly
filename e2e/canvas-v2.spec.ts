@@ -37,6 +37,7 @@ async function mockAuthenticatedApi(page: Page, options: {
   leaseHeld?: boolean; expireLeaseOnce?: boolean; document?: CanvasDocumentV2; imageGenerationDelayMs?: number; projectAssets?: CanvasProjectAsset[];
   creationSessions?: Array<{ id: string; title: string; createdAt: number; updatedAt: number }>;
   imageHistory?: Array<Record<string, unknown>>; imageSessionFailures?: string[]; generationAdmissionResponseLost?: boolean; creationSessionAdmissionResponseLost?: boolean;
+  authSessionFailures?: number;
 } = {}) {
   let revision = 0;
   let storedDocument = structuredClone(options.document ?? documentV2);
@@ -52,11 +53,16 @@ async function mockAuthenticatedApi(page: Page, options: {
   const postedJobs: Array<{ kind: string; nodeId: string; revision: number }> = [];
   let projectAssets = structuredClone(options.projectAssets ?? []);
   let uploadCount = 0;
+  let authSessionRequests = 0;
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
-    if (path === "/api/auth/session") return json(route, { authenticated: true, user: { id: "user-e2e", email: "artist@dokuai.tv", name: "Artist", avatarUrl: "" } });
+    if (path === "/api/auth/session") {
+      authSessionRequests += 1;
+      if (authSessionRequests <= (options.authSessionFailures ?? 0)) return json(route, { error: "session service unavailable" }, 503);
+      return json(route, { authenticated: true, user: { id: "user-e2e", email: "artist@dokuai.tv", name: "Artist", avatarUrl: "" } });
+    }
     if (path === "/api/models") return json(route, videoModels);
     if (path === "/api/image-models") return json(route, { Items: imageModels, Ratios: ["16:9", "1:1", "9:16"], DefaultModel: imageModels[0].id });
     if (path === "/api/creation-sessions" && request.method() === "GET") return json(route, creationSessions);
@@ -181,6 +187,7 @@ async function mockAuthenticatedApi(page: Page, options: {
     postedJobs: () => [...postedJobs],
     postedGenerations: () => [...postedGenerations],
     postedSessionRequests: () => [...postedSessionRequests],
+    authSessionRequests: () => authSessionRequests,
     creationSessions: () => structuredClone(creationSessions),
     storedDocument: () => structuredClone(storedDocument),
   };
@@ -190,6 +197,26 @@ test("landing keeps the restrained Firefly entrance", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("button", { name: /开始创作/ })).toBeVisible();
   await expect(page.locator("body")).not.toHaveCSS("overflow-x", "scroll");
+});
+
+test("studio recovers transient session bootstrap failures without showing a false logout", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, "__feishuLoginSeen", { value: false, writable: true });
+    const inspect = () => {
+      if (document.body?.innerText.includes("使用飞书企业账号登录")) (window as typeof window & { __feishuLoginSeen: boolean }).__feishuLoginSeen = true;
+    };
+    addEventListener("DOMContentLoaded", () => {
+      inspect();
+      new MutationObserver(inspect).observe(document.body, { childList: true, subtree: true, characterData: true });
+    }, { once: true });
+  });
+  const mock = await mockAuthenticatedApi(page, { authSessionFailures: 2 });
+
+  await page.goto("/studio");
+
+  await expect(page.locator(".prompt-editor")).toBeVisible({ timeout: 30_000 });
+  await expect.poll(mock.authSessionRequests).toBe(3);
+  expect(await page.evaluate(() => (window as typeof window & { __feishuLoginSeen: boolean }).__feishuLoginSeen)).toBe(false);
 });
 
 test("studio restores an unsent composer draft and isolates it between creation sessions", async ({ page }) => {
