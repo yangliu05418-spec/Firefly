@@ -222,7 +222,9 @@ jobs:
 
   container:
     name: Container build, smoke test and scan
-    runs-on: ubuntu-latest
+    # Production is ARM64-only. Native ARM CI avoids building and scanning an
+    # unused AMD64 image and primes the same cache consumed by publish.
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
@@ -294,7 +296,6 @@ jobs:
   publish:
     name: Publish immutable GHCR image
     if: github.event_name == 'push' && github.ref == 'refs/heads/release/candidate-3'
-    needs: [source-gates, test-build, container]
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
@@ -346,7 +347,9 @@ jobs:
   deploy:
     name: Deploy production by digest
     if: github.event_name == 'push' && github.ref == 'refs/heads/release/candidate-3'
-    needs: publish
+    # Build the immutable image in parallel with the safety/test jobs, but do
+    # not deploy until every gate has succeeded.
+    needs: [source-gates, test-build, container, publish]
     runs-on: ubuntu-latest
     environment: production
     permissions:

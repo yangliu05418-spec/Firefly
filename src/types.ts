@@ -5,7 +5,7 @@ export type SessionUser = { id: string; email: string; name: string; avatarUrl: 
 export type Task = { id: string; caseId: string; ownerId?: string; visibility?: "private" | "shared"; providerId?: string; status: "queued" | "submitting" | "running" | "succeeded" | "failed"; mediaStatus?: "none" | "archiving" | "ready" | "fallback" | "failed"; mediaRevision?: number; prompt: string; model: string; mode: string; ratio: string; resolution: string; duration: number; createdAt: number; updatedAt: number; videoUrl?: string; downloadUrl?: string; posterUrl?: string; temporaryVideoUrl?: string; temporaryVideoExpiresAt?: number; /** Legacy response fields retained for one rolling release. */ videoExpiresAt?: number; mediaSource?: "tos" | "upstream"; error?: string };
 export type ImageModel = { id: string; name: string; resolutions: string[]; defaultResolution: string; maxCount: number };
 export type ImageGenItem = { mediaId: string; width?: number; height?: number };
-export type ImageGenResponse = { Items: ImageGenItem[]; Model: string; Ratio: string; Resolution: string; Failed?: string[] };
+export type ImageGenResponse = { Id: string; Items: ImageGenItem[]; Model: string; Ratio: string; Resolution: string; Failed?: string[] };
 export type ImageResultBundle = {
   id: string;
   modelName: string;
@@ -18,6 +18,7 @@ export type ImageResultBundle = {
   requestedCount?: number;
   error?: string;
   failed?: string[];
+  updatedAt?: number;
 };
 export type LibraryGroup = { Id: string; Name: string; Description?: string };
 export type AssetCategory = "character" | "scene" | "prop" | "material";
