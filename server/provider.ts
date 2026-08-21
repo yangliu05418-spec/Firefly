@@ -93,6 +93,13 @@ const providerError = async (response: Response) => {
   try { return JSON.parse(text)?.error?.message ?? JSON.parse(text)?.message ?? text; } catch { return text || `上游请求失败 (${response.status})`; }
 };
 
+const providerJson = async <T>(response: Response): Promise<T> => {
+  try { return await response.json() as T; }
+  catch (error) {
+    throw new ProviderRequestError(error instanceof SyntaxError ? "上游模型服务响应格式异常" : "上游模型服务响应中断", "network");
+  }
+};
+
 export const buildProviderPayload = (input: GenerationInput) => {
   const model = getModel(input.model);
   if (!model) throw new Error("未找到所选模型");
@@ -119,11 +126,13 @@ export const createProviderTask = async (input: GenerationInput) => {
   if (!config.apiKey) throw new Error("服务器尚未配置 ARK_API_KEY");
   const response = await providerFetch(endpoint, { method: "POST", headers: headers(), body: JSON.stringify(buildProviderPayload(input)) });
   if (!response.ok) throw new ProviderRequestError(await providerError(response), response.status);
-  return await response.json() as { id: string };
+  return providerJson<{ id: string }>(response);
 };
+
+export type ProviderTaskResult = { status: string; content?: { video_url?: string }; error?: { message?: string } | null };
 
 export const getProviderTask = async (id: string) => {
   const response = await providerFetch(`${endpoint}/${encodeURIComponent(id)}`, { headers: headers() });
   if (!response.ok) throw new ProviderRequestError(await providerError(response), response.status);
-  return await response.json() as { status: string; content?: { video_url?: string }; error?: { message?: string } | null };
+  return providerJson<ProviderTaskResult>(response);
 };
