@@ -11,6 +11,8 @@ import { CanvasInsertPicker } from "./features/canvas/CanvasInsertPicker";
 import { AssetCacheScope, useAssetCacheUserId } from "./asset-cache-context";
 import { assetMetadataCache, filterCachedAssets } from "./asset-metadata-cache";
 import { areAttachedUploadsReady } from "./upload-state";
+import { hasActiveStudioWork, replaceSessionSnapshot } from "./studio-sync";
+import { useAdaptiveRefresh } from "./use-adaptive-refresh";
 
 const modeLabels: Record<CreationMode, string> = { omni: "全能参考", first_frame: "首帧生成", first_last: "首尾帧", edit: "视频编辑", extend: "视频续写", text: "文本生成" };
 const modeNotes: Record<CreationMode, string> = { omni: "自由组合图片、视频和音频", first_frame: "锁定开场画面继续创作", first_last: "精确控制起点与落点", edit: "替换、增删或重绘画面", extend: "向前、向后或多段衔接", text: "只用提示词生成镜头" };
@@ -861,6 +863,7 @@ function Studio({ user, route, navigate, logout }: { user: SessionUser; route: s
   };
   const [now, setNow] = useState(Date.now());
   const activeTasks = useMemo(() => tasks.filter((task) => !["succeeded", "failed"].includes(task.status) || task.mediaStatus === "archiving"), [tasks]);
+  const activeWork = useMemo(() => hasActiveStudioWork(tasks, imageResults), [tasks, imageResults]);
   const archivedCount = useMemo(() => assetTasks.filter((task) => task.visibility !== "shared" && task.status === "succeeded" && task.videoUrl).length, [assetTasks]);
   const latestVideoTaskId = useMemo(() => tasks.find((task) => task.status === "succeeded" && task.videoUrl && (!task.videoExpiresAt || task.videoExpiresAt > now))?.id, [tasks, now]);
   const refresh = async () => {
@@ -869,8 +872,8 @@ function Studio({ user, route, navigate, logout }: { user: SessionUser; route: s
     const query = `?sessionId=${encodeURIComponent(activeSessionId)}`;
     const [taskResult, imageResult] = await Promise.allSettled([api.get<Task[]>(`/api/generations${query}`), api.get<ImageResultBundle[]>(`/api/image-generations${query}`)]);
     if (sequence !== sessionRequestSequence.current) return;
-    if (taskResult.status === "fulfilled") { setTasks(taskResult.value); setLoadError(""); }
-    if (imageResult.status === "fulfilled") { setImageResults(imageResult.value); setAssetImageResults((current) => imageResult.value.reduce(mergeImageResult, current)); }
+    if (taskResult.status === "fulfilled") { setTasks(taskResult.value); setAssetTasks((current) => replaceSessionSnapshot(current, activeSessionId, taskResult.value)); setLoadError(""); }
+    if (imageResult.status === "fulfilled") { setImageResults(imageResult.value); setAssetImageResults((current) => replaceSessionSnapshot(current, activeSessionId, imageResult.value)); }
     setSyncIssue(taskResult.status === "rejected" || imageResult.status === "rejected");
     setLoading(false);
   };
@@ -888,18 +891,7 @@ function Studio({ user, route, navigate, logout }: { user: SessionUser; route: s
   };
   useEffect(() => { void initialLoad(); }, []);
   useEffect(() => { if (!loading && view === "create" && activeSessionId) void refresh(); }, [activeSessionId, view]);
-  useEffect(() => {
-    if (!imageResults.some((result) => result.status === "generating")) return;
-    const poll = () => {
-      const sequence = sessionRequestSequence.current;
-      void api.get<ImageResultBundle[]>(`/api/image-generations?sessionId=${encodeURIComponent(activeSessionId)}`).then((results) => {
-        if (sequence !== sessionRequestSequence.current) return;
-        setImageResults(results); setAssetImageResults((current) => results.reduce(mergeImageResult, current));
-      }).catch(() => { if (sequence === sessionRequestSequence.current) setSyncIssue(true); });
-    };
-    const timer = window.setInterval(poll, document.hidden ? 15_000 : 2_000);
-    return () => window.clearInterval(timer);
-  }, [activeSessionId, imageResults.some((result) => result.status === "generating")]);
+  useAdaptiveRefresh(!loading && Boolean(activeSessionId), activeWork, refresh);
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 60000); return () => window.clearInterval(timer); }, []);
   useEffect(() => () => { if (atlasExitTimer.current) window.clearTimeout(atlasExitTimer.current); if (atlasAutoTimer.current) window.clearTimeout(atlasAutoTimer.current); }, []);
   useEffect(() => {
@@ -908,24 +900,6 @@ function Studio({ user, route, navigate, logout }: { user: SessionUser; route: s
     document.addEventListener("pointerdown", close); document.addEventListener("keydown", escape);
     return () => { document.removeEventListener("pointerdown", close); document.removeEventListener("keydown", escape); };
   }, [deleting, sessionBusy]);
-  useEffect(() => {
-    if (!activeTasks.length) return;
-    let disposed = false; let timer: number | undefined;
-    const schedule = () => { timer = window.setTimeout(tick, document.hidden ? 15000 : 2000); };
-    const tick = async () => { await refresh(); if (!disposed) schedule(); };
-    const resume = () => { if (timer) window.clearTimeout(timer); if (!document.hidden && navigator.onLine) void refresh(); schedule(); };
-    schedule(); document.addEventListener("visibilitychange", resume); window.addEventListener("online", resume);
-    return () => { disposed = true; if (timer) window.clearTimeout(timer); document.removeEventListener("visibilitychange", resume); window.removeEventListener("online", resume); };
-  }, [activeTasks.length]);
-  useEffect(() => {
-    if (activeTasks.length) return;
-    let timer: number | undefined;
-    const schedule = () => { timer = window.setTimeout(tick, document.hidden ? 5 * 60_000 : 60_000); };
-    const tick = async () => { await refresh(); schedule(); };
-    const resume = () => { if (timer) window.clearTimeout(timer); if (!document.hidden && navigator.onLine) void refresh(); schedule(); };
-    schedule(); document.addEventListener("visibilitychange", resume); window.addEventListener("online", resume);
-    return () => { if (timer) window.clearTimeout(timer); document.removeEventListener("visibilitychange", resume); window.removeEventListener("online", resume); };
-  }, [activeTasks.length]);
   const openSession = async (session: CreationSession) => {
     const sequence = ++sessionRequestSequence.current;
     navigate(`/studio/sessions/${encodeURIComponent(session.id)}`); setSelectedSessionId(session.id); setCreatingNew(false); setFeatureNotice(null); setLoadError("");
