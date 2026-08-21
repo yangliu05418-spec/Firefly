@@ -891,7 +891,13 @@ function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: Library
 }
 
 function AssetArchive({ tasks, imageResults, models, onCreate, onDelete, onRemoveImage, onInsertCanvas }: { tasks: Task[]; imageResults: ImageResultBundle[]; models: ModelCapability[]; onCreate: () => void; onDelete: (task: Task) => void; onRemoveImage: (id: string) => void; onInsertCanvas: (target: { kind: "video"; task: Task } | { kind: "image"; asset: LibraryAsset } | { kind: "generated"; mediaId: string; title: string }) => void }) {
-  const [assetView, setAssetView] = useState<"videos" | "images">("videos"); const [query, setQuery] = useState(""); const [preview, setPreview] = useState<Task | null>(null); const [downloadNotice, setDownloadNotice] = useState<{ task: Task; message: string } | null>(null); const noticeTimer = useRef<number | null>(null); const playbackPositions = useRef(new Map<string, number>());
+  const [assetView, setAssetView] = useState<"videos" | "images">(() => new URLSearchParams(location.search).get("view") === "images" ? "images" : "videos"); const [query, setQuery] = useState(""); const [preview, setPreview] = useState<Task | null>(null); const [downloadNotice, setDownloadNotice] = useState<{ task: Task; message: string } | null>(null); const noticeTimer = useRef<number | null>(null); const playbackPositions = useRef(new Map<string, number>());
+  const selectAssetView = (next: "videos" | "images") => {
+    setAssetView(next); setPreview(null);
+    const url = new URL(location.href);
+    if (next === "images") url.searchParams.set("view", "images"); else url.searchParams.delete("view");
+    history.replaceState(history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  };
   const archived = useMemo(() => tasks.filter((task) => task.visibility !== "shared" && task.status === "succeeded" && task.mediaStatus === "ready" && task.videoUrl), [tasks]);
   const filtered = useMemo(() => archived.filter((task) => (task.prompt || "参考素材生成").toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())), [archived, query]);
   useEffect(() => () => { if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current); }, []);
@@ -912,7 +918,7 @@ function AssetArchive({ tasks, imageResults, models, onCreate, onDelete, onRemov
   };
   return <div className="archive-page">
     <header className="archive-heading"><div><span>Firefly archive</span><h1>我的资产</h1><p>{assetView === "videos" ? "已完成并归档的视频会自动收录在这里。" : "管理只属于你的参考图片素材。"}</p></div>{assetView === "videos" && archived.length > 0 && <label className="archive-search"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索视频" aria-label="搜索视频资产" /></label>}</header>
-    <nav className="asset-tabs" aria-label="资产类型"><button className={assetView === "videos" ? "active" : ""} aria-current={assetView === "videos" ? "page" : undefined} onClick={() => setAssetView("videos")}><Film /> 视频资产</button><button className={assetView === "images" ? "active" : ""} aria-current={assetView === "images" ? "page" : undefined} onClick={() => { setAssetView("images"); setPreview(null); }}><ImageIcon /> 图片资产</button></nav>
+    <nav className="asset-tabs" aria-label="资产类型"><button className={assetView === "videos" ? "active" : ""} aria-current={assetView === "videos" ? "page" : undefined} onClick={() => selectAssetView("videos")}><Film /> 视频资产</button><button className={assetView === "images" ? "active" : ""} aria-current={assetView === "images" ? "page" : undefined} onClick={() => selectAssetView("images")}><ImageIcon /> 图片资产</button></nav>
     {assetView === "images" ? <><section className="generated-image-assets"><header><span>Generated archive</span><h2>生成图片</h2><p>所有创作会话的生成结果都会汇总在这里。</p></header>{imageResults.length ? <ImageResultsGallery results={imageResults} onInsertCanvas={(target) => onInsertCanvas(target)} onRemove={onRemoveImage} /> : <div className="generated-image-assets__empty"><ImageIcon /><span>生成的第一张图片会出现在这里</span></div>}</section><ImageAssetManager onInsertCanvas={(asset) => onInsertCanvas({ kind: "image", asset })} /></> : <>{!archived.length ? <div className="archive-empty"><div><Archive /></div><h2>第一支成片会出现在这里</h2><p>完成一次视频生成后，Firefly 会自动整理预览、下载与创作参数。</p><button onClick={onCreate}><Plus /> 开始创作</button></div>
       : !filtered.length ? <div className="archive-empty archive-empty--search"><Search /><h2>没有找到相关视频</h2><p>换一个关键词，或清除当前搜索。</p><button onClick={() => setQuery("")}>清除搜索</button></div>
       : <div className="archive-grid">{filtered.map((task) => { const model = models.find((item) => item.id === task.model); return <article className="archive-card" key={task.id}>
