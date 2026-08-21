@@ -137,29 +137,42 @@ async function uploadTosPart(uploadId: string, initial: SignedPart, blob: Blob, 
 }
 
 type UploadedFile = { id: string; uploadId?: string; name: string; type: UploadKind; size: number; url?: string; normalized?: boolean };
+type UploadCompletionResponse = UploadedFile & { state?: "processing" | "ready" };
 export type UploadProgressPhase = "preparing" | "uploading" | "verifying" | "ready";
 
-const finalizeUpload = async (uploadId: string, body: unknown, signal?: AbortSignal): Promise<UploadedFile> => {
+const finalizeUpload = async (uploadId: string, body: unknown, signal?: AbortSignal, onTransportComplete?: (upload: UploadedFile) => void): Promise<UploadedFile> => {
   const deadline = Date.now() + 240_000;
   let lastError: unknown;
-  for (let attempt = 0; attempt < 5 && Date.now() < deadline; attempt += 1) {
-    if (attempt) await wait(Math.min(8000, 1000 * 2 ** (attempt - 1)), signal);
-    const timeout = Math.max(1000, Math.min(205_000, deadline - Date.now()));
+  let accepted = false;
+  let transportReported = false;
+  let attempt = 0;
+  while (Date.now() < deadline) {
+    if (attempt) await wait(accepted ? 1500 : Math.min(8000, 1000 * 2 ** Math.min(attempt - 1, 3)), signal);
+    const timeout = Math.max(1000, Math.min(accepted ? 20_000 : 205_000, deadline - Date.now()));
     const controller = new AbortController();
     const abort = () => controller.abort(signal?.reason);
     if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, { once: true });
     const timer = globalThis.setTimeout(() => controller.abort(new DOMException("素材校验超时", "TimeoutError")), timeout);
-    try { return await request<UploadedFile>(`/api/uploads/${uploadId}/complete`, { method: "POST", body: JSON.stringify(body ?? {}), signal: controller.signal }); }
+    try {
+      const result = accepted
+        ? await request<UploadCompletionResponse>(`/api/uploads/${uploadId}`, { signal: controller.signal })
+        : await request<UploadCompletionResponse>(`/api/uploads/${uploadId}/complete`, { method: "POST", body: JSON.stringify(body ?? {}), signal: controller.signal });
+      if (result.state !== "processing") return result;
+      accepted = true;
+      if (!transportReported) { transportReported = true; onTransportComplete?.(result); }
+      lastError = new Error("素材已上传，正在准备生成引用");
+    }
     catch (error) {
       lastError = error;
       if (error instanceof DOMException && error.name === "AbortError" && signal?.aborted) throw error;
       if (error instanceof ApiError && error.status > 0 && error.status < 500 && ![409, 425, 429].includes(error.status)) throw error;
     } finally { globalThis.clearTimeout(timer); signal?.removeEventListener("abort", abort); }
+    attempt += 1;
   }
   throw lastError instanceof Error ? lastError : new Error("素材完成校验失败，请稍后重试");
 };
 
-export async function uploadFile(file: File, type: UploadKind, onProgress: (value: number, phase: UploadProgressPhase) => void, options: { signal?: AbortSignal } = {}) {
+export async function uploadFile(file: File, type: UploadKind, onProgress: (value: number, phase: UploadProgressPhase) => void, options: { signal?: AbortSignal; onTransportComplete?: (upload: UploadedFile) => void } = {}) {
   const signal = options.signal;
   onProgress(0, type === "image" ? "preparing" : "uploading");
   const prepared = type === "image" ? await prepareImageForUpload(file, signal) : { file, normalized: false };
@@ -184,7 +197,7 @@ export async function uploadFile(file: File, type: UploadKind, onProgress: (valu
     };
     await Promise.all(Array.from({ length: Math.min(init.concurrency ?? 3, parts.length) }, worker));
     onProgress(100, "verifying");
-    const completed = { ...(await finalizeUpload(init.id, { parts: results.sort((a, b) => a.partNumber - b.partNumber) }, signal)), name: file.name, normalized: prepared.normalized };
+    const completed = { ...(await finalizeUpload(init.id, { parts: results.sort((a, b) => a.partNumber - b.partNumber) }, signal, options.onTransportComplete)), name: file.name, normalized: prepared.normalized };
     onProgress(100, "ready");
     return completed;
   }
@@ -194,7 +207,7 @@ export async function uploadFile(file: File, type: UploadKind, onProgress: (valu
     onProgress(Math.round(offset / upload.size * 100), "uploading");
   }
   onProgress(100, "verifying");
-  const completed = { ...(await finalizeUpload(init.id, {}, signal)), name: file.name, normalized: prepared.normalized };
+  const completed = { ...(await finalizeUpload(init.id, {}, signal, options.onTransportComplete)), name: file.name, normalized: prepared.normalized };
   onProgress(100, "ready");
   return completed;
   } catch (error) {

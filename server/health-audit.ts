@@ -26,6 +26,7 @@ const main = async () => {
   const assets = new Queue("asset-ingest", { connection: redis });
   const images = new Queue("image-generation", { connection: redis });
   const canvas = new Queue("canvas-jobs", { connection: redis });
+  const uploads = new Queue("upload-finalization", { connection: redis });
   let database: Database.Database | undefined;
   let queueCounts: Record<string, unknown> = {};
   let backupAgeMs = Number.POSITIVE_INFINITY;
@@ -39,11 +40,11 @@ const main = async () => {
       if (database.pragma("quick_check", { simple: true }) !== "ok") reasons.push("sqlite_integrity_failed");
     } catch { reasons.push("sqlite_unavailable"); }
     try {
-      const [generationCounts, mediaCounts, previewCounts, assetCounts, imageCounts, canvasCounts] = await Promise.all([
-        generation.getJobCounts("wait", "active", "failed"), media.getJobCounts("wait", "active", "failed"), preview.getJobCounts("wait", "active", "failed"), assets.getJobCounts("wait", "active", "failed"), images.getJobCounts("wait", "active", "failed"), canvas.getJobCounts("wait", "active", "failed")
+      const [generationCounts, mediaCounts, previewCounts, assetCounts, imageCounts, canvasCounts, uploadCounts] = await Promise.all([
+        generation.getJobCounts("wait", "active", "failed"), media.getJobCounts("wait", "active", "failed"), preview.getJobCounts("wait", "active", "failed"), assets.getJobCounts("wait", "active", "failed"), images.getJobCounts("wait", "active", "failed"), canvas.getJobCounts("wait", "active", "failed"), uploads.getJobCounts("wait", "active", "failed")
       ]);
-      queueCounts = { generation: generationCounts, media: mediaCounts, preview: previewCounts, assets: assetCounts, images: imageCounts, canvas: canvasCounts };
-      if ((generationCounts.failed ?? 0) + (mediaCounts.failed ?? 0) + (previewCounts.failed ?? 0) + (assetCounts.failed ?? 0) + (imageCounts.failed ?? 0) + (canvasCounts.failed ?? 0) > 0) reasons.push("failed_jobs_present");
+      queueCounts = { generation: generationCounts, media: mediaCounts, preview: previewCounts, assets: assetCounts, images: imageCounts, canvas: canvasCounts, uploads: uploadCounts };
+      if ((generationCounts.failed ?? 0) + (mediaCounts.failed ?? 0) + (previewCounts.failed ?? 0) + (assetCounts.failed ?? 0) + (imageCounts.failed ?? 0) + (canvasCounts.failed ?? 0) + (uploadCounts.failed ?? 0) > 0) reasons.push("failed_jobs_present");
     } catch { reasons.push("queues_unavailable"); }
     try {
       workerHealth = await readWorkerHealth(redis);
@@ -57,7 +58,7 @@ const main = async () => {
     }
   } finally {
     database?.close();
-    await Promise.allSettled([generation.close(), media.close(), preview.close(), assets.close(), images.close(), canvas.close()]);
+    await Promise.allSettled([generation.close(), media.close(), preview.close(), assets.close(), images.close(), canvas.close(), uploads.close()]);
     redis.disconnect();
   }
   const blockingReasons = reasons;

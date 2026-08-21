@@ -558,7 +558,15 @@ export class UserStore {
   }
 
   readMedia(id: string) { return mapMedia(this.database.prepare("SELECT * FROM media_objects WHERE id = ?").get(id) as MediaRow | undefined); }
+  readUploadState(uploadId: string) { return mapMedia(this.database.prepare("SELECT * FROM media_objects WHERE upload_id = ? AND kind = 'input'").get(uploadId) as MediaRow | undefined); }
   readUpload(uploadId: string) { return mapMedia(this.database.prepare("SELECT * FROM media_objects WHERE upload_id = ? AND kind = 'input' AND status = 'ready'").get(uploadId) as MediaRow | undefined); }
+  listFinalizingUploads(limit = 100) {
+    return (this.database.prepare("SELECT * FROM media_objects WHERE kind = 'input' AND status = 'uploading' ORDER BY updated_at ASC LIMIT ?").all(limit) as MediaRow[]).map((row) => mapMedia(row)!);
+  }
+  markUploadReady(id: string) {
+    const result = this.database.prepare("UPDATE media_objects SET status = 'ready', updated_at = ? WHERE id = ? AND kind = 'input' AND status = 'uploading'").run(Date.now(), id);
+    return result.changes > 0;
+  }
   readTaskMedia(taskId: string, kind: "output" | "preview" | "poster") { return mapMedia(this.database.prepare("SELECT * FROM media_objects WHERE task_id = ? AND kind = ? AND status = 'ready' ORDER BY created_at DESC LIMIT 1").get(taskId, kind) as MediaRow | undefined); }
 
   commitTaskMediaIfActive(taskId: string, media: MediaObject, finalizeOutput = false) {

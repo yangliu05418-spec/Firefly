@@ -11,6 +11,7 @@ export const previewQueue = new Queue("preview", { connection: redis });
 export const assetQueue = new Queue("asset-ingest", { connection: redis });
 export const canvasQueue = new Queue("canvas-jobs", { connection: redis });
 export const imageGenerationQueue = new Queue("image-generation", { connection: redis });
+export const uploadFinalizationQueue = new Queue("upload-finalization", { connection: redis });
 
 export type ImageGenerationQueuePayload = {
   ownerId: string;

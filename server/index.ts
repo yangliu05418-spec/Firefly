@@ -1,8 +1,6 @@
 import crypto from "node:crypto";
-import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import cookieParser from "cookie-parser";
@@ -16,7 +14,7 @@ import { canvasDocumentSchema, DEFAULT_CANVAS_DOCUMENT, DEFAULT_CANVAS_DOCUMENT_
 import { resolveCanvasContext } from "./canvas-context.js";
 import { publicCanvasProject, publicCanvasProjectDetail } from "./canvas-public.js";
 import { consumeFeishuAuthorization, createFeishuAuthorization, exchangeFeishuCode } from "./feishu.js";
-import { assetQueue, canvasQueue, generationQueue, imageGenerationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, previewQueue, readTask, redis, saveTask, type StoredTask } from "./redis.js";
+import { assetQueue, canvasQueue, generationQueue, imageGenerationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, previewQueue, readTask, redis, saveTask, type StoredTask, uploadFinalizationQueue } from "./redis.js";
 import { canAccessTask } from "./task-access.js";
 import { publicTask } from "./task-public.js";
 import { validateGeneration } from "./provider.js";
@@ -26,7 +24,7 @@ import { previewRedirectCacheControl } from "./media-cache.js";
 import { stablePreviewUrl } from "./preview-url-cache.js";
 import { abortMultipartUpload, canvasExportObjectKey, completeMultipartUpload, createMultipartUpload, deleteObject, headObject, inputObjectKey, inspectMediaObject, signUploadPart, signedObjectUrl, tosConfigured, tosEnabled, tosHealth, verifyStoredObject } from "./tos.js";
 import { DependencyHealthGate } from "./dependency-health.js";
-import { canonicalUploadContentType, tosMediaInfoViolation, uploadKindFromContentType } from "./upload-policy.js";
+import { canonicalUploadContentType, uploadKindFromContentType } from "./upload-policy.js";
 import { acquireUploadCompletionLock, claimUploadSlot, releaseUploadCompletionLock, releaseUploadSlot, renewUploadSlot, UPLOAD_SESSION_TTL_SECONDS } from "./upload-slots.js";
 import { createCanvasAssetFromUpload, prepareCanvasAssetFromUpload } from "./canvas-assets.js";
 import { createCanvasMediaHandler } from "./canvas-media-route.js";
@@ -40,6 +38,7 @@ import { acquireCanvasLease, releaseCanvasLease, renewCanvasLease, validateCanva
 import { canvasProjectAssetProviderUrl, canvasProjectAssetSignedUrl, createCanvasProjectMediaHandler, publicCanvasProjectAsset } from "./canvas-project-assets.js";
 import { readWorkerHealth, type WorkerHealthSnapshot } from "./worker-heartbeat.js";
 import { canvasGeneratedMediaId } from "./canvas-job-media.js";
+import { MediaValidationError, validateMedia } from "./media-validation.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -69,7 +68,6 @@ const respondError = (res: express.Response, error: unknown, status = 400) => {
   res.status(error instanceof z.ZodError ? 400 : status).json({ error: message, ...(code ? { code } : {}), requestId: res.locals.requestId });
 };
 const param = (value: string | string[]) => Array.isArray(value) ? value[0] : value;
-const execFileAsync = promisify(execFile);
 const publicGenerationTask = (task: StoredTask) => {
   const stableMediaReady = task.status !== "succeeded" || task.mediaStatus !== "ready"
     ? true
@@ -86,53 +84,6 @@ const createCreationSession = (ownerId: string, title = "新创作") => {
   return users.createCreationSession({ id: crypto.randomUUID(), ownerId, title, createdAt: now, updatedAt: now });
 };
 
-/** 全局素材校验并发闸：批量上传时避免 N 个 ffprobe 同时拉取 TOS 对象压垮容器网络 */
-class Semaphore {
-  private readonly queue: (() => void)[] = [];
-  private active = 0;
-  constructor(private readonly limit: number) {}
-  acquire(): Promise<void> {
-    if (this.active < this.limit) { this.active += 1; return Promise.resolve(); }
-    return new Promise((resolve) => this.queue.push(() => { this.active += 1; resolve(); }));
-  }
-  release() {
-    const next = this.queue.shift();
-    if (next) next();
-    else this.active -= 1;
-  }
-}
-const ffprobeGate = new Semaphore(3);
-
-/** 执行 ffprobe：仅用于 TOS 当前没有 info API 的音频；60s 硬超时。 */
-const runFfprobe = async (filePath: string) => {
-  const startedAt = Date.now();
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 1; attempt++) {
-    try {
-      const { stdout } = await execFileAsync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,codec_name,width,height,r_frame_rate", "-show_entries", "format=duration", "-of", "json", filePath], { timeout: 60000, maxBuffer: 8 * 1024 * 1024 });
-      return { stdout, elapsedMs: Date.now() - startedAt };
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  const detail = lastError as { stderr?: string; killed?: boolean; signal?: string; message?: string } | undefined;
-  const reason = detail?.stderr?.trim().slice(0, 300) || detail?.message || "ffprobe 无法读取素材";
-  if (detail?.killed || /http error|server returned|connection|timed? ?out|input\/output error/i.test(reason)) throw new Error("素材校验暂时不可用：" + reason + "（耗时 " + (Date.now() - startedAt) + "ms）");
-  throw new MediaValidationError("无法识别素材内容，请检查文件是否损坏或编码是否受支持");
-};
-
-/**
- * 确定性规格违规（尺寸/时长/FPS/编码不符合官方要求）。
- * 该结论来自成功解码后的明确数值，不随网络抖动变化，在 complete 阶段直接拒绝，
- * 避免不合规素材流入素材服务（BytePlus CreateAsset）后产生难以理解的 502。
- */
-class MediaValidationError extends Error {
-  readonly code = "MEDIA_VALIDATION_FAILED";
-  constructor(message: string) {
-    super(message);
-    this.name = "MediaValidationError";
-  }
-}
 class UploadIntegrityError extends Error {
   readonly code = "UPLOAD_INTEGRITY_FAILED";
   constructor(message: string) {
@@ -148,28 +99,6 @@ class RetryableUploadError extends Error {
   }
 }
 const allowedExtensions = { image: new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".gif", ".heic", ".heif"]), video: new Set([".mp4", ".mov"]), audio: new Set([".mp3", ".wav"]) };
-const validateMedia = async (filePath: string, type: "image" | "video" | "audio") => {
-  await ffprobeGate.acquire();
-  let probeResult: { stdout: string; elapsedMs: number };
-  try {
-    probeResult = await runFfprobe(filePath);
-  } finally {
-    ffprobeGate.release();
-  }
-  const { stdout } = probeResult;
-  const probe = JSON.parse(stdout); const stream = probe.streams?.find((item: { codec_type: string }) => item.codec_type === (type === "image" ? "video" : type));
-  if (!stream) throw new Error("无法识别素材内容，请检查文件是否损坏");
-  if (type === "image" || type === "video") {
-    const { width, height } = stream; const ratio = width / height;
-    if (width < 300 || width > 6000 || height < 300 || height > 6000 || ratio <= .4 || ratio >= 2.5) throw new MediaValidationError("图片或视频尺寸不符合官方要求（300–6000px，宽高比 0.4–2.5）");
-    if (type === "video") {
-      const pixels = width * height; const duration = Number(probe.format?.duration ?? 0); const [a, b] = String(stream.r_frame_rate ?? "0/1").split("/").map(Number); const fps = b ? a / b : a;
-      if (pixels < 407696 || pixels > 8295044 || duration < 2 || duration > 30 || fps < 24 || fps > 60) throw new MediaValidationError("视频需为 2–30 秒、24–60 FPS，且分辨率符合官方范围");
-      if (!["h264", "hevc"].includes(stream.codec_name)) throw new MediaValidationError("视频编码仅支持 H.264 或 H.265");
-    }
-  }
-  if (type === "audio") { const duration = Number(probe.format?.duration ?? 0); if (duration < 2 || duration > 30) throw new MediaValidationError("音频时长需为 2–30 秒"); }
-};
 
 app.get("/api/auth/session", async (req, res) => {
   try {
@@ -278,10 +207,37 @@ app.post("/api/uploads/:id/heartbeat", requireAuth, async (req, res) => {
     if (!raw) return users.readUpload(uploadId)?.ownerId === owner.id ? res.status(204).end() : res.status(404).json({ error: "上传不存在或已过期" });
     const meta = JSON.parse(raw);
     if (meta.ownerId !== owner.id) return res.status(404).json({ error: "上传不存在或已过期" });
+    if (meta.finalizing) return res.status(204).end();
     const active = await renewUploadSlot(redis, owner.id, uploadId) || await claimUploadSlot(redis, owner.id, uploadId, config.maxActiveUploadsPerUser);
     if (!active) return res.status(429).json({ error: "当前上传并发较高，素材传输仍可继续", code: "UPLOAD_HEARTBEAT_LIMIT" });
     return res.status(204).end();
   } catch (error) { respondError(res, error); }
+});
+
+const enqueueUploadFinalization = async (uploadId: string) => {
+  await uploadFinalizationQueue.add("finalize-upload", { uploadId }, {
+    jobId: `finalize-upload-${uploadId}`,
+    priority: 1,
+    attempts: 5,
+    backoff: { type: "exponential", delay: 3000 },
+    removeOnComplete: true,
+    removeOnFail: true
+  }).catch((error) => console.warn(JSON.stringify({ type: "upload_finalize_enqueue_failed", at: new Date().toISOString(), uploadId, code: (error as { code?: string }).code ?? "unknown" })));
+};
+
+const respondUploadState = async (res: express.Response, uploadId: string, ownerId: string) => {
+  const media = users.readUploadState(uploadId);
+  if (!media || media.ownerId !== ownerId) return res.status(404).json({ error: "上传不存在或已过期", requestId: res.locals.requestId });
+  const base = { id: uploadId, uploadId, name: media.fileName, type: uploadKindFromContentType(media.contentType), size: media.size };
+  if (media.status === "ready") return res.json({ ...base, state: "ready" });
+  if (media.status === "uploading") return res.status(202).json({ ...base, state: "processing" });
+  const cachedError = await redis.get(`upload:error:${uploadId}`).catch(() => null);
+  return res.status(422).json({ error: cachedError || "素材内容校验失败，请检查格式后重新上传", code: "UPLOAD_VALIDATION_FAILED", requestId: res.locals.requestId });
+};
+
+app.get("/api/uploads/:id", requireAuth, async (req, res) => {
+  try { return await respondUploadState(res, param(req.params.id), (res.locals.user as SessionUser).id); }
+  catch (error) { respondError(res, error, 500); }
 });
 
 app.post("/api/uploads/:id/chunks", requireAuth, express.raw({ type: "application/octet-stream", limit: "17mb" }), async (req, res) => {
@@ -315,11 +271,8 @@ app.post("/api/uploads/:id/complete", requireAuth, async (req, res) => {
     const startedAt = Date.now();
     const uploadId = param(req.params.id);
     const owner = res.locals.user as SessionUser;
-    const completed = users.readUpload(uploadId);
-    if (completed) {
-      if (completed.ownerId !== owner.id) return res.status(404).json({ error: "上传不存在或已过期" });
-      return res.json({ id: uploadId, uploadId, name: completed.fileName, type: uploadKindFromContentType(completed.contentType), size: completed.size });
-    }
+    const completed = users.readUploadState(uploadId);
+    if (completed) return await respondUploadState(res, uploadId, owner.id);
     const raw = await redis.get(`upload:${uploadId}`);
     if (!raw) return res.status(404).json({ error: "上传不存在或已过期", requestId: res.locals.requestId });
     const meta = JSON.parse(raw);
@@ -327,8 +280,8 @@ app.post("/api/uploads/:id/complete", requireAuth, async (req, res) => {
     const lock = await acquireUploadCompletionLock(redis, uploadId);
     if (!lock) return res.status(409).json({ error: "素材正在完成校验，请稍后重试", code: "UPLOAD_FINALIZING", requestId: res.locals.requestId });
     try {
-      const reconciled = users.readUpload(uploadId);
-      if (reconciled) return res.json({ id: uploadId, uploadId, name: reconciled.fileName, type: uploadKindFromContentType(reconciled.contentType), size: reconciled.size });
+      const reconciled = users.readUploadState(uploadId);
+      if (reconciled) return await respondUploadState(res, uploadId, owner.id);
       if (meta.direct) {
         const body = z.object({ parts: z.array(z.object({ partNumber: z.number().int().min(1), eTag: z.string().min(1).max(256) })) }).parse(req.body);
         const parts = [...body.parts].sort((a, b) => a.partNumber - b.partNumber);
@@ -349,32 +302,20 @@ app.post("/api/uploads/:id/complete", requireAuth, async (req, res) => {
           const size = Number(head.headers["content-length"] ?? 0);
           if (size !== meta.size) throw new UploadIntegrityError("TOS 合并后的文件大小不一致");
           stageLog("headed", { size });
-          const validationUrl = signedObjectUrl(meta.objectKey, { expires: 900, fileName: meta.name });
-          const info = await inspectMediaObject(meta.objectKey, meta.type);
-          if (meta.type !== "audio") {
-            const violation = tosMediaInfoViolation(info, meta.type);
-            if (violation) throw new MediaValidationError(violation);
-          }
-          stageLog("inspected");
-          if (meta.type === "audio") try {
-            await validateMedia(validationUrl, meta.type);
-            stageLog("probed");
-          } catch (probeError) {
-            if (probeError instanceof MediaValidationError) {
-              stageLog("probe_rejected");
-              throw probeError;
-            }
-            console.warn(JSON.stringify({ type: "upload_probe_soft_failed", at: new Date().toISOString(), uploadId, userId: meta.ownerId, message: probeError instanceof Error ? probeError.message.slice(0, 300) : undefined }));
-            stageLog("probe_soft_failed");
-          }
           const now = Date.now();
-          users.upsertMedia({ id: `input:${uploadId}`, ownerId: meta.ownerId, uploadId, kind: "input", objectKey: meta.objectKey, status: "ready", fileName: meta.name, contentType: meta.mime, size, etag: String(head.headers.etag ?? "").replace(/^"|"$/g, ""), createdAt: now, updatedAt: now });
-          await redis.del(`upload:${uploadId}`);
+          users.upsertMedia({ id: `input:${uploadId}`, ownerId: meta.ownerId, uploadId, kind: "input", objectKey: meta.objectKey, status: "uploading", fileName: meta.name, contentType: meta.mime, size, etag: String(head.headers.etag ?? "").replace(/^"|"$/g, ""), createdAt: now, updatedAt: now });
+          // Keep the original multipart metadata until validation commits. Besides
+          // powering recovery, this lets the previous blue/green image finish the
+          // upload synchronously after an emergency rollback.
+          meta.finalizing = true;
+          await redis.set(`upload:${uploadId}`, JSON.stringify(meta), "EX", UPLOAD_SESSION_TTL_SECONDS);
           await releaseUploadSlot(redis, owner.id, uploadId);
-          console.info(JSON.stringify({ type: "tos_upload_completed", at: new Date().toISOString(), userId: meta.ownerId, uploadId, size, requestId: head.requestId }));
-          return res.json({ id: uploadId, uploadId, name: meta.name, type: meta.type, size });
+          await enqueueUploadFinalization(uploadId);
+          stageLog("queued");
+          console.info(JSON.stringify({ type: "tos_upload_transport_completed", at: new Date().toISOString(), userId: meta.ownerId, uploadId, size, requestId: head.requestId }));
+          return res.status(202).json({ id: uploadId, uploadId, name: meta.name, type: meta.type, size, state: "processing" });
         } catch (error) {
-          const destructive = error instanceof MediaValidationError || error instanceof UploadIntegrityError;
+          const destructive = error instanceof UploadIntegrityError;
           console.warn(JSON.stringify({ type: "tos_upload_failed", at: new Date().toISOString(), userId: meta.ownerId, uploadId, retryable: !destructive, errorCode: (error as { code?: string }).code ?? (destructive ? "validation_failed" : "transient_failure"), message: error instanceof Error ? error.message.slice(0, 400) : undefined }));
           if (destructive) {
             await abortMultipartUpload(meta.objectKey, meta.tosUploadId).catch(() => undefined);
@@ -405,8 +346,9 @@ app.delete("/api/uploads/:id", requireAuth, async (req, res) => {
   try {
     const uploadId = param(req.params.id);
     const owner = res.locals.user as SessionUser;
-    const completed = users.readUpload(uploadId);
-    if (completed) return completed.ownerId === owner.id ? res.status(409).json({ error: "素材已完成上传，不能取消" }) : res.status(404).json({ error: "上传不存在或已过期" });
+    const completed = users.readUploadState(uploadId);
+    if (completed && completed.status !== "deleted") return completed.ownerId === owner.id ? res.status(409).json({ error: "素材已完成上传或正在校验，不能取消" }) : res.status(404).json({ error: "上传不存在或已过期" });
+    if (completed?.status === "deleted") return completed.ownerId === owner.id ? res.status(204).end() : res.status(404).json({ error: "上传不存在或已过期" });
     const raw = await redis.get(`upload:${uploadId}`);
     if (!raw) return res.status(204).end();
     const meta = JSON.parse(raw);
@@ -414,8 +356,8 @@ app.delete("/api/uploads/:id", requireAuth, async (req, res) => {
     const lock = await acquireUploadCompletionLock(redis, uploadId, 60);
     if (!lock) return res.status(409).json({ error: "素材正在完成校验，暂时不能取消", code: "UPLOAD_FINALIZING", requestId: res.locals.requestId });
     try {
-      const reconciled = users.readUpload(uploadId);
-      if (reconciled) return res.status(409).json({ error: "素材已完成上传，不能取消" });
+      const reconciled = users.readUploadState(uploadId);
+      if (reconciled) return res.status(409).json({ error: "素材已完成上传或正在校验，不能取消" });
       if (meta.direct) {
         await abortMultipartUpload(meta.objectKey, meta.tosUploadId).catch(() => undefined);
         await deleteObject(meta.objectKey).catch(() => undefined);
@@ -1502,7 +1444,7 @@ app.get("/api/health/ready", async (_req, res) => {
     dependency = "database";
     if (!users.healthCheck()) throw new Error("database unavailable");
     dependency = "queues";
-    await Promise.all([generationQueue.getJobCounts("wait", "active"), imageGenerationQueue.getJobCounts("wait", "active"), mediaQueue.getJobCounts("wait", "active"), previewQueue.getJobCounts("wait", "active"), assetQueue.getJobCounts("wait", "active"), canvasQueue.getJobCounts("wait", "active")]);
+    await Promise.all([generationQueue.getJobCounts("wait", "active"), imageGenerationQueue.getJobCounts("wait", "active"), mediaQueue.getJobCounts("wait", "active"), previewQueue.getJobCounts("wait", "active"), assetQueue.getJobCounts("wait", "active"), canvasQueue.getJobCounts("wait", "active"), uploadFinalizationQueue.getJobCounts("wait", "active")]);
     dependency = "workers";
     workerHealth = await readWorkerHealth(redis);
     if (!workerHealth.ready && Date.now() >= workerReadinessRequiredAt) throw new Error(`workers unavailable: ${workerHealth.missing.join(",")}`);
@@ -1568,7 +1510,7 @@ const shutdown = async () => {
   // then close remaining streams so a blue/green retirement cannot hang indefinitely.
   const forceClose = setTimeout(() => server.closeAllConnections(), Math.min(config.shutdownGraceMs, 10_000));
   await httpClosed; clearTimeout(forceClose);
-  await Promise.all([generationQueue.close(), imageGenerationQueue.close(), mediaQueue.close(), previewQueue.close(), assetQueue.close(), canvasQueue.close()]);
+  await Promise.all([generationQueue.close(), imageGenerationQueue.close(), mediaQueue.close(), previewQueue.close(), assetQueue.close(), canvasQueue.close(), uploadFinalizationQueue.close()]);
   await redis.quit(); users.close(); process.exit(0);
 };
 process.on("SIGTERM", shutdown);
