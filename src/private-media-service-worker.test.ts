@@ -6,7 +6,7 @@ import { PRIVATE_MEDIA_CACHE_PREFIX } from "./private-media-cache";
 type Handler = (event: Record<string, unknown>) => void;
 
 describe("private media service worker scope", () => {
-  it("bypasses cache before authentication and isolates cache names after account changes", async () => {
+  it("bypasses cache before authentication and keeps concurrent browser clients isolated", async () => {
     const handlers = new Map<string, Handler>();
     const opened: string[] = [];
     const network = vi.fn(async () => new Response("image", { status: 200 }));
@@ -31,27 +31,29 @@ describe("private media service worker scope", () => {
     };
     vm.runInNewContext(source, scope);
     const request = { method: "GET", destination: "image", url: "https://firefly.test/api/assets/asset-1/source?variant=thumbnail" };
-    const dispatchFetch = async () => {
+    const dispatchFetch = async (clientId: string) => {
       let response: Promise<Response> | undefined;
-      handlers.get("fetch")?.({ request, respondWith: (value: Promise<Response>) => { response = value; } });
+      handlers.get("fetch")?.({ request, clientId, respondWith: (value: Promise<Response>) => { response = value; } });
       await response;
     };
-    const setScope = (userId: string) => handlers.get("message")?.({ data: { type: "SET_PRIVATE_MEDIA_CACHE_SCOPE", userId }, ports: [{ postMessage: vi.fn() }] });
+    const setScope = (clientId: string, userId: string) => handlers.get("message")?.({ data: { type: "SET_PRIVATE_MEDIA_CACHE_SCOPE", userId }, source: { id: clientId }, ports: [{ postMessage: vi.fn() }] });
 
-    await dispatchFetch();
+    await dispatchFetch("anonymous-client");
     expect(network).toHaveBeenCalledTimes(1);
     expect(opened).toEqual([]);
 
-    setScope("user-a");
-    await dispatchFetch();
-    setScope("user-b");
-    await dispatchFetch();
+    setScope("client-a", "user-a");
+    await dispatchFetch("client-a");
+    setScope("client-b", "user-b");
+    await dispatchFetch("client-b");
+    await dispatchFetch("client-a");
 
-    expect(opened).toEqual([`${PRIVATE_MEDIA_CACHE_PREFIX}user-a`, `${PRIVATE_MEDIA_CACHE_PREFIX}user-b`]);
+    expect(opened).toEqual([`${PRIVATE_MEDIA_CACHE_PREFIX}user-a`, `${PRIVATE_MEDIA_CACHE_PREFIX}user-b`, `${PRIVATE_MEDIA_CACHE_PREFIX}user-a`]);
 
-    handlers.get("message")?.({ data: { type: "CLEAR_PRIVATE_MEDIA_CACHE_SCOPE" }, ports: [] });
-    await dispatchFetch();
-    expect(network).toHaveBeenCalledTimes(4);
-    expect(opened).toHaveLength(2);
+    handlers.get("message")?.({ data: { type: "CLEAR_PRIVATE_MEDIA_CACHE_SCOPE" }, source: { id: "client-b" }, ports: [] });
+    await dispatchFetch("client-b");
+    await dispatchFetch("client-a");
+    expect(network).toHaveBeenCalledTimes(6);
+    expect(opened).toEqual([`${PRIVATE_MEDIA_CACHE_PREFIX}user-a`, `${PRIVATE_MEDIA_CACHE_PREFIX}user-b`, `${PRIVATE_MEDIA_CACHE_PREFIX}user-a`, `${PRIVATE_MEDIA_CACHE_PREFIX}user-a`]);
   });
 });

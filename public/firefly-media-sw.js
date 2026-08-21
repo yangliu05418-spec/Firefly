@@ -2,7 +2,7 @@
 const PRIVATE_MEDIA_LEGACY_CACHE = "firefly-private-thumbnails-v1";
 const PRIVATE_MEDIA_CACHE_PREFIX = "firefly-private-thumbnails-v2-";
 const MAX_PRIVATE_THUMBNAILS = 300;
-let activeScope = null;
+const clientScopes = new Map();
 
 const isPrivateThumbnail = (request) => {
   if (request.method !== "GET" || request.destination !== "image") return false;
@@ -29,7 +29,8 @@ const canonicalCacheRequest = (request) => {
   return { key: new Request(url.toString(), request), isRetry: true };
 };
 
-const cacheFirst = async (request) => {
+const cacheFirst = async (request, clientId) => {
+  const activeScope = clientId ? clientScopes.get(clientId) : null;
   if (!activeScope) return fetch(request);
   const cache = await caches.open(`${PRIVATE_MEDIA_CACHE_PREFIX}${activeScope}`);
   const { key, isRetry } = canonicalCacheRequest(request);
@@ -51,17 +52,20 @@ self.addEventListener("activate", (event) => {
   })());
 });
 self.addEventListener("fetch", (event) => {
-  if (isPrivateThumbnail(event.request)) event.respondWith(cacheFirst(event.request));
+  if (isPrivateThumbnail(event.request)) event.respondWith(cacheFirst(event.request, event.clientId));
 });
 self.addEventListener("message", (event) => {
   if (event.data?.type === "SET_PRIVATE_MEDIA_CACHE_SCOPE") {
     const userId = event.data.userId;
-    activeScope = typeof userId === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(userId) ? userId : null;
-    event.ports[0]?.postMessage({ ok: Boolean(activeScope) });
+    const clientId = event.source?.id;
+    const valid = typeof clientId === "string" && clientId.length > 0 && typeof userId === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(userId);
+    if (valid) clientScopes.set(clientId, userId);
+    else if (clientId) clientScopes.delete(clientId);
+    event.ports[0]?.postMessage({ ok: valid });
   }
-  if (event.data?.type === "CLEAR_PRIVATE_MEDIA_CACHE_SCOPE") activeScope = null;
+  if (event.data?.type === "CLEAR_PRIVATE_MEDIA_CACHE_SCOPE" && event.source?.id) clientScopes.delete(event.source.id);
   if (event.data?.type === "CLEAR_PRIVATE_MEDIA_CACHE") {
-    activeScope = null;
+    clientScopes.clear();
     event.waitUntil(caches.keys().then((names) => Promise.all(names.filter((name) => name.startsWith(PRIVATE_MEDIA_CACHE_PREFIX) || name === PRIVATE_MEDIA_LEGACY_CACHE).map((name) => caches.delete(name)))));
   }
 });
