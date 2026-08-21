@@ -268,7 +268,7 @@ test("media nodes drag from their body, keep the selected stack, and persist upl
 
   for (const type of ["image", "video", "character", "scene"]) {
     const node = page.locator(`.canvas-v2-node--${type}`);
-    await expect(node.getByText("本地上传", { exact: true })).toBeVisible();
+    await expect(node.getByRole("button", { name: "本地上传", exact: true })).toBeVisible();
     await expect(node.getByRole("button", { name: "资产库", exact: true })).toBeVisible();
   }
 
