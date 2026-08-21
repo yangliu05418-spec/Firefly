@@ -49,4 +49,25 @@ describe("asset media promotion reconciliation", () => {
     ]);
     store.close();
   });
+
+  it("keeps finalizing uploads invisible until the worker marks them ready", () => {
+    const store = freshStore();
+    const owner = store.upsertFromFeishu({
+      openId: "ou_upload", unionId: "on_upload", tenantKey: "tenant-dokuai",
+      email: "upload@dokuai.tv", name: "Uploader", avatarUrl: ""
+    });
+    const media: MediaObject = {
+      id: "input:upload-pending", ownerId: owner.id, uploadId: "upload-pending", kind: "input",
+      objectKey: "inputs/aa/upload-pending/image.png", status: "uploading", fileName: "image.png",
+      contentType: "image/png", size: 10, etag: "etag", createdAt: 1, updatedAt: 1
+    };
+    store.upsertMedia(media);
+    expect(store.readUpload("upload-pending")).toBeNull();
+    expect(store.readUploadState("upload-pending")).toMatchObject({ status: "uploading" });
+    expect(store.listFinalizingUploads().map((item) => item.id)).toEqual(["input:upload-pending"]);
+    expect(store.markUploadReady(media.id)).toBe(true);
+    expect(store.readUpload("upload-pending")).toMatchObject({ status: "ready" });
+    expect(store.listFinalizingUploads()).toEqual([]);
+    store.close();
+  });
 });

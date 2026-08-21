@@ -3,7 +3,7 @@ import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import { config } from "./config.js";
 import { users } from "./store.js";
-import { assetQueue, mediaQueue, previewQueue, readTask, saveTask } from "./redis.js";
+import { assetQueue, mediaQueue, previewQueue, readTask, saveTask, uploadFinalizationQueue } from "./redis.js";
 import { createPoster, deleteObject, fetchObjectFromUrl, optimizePlaybackObject, outputObjectKey, posterObjectKey, previewObjectKey, streamObjectFromUrl, verifyProgressiveMp4 } from "./tos.js";
 import { MAX_MEDIA_RECOVERY_ATTEMPTS } from "./db.js";
 import { transcodePreview } from "./preview-transcode.js";
@@ -12,6 +12,7 @@ import { markAssetIngestFailed, registerQueuedAsset } from "./asset-ingest.js";
 import { deleteQueuedProviderAsset } from "./asset-cleanup.js";
 import { copyPreparedCanvasAsset } from "./canvas-assets.js";
 import { startWorkerHeartbeat } from "./worker-heartbeat.js";
+import { finalizeQueuedUpload } from "./upload-finalization.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const numberHeader = (value: unknown) => Number(value ?? 0) || 0;
@@ -237,6 +238,25 @@ const worker = new Worker("media", async (job) => {
   throw new Error(`Unknown media job: ${job.name}`);
 }, { connection, concurrency: 2, lockDuration: 120000 });
 
+const uploadFinalizationWorker = new Worker("upload-finalization", async (job) => {
+  if (job.name !== "finalize-upload") throw new Error(`Unknown upload finalization job: ${job.name}`);
+  const result = await finalizeQueuedUpload(job.data.uploadId);
+  if (result.status === "failed") {
+    await connection.set(`upload:error:${job.data.uploadId}`, result.error, "EX", 24 * 3600);
+    await connection.del(`upload:${job.data.uploadId}`);
+  } else if (result.status === "ready") {
+    await connection.del(`upload:error:${job.data.uploadId}`, `upload:${job.data.uploadId}`);
+  } else {
+    const upload = users.readUploadState(job.data.uploadId);
+    if (upload?.status === "ready") {
+      await connection.del(`upload:error:${job.data.uploadId}`, `upload:${job.data.uploadId}`);
+    } else if (upload?.status === "deleted") {
+      await connection.del(`upload:${job.data.uploadId}`);
+    }
+  }
+  return result;
+}, { connection, concurrency: 2, lockDuration: 120_000 });
+
 const previewWorker = new Worker("preview", async (job) => {
   if (job.name !== "create-preview") throw new Error(`Unknown preview job: ${job.name}`);
   return createTaskPreview(job.data.taskId);
@@ -248,7 +268,7 @@ const assetWorker = new Worker("asset-ingest", async (job) => {
   throw new Error(`Unknown asset job: ${job.name}`);
 }, { connection, concurrency: 2, lockDuration: 240_000 });
 
-await Promise.all([worker.waitUntilReady(), previewWorker.waitUntilReady(), assetWorker.waitUntilReady()]);
+await Promise.all([worker.waitUntilReady(), previewWorker.waitUntilReady(), assetWorker.waitUntilReady(), uploadFinalizationWorker.waitUntilReady()]);
 const heartbeat = await startWorkerHeartbeat(connection, "media");
 
 previewWorker.on("failed", (job, error) => {
@@ -258,6 +278,10 @@ previewWorker.on("failed", (job, error) => {
 assetWorker.on("failed", (job, error) => {
   if (job?.name === "register" && job.attemptsMade >= (job.opts.attempts ?? 1)) markAssetIngestFailed(job.data.assetId, "素材已上传，但生成引用暂未准备完成");
   console.warn(JSON.stringify({ type: job?.name === "delete-provider" ? "asset_provider_delete_failed" : "asset_ingest_failed", at: new Date().toISOString(), assetId: job?.data.assetId, attempt: job?.attemptsMade, code: (error as { code?: string }).code ?? "unknown" }));
+});
+
+uploadFinalizationWorker.on("failed", (job, error) => {
+  console.warn(JSON.stringify({ type: "tos_upload_finalize_failed", at: new Date().toISOString(), uploadId: job?.data.uploadId, attempt: job?.attemptsMade, code: (error as { code?: string }).code ?? "worker_failure" }));
 });
 
 worker.on("failed", async (job) => {
@@ -322,6 +346,13 @@ const reconcileAssets = async () => {
   }
 };
 const assetReconcile = setInterval(() => void reconcileAssets().catch((error) => console.warn(JSON.stringify({ type: "asset_ingest_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }))), 60_000);
+const reconcileUploadFinalizations = async () => {
+  for (const media of users.listFinalizingUploads(100)) {
+    if (!media.uploadId) continue;
+    await uploadFinalizationQueue.add("finalize-upload", { uploadId: media.uploadId }, { jobId: `finalize-upload-${media.uploadId}`, priority: 1, attempts: 5, backoff: { type: "exponential", delay: 3000 }, removeOnComplete: true, removeOnFail: true });
+  }
+};
+const uploadFinalizeReconcile = setInterval(() => void reconcileUploadFinalizations().catch((error) => console.warn(JSON.stringify({ type: "tos_upload_finalize_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }))), 60_000);
 const reconcileCanvasCopies = async () => {
   for (const asset of users.copyingCanvasAssets(100)) {
     await mediaQueue.add("copy-canvas-asset", { assetId: asset.id }, { jobId: `copy-${asset.id}`, attempts: 5, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } });
@@ -334,6 +365,7 @@ void reconcileArchives().catch(() => undefined);
 void reconcilePosters().catch(() => undefined);
 void deprioritizeExistingPreviewBacklog().then(reconcilePreviews).catch((error) => console.warn(JSON.stringify({ type: "tos_preview_priority_reconcile_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" })));
 void reconcileAssets().catch(() => undefined);
+void reconcileUploadFinalizations().catch(() => undefined);
 void reconcileCanvasCopies().catch(() => undefined);
 
 let shuttingDown = false;
@@ -341,8 +373,8 @@ const shutdown = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
   await heartbeat.stop();
-  clearInterval(reconcile); clearInterval(archiveReconcile); clearInterval(posterReconcile); clearInterval(previewReconcile); clearInterval(assetReconcile); clearInterval(canvasCopyReconcile);
-  const graceful = await closeWorkersWithin([worker, previewWorker, assetWorker], config.shutdownGraceMs);
+  clearInterval(reconcile); clearInterval(archiveReconcile); clearInterval(posterReconcile); clearInterval(previewReconcile); clearInterval(assetReconcile); clearInterval(uploadFinalizeReconcile); clearInterval(canvasCopyReconcile);
+  const graceful = await closeWorkersWithin([worker, previewWorker, assetWorker, uploadFinalizationWorker], config.shutdownGraceMs);
   console.info(JSON.stringify({ type: "worker_shutdown", at: new Date().toISOString(), worker: "media", graceful }));
   await connection.quit(); users.close(); process.exit(0);
 };

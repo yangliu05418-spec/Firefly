@@ -10,6 +10,7 @@ import { CanvasWorkspaceGate as CanvasWorkspace } from "./features/canvas/Canvas
 import { CanvasInsertPicker } from "./features/canvas/CanvasInsertPicker";
 import { AssetCacheScope, useAssetCacheUserId } from "./asset-cache-context";
 import { assetMetadataCache, filterCachedAssets } from "./asset-metadata-cache";
+import { areAttachedUploadsReady } from "./upload-state";
 
 const modeLabels: Record<CreationMode, string> = { omni: "全能参考", first_frame: "首帧生成", first_last: "首尾帧", edit: "视频编辑", extend: "视频续写", text: "文本生成" };
 const modeNotes: Record<CreationMode, string> = { omni: "自由组合图片、视频和音频", first_frame: "锁定开场画面继续创作", first_last: "精确控制起点与落点", edit: "替换、增删或重绘画面", extend: "向前、向后或多段衔接", text: "只用提示词生成镜头" };
@@ -374,7 +375,8 @@ function Composer({ models, compact, sessionId, onCreated, onImagesGenerated }: 
     } finally { setLoading(false); }
   };
 
-  const uploadsReady = assets.every((asset) => asset.progress === 100);
+  const uploadsReady = areAttachedUploadsReady(assets);
+  const uploadsFinalizing = assets.some((asset) => !asset.assetId && asset.progress === 100 && asset.phase === "verifying");
   const modeReady = engine === "image" ? imageReady!
     : mode === "text" ? Boolean(prompt.trim())
     : mode === "first_frame" ? assets.length === 1 && assets[0]?.role === "first_frame"
@@ -385,7 +387,7 @@ function Composer({ models, compact, sessionId, onCreated, onImagesGenerated }: 
   return <div className={`composer ${compact ? "composer--compact" : ""}`} onClick={(e) => e.stopPropagation()}>
     {!compact && <h1>今晚，想创造什么？</h1>}
     <div className="composer-shell">
-      {!!assets.length && <div className="asset-strip">{assets.map((asset, index) => <div className="asset-chip" key={asset.id}>{asset.preview ? <img src={asset.preview} /> : asset.type === "video" ? <Video /> : <AudioLines />}<span><b>{asset.role === "first_frame" ? "首帧" : asset.role === "last_frame" ? "尾帧" : `${asset.type === "image" ? "图片" : asset.type === "video" ? "视频" : "音频"} ${index + 1}`}</b><small>{asset.phase === "preparing" ? "正在检查图片" : asset.phase === "verifying" ? "上传完成 · 正在确认" : asset.progress === 100 ? `${asset.name}${asset.normalized ? " · 已自动补白" : ""}` : `上传 ${asset.progress ?? 0}%`}</small></span>{asset.progress !== 100 && <i style={{ width: `${asset.progress ?? 0}%` }} />}<button onClick={() => removeAttachedAsset(asset.id)}><X /></button></div>)}</div>}
+      {!!assets.length && <div className="asset-strip">{assets.map((asset, index) => <div className="asset-chip" key={asset.id}>{asset.preview ? <img src={asset.preview} /> : asset.type === "video" ? <Video /> : <AudioLines />}<span><b>{asset.role === "first_frame" ? "首帧" : asset.role === "last_frame" ? "尾帧" : `${asset.type === "image" ? "图片" : asset.type === "video" ? "视频" : "音频"} ${index + 1}`}</b><small>{asset.phase === "preparing" ? "正在检查图片" : asset.phase === "verifying" ? "文件已上传 · 正在准备引用" : asset.progress === 100 ? `${asset.name}${asset.normalized ? " · 已自动补白" : ""}` : `上传 ${asset.progress ?? 0}%`}</small></span>{asset.progress !== 100 && <i style={{ width: `${asset.progress ?? 0}%` }} />}<button onClick={() => removeAttachedAsset(asset.id)}><X /></button></div>)}</div>}
       <div className={`prompt-row ${referenceSlots.length > 1 ? "prompt-row--dual" : ""} ${!referenceSlots.length ? "prompt-row--text" : ""}`}>
         {!!referenceSlots.length && <div className="reference-slots">{referenceSlots.map((label, index) => <button className="add-reference" key={label} onClick={() => fileInput.current?.click()} disabled={(mode === "first_frame" && assets.length >= 1) || (mode === "first_last" && assets.length > index)}><Plus /><span>{label}</span></button>)}</div>}
         <PromptEditor value={prompt} change={setPrompt} placeholder={engine === "image" ? "描述你想生成的画面；上传参考图即可进行图生图……" : modePlaceholders[mode]} assets={assets} disabled={mode === "text" && engine === "video"} attach={attachMentionAsset} />
@@ -409,7 +411,7 @@ function Composer({ models, compact, sessionId, onCreated, onImagesGenerated }: 
         <span className="control-spacer" />
           </>
         )}
-        <button className={`send-button ${engine === "image" && loading ? "send-button--submitted" : ""}`} aria-label={engine === "image" && loading ? "图片已提交，正在生成" : engine === "image" ? "生成图片" : "生成视频"} aria-busy={engine === "image" && loading ? true : undefined} disabled={loading || !uploadsReady || !modeReady} onClick={submit}>{engine === "image" && loading ? <Check /> : loading ? <LoaderCircle className="spin" /> : <Send />}</button>
+        <button className={`send-button ${engine === "image" && loading ? "send-button--submitted" : ""}`} title={uploadsFinalizing ? "文件已上传，引用准备完成后即可生成" : undefined} aria-label={uploadsFinalizing ? "文件已上传，正在准备引用" : engine === "image" && loading ? "图片已提交，正在生成" : engine === "image" ? "生成图片" : "生成视频"} aria-busy={engine === "image" && loading ? true : undefined} disabled={loading || !uploadsReady || !modeReady} onClick={submit}>{engine === "image" && loading ? <Check /> : loading ? <LoaderCircle className="spin" /> : <Send />}</button>
       </div>
       {engine === "image" && loading && <div className="composer-generation-status" role="status" aria-live="polite"><Check /><span><b>已提交，正在生成</b><small>完成后会自动出现在结果区</small></span></div>}
       {error && <div className="composer-error">{error}</div>}
@@ -419,7 +421,7 @@ function Composer({ models, compact, sessionId, onCreated, onImagesGenerated }: 
 
 function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
   const userId = useAssetCacheUserId();
-  const [groups, setGroups] = useState<LibraryGroup[]>([]); const [assets, setAssets] = useState<LibraryAsset[]>([]); const [loading, setLoading] = useState(true); const [error, setError] = useState(""); const [notice, setNotice] = useState(""); const [creating, setCreating] = useState(false); const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null); const [groupName, setGroupName] = useState(""); const [rights, setRights] = useState(false); const libraryFile = useRef<HTMLInputElement>(null);
+  const [groups, setGroups] = useState<LibraryGroup[]>([]); const [assets, setAssets] = useState<LibraryAsset[]>([]); const [loading, setLoading] = useState(true); const [error, setError] = useState(""); const [notice, setNotice] = useState(""); const [creating, setCreating] = useState(false); const [batchProgress, setBatchProgress] = useState<{ done: number; uploaded: number; total: number } | null>(null); const [groupName, setGroupName] = useState(""); const [rights, setRights] = useState(false); const libraryFile = useRef<HTMLInputElement>(null);
   const batchControllers = useRef(new Set<AbortController>());
   useEffect(() => {
     let active = true;
@@ -452,7 +454,7 @@ function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
     const files = Array.from(selected ?? []);
     if (!files.length || !groups[0] || !rights) return;
     if (files.length > 50) { setError("单次最多选择 50 个素材，请分批上传"); if (libraryFile.current) libraryFile.current.value = ""; return; }
-    setCreating(true); setError(""); setNotice(""); setBatchProgress({ done: 0, total: files.length });
+    setCreating(true); setError(""); setNotice(""); setBatchProgress({ done: 0, uploaded: 0, total: files.length });
     const failures: string[] = []; let normalizedCount = 0; let cursor = 0;
     const uploadNext = async () => {
       while (cursor < files.length) {
@@ -461,7 +463,7 @@ function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
         try {
           const type = inferUploadType(file);
           if (!type) throw new Error("不支持此素材格式");
-           const uploaded = await uploadFile(file, type, () => undefined, { signal: controller.signal });
+           const uploaded = await uploadFile(file, type, () => undefined, { signal: controller.signal, onTransportComplete: () => setBatchProgress((progress) => progress ? { ...progress, uploaded: progress.uploaded + 1 } : progress) });
            if (uploaded.normalized) normalizedCount += 1;
            const result = await api.post<LibraryAsset>("/api/assets", { groupId: groups[0].Id, uploadId: uploaded.uploadId ?? uploaded.id, url: "url" in uploaded ? uploaded.url : undefined, type: `${type[0].toUpperCase()}${type.slice(1)}`, name: file.name, category: "character" });
            setAssets((old) => [result, ...old]); void assetMetadataCache.merge(userId, [result]);
@@ -478,7 +480,7 @@ function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
       setCreating(false); setBatchProgress(null); if (libraryFile.current) libraryFile.current.value = "";
     }
   };
-  return <Popover className="library-pop"><div className="popover-title"><span><Library /> 可信角色库</span><small>AI 角色素材</small></div>{loading ? <div className="panel-state"><LoaderCircle className="spin" /> 正在读取角色库</div> : error && !groups.length ? <div className="panel-state panel-state--error">{error}</div> : <>{assets.length ? <div className="library-list">{assets.map((asset) => <button key={asset.Id} disabled={asset.Status !== "Active"} title={asset.Error} onClick={() => add({ id: asset.Id, uploadId: asset.UploadId, assetId: asset.Id, name: asset.Name || asset.Id, type: asset.AssetType.toLowerCase() as UploadAsset["type"], size: 0, role: asset.AssetType === "Image" ? "reference_image" : asset.AssetType === "Video" ? "reference_video" : "reference_audio", progress: 100, preview: asset.URL, status: asset.Status })}>{asset.URL && asset.AssetType === "Image" ? <img src={asset.URL} /> : <span className="library-thumb"><Sparkles /></span>}<span><b>{asset.Name || "未命名角色"}</b><small>{asset.Status === "Processing" ? "已上传 · 引用准备中" : asset.Status === "Failed" ? "已上传 · 引用准备失败" : groups.find((g) => g.Id === asset.GroupId)?.Name ?? asset.AssetType}</small></span><i className={`status-dot status-${asset.Status.toLowerCase()}`} /> </button>)}</div> : <div className="panel-state panel-state--short"><Library /><b>还没有可用角色</b><small>创建分组后上传你的 AI 角色素材</small></div>}<div className="library-create">{groups.length ? <><label><input type="checkbox" checked={rights} onChange={(e) => setRights(e.target.checked)} /> 我确认素材为 AI 角色且拥有完整权利</label><button disabled={!rights || creating} onClick={() => libraryFile.current?.click()}>{creating ? <LoaderCircle className="spin" /> : <Upload />} {creating && batchProgress ? `正在上传 ${batchProgress.done}/${batchProgress.total}` : `批量上传到「${groups[0].Name}」`}</button><input hidden ref={libraryFile} type="file" multiple accept="image/*,video/mp4,video/quicktime,audio/mpeg,audio/wav" onChange={(e) => void ingest(e.target.files)} /></> : <><input value={groupName} onChange={(e) => setGroupName(e.target.value)} placeholder="输入第一个角色分组名称" /><button disabled={creating || !groupName.trim()} onClick={createGroup}><Plus /> 创建角色分组</button></>}{notice && <small className="library-success">{notice}</small>}{error && <small className="library-error">{error}</small>}</div></>}</Popover>;
+  return <Popover className="library-pop"><div className="popover-title"><span><Library /> 可信角色库</span><small>AI 角色素材</small></div>{loading ? <div className="panel-state"><LoaderCircle className="spin" /> 正在读取角色库</div> : error && !groups.length ? <div className="panel-state panel-state--error">{error}</div> : <>{assets.length ? <div className="library-list">{assets.map((asset) => <button key={asset.Id} disabled={asset.Status !== "Active"} title={asset.Error} onClick={() => add({ id: asset.Id, uploadId: asset.UploadId, assetId: asset.Id, name: asset.Name || asset.Id, type: asset.AssetType.toLowerCase() as UploadAsset["type"], size: 0, role: asset.AssetType === "Image" ? "reference_image" : asset.AssetType === "Video" ? "reference_video" : "reference_audio", progress: 100, preview: asset.URL, status: asset.Status })}>{asset.URL && asset.AssetType === "Image" ? <img src={asset.URL} /> : <span className="library-thumb"><Sparkles /></span>}<span><b>{asset.Name || "未命名角色"}</b><small>{asset.Status === "Processing" ? "已上传 · 引用准备中" : asset.Status === "Failed" ? "已上传 · 引用准备失败" : groups.find((g) => g.Id === asset.GroupId)?.Name ?? asset.AssetType}</small></span><i className={`status-dot status-${asset.Status.toLowerCase()}`} /> </button>)}</div> : <div className="panel-state panel-state--short"><Library /><b>还没有可用角色</b><small>创建分组后上传你的 AI 角色素材</small></div>}<div className="library-create">{groups.length ? <><label><input type="checkbox" checked={rights} onChange={(e) => setRights(e.target.checked)} /> 我确认素材为 AI 角色且拥有完整权利</label><button disabled={!rights || creating} onClick={() => libraryFile.current?.click()}>{creating ? <LoaderCircle className="spin" /> : <Upload />} {creating && batchProgress ? batchProgress.uploaded > batchProgress.done ? `已上传 ${batchProgress.uploaded}/${batchProgress.total} · 正在准备引用` : `正在上传 ${batchProgress.done}/${batchProgress.total}` : `批量上传到「${groups[0].Name}」`}</button><input hidden ref={libraryFile} type="file" multiple accept="image/*,video/mp4,video/quicktime,audio/mpeg,audio/wav" onChange={(e) => void ingest(e.target.files)} /></> : <><input value={groupName} onChange={(e) => setGroupName(e.target.value)} placeholder="输入第一个角色分组名称" /><button disabled={creating || !groupName.trim()} onClick={createGroup}><Plus /> 创建角色分组</button></>}{notice && <small className="library-success">{notice}</small>}{error && <small className="library-error">{error}</small>}</div></>}</Popover>;
 }
 
 type MediaState = "idle" | "loading" | "ready" | "buffering" | "error";
