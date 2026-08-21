@@ -537,6 +537,19 @@ export class UserStore {
     return (this.database.prepare("SELECT * FROM user_assets WHERE status = 'Processing' AND deleted_at IS NULL ORDER BY updated_at ASC LIMIT ?").all(limit) as UserAssetRow[]).map((row) => mapUserAsset(row)!);
   }
 
+  /** Reusable library assets must be copied outside inputs/' seven-day lifecycle. */
+  listUserAssetsNeedingMediaPromotion(limit = 100) {
+    const rows = this.database.prepare(`
+      SELECT DISTINCT asset.* FROM user_assets asset
+      JOIN media_objects media ON media.upload_id = asset.upload_id
+        AND media.kind = 'input' AND media.status = 'ready'
+      WHERE asset.deleted_at IS NULL AND asset.upload_id IS NOT NULL
+        AND media.object_key LIKE 'inputs/%'
+      ORDER BY asset.updated_at ASC LIMIT ?
+    `).all(limit) as UserAssetRow[];
+    return rows.map((row) => mapUserAsset(row)!);
+  }
+
   renameUserAsset(id: string, ownerId: string, name: string) {
     const result = this.database.prepare("UPDATE user_assets SET name = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").run(name, Date.now(), id, ownerId);
     return result.changes > 0;

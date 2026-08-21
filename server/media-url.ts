@@ -7,11 +7,11 @@ import { signedObjectUrl } from "./tos.js";
 /**
  * 素材引用统一入口：所有"上传素材 → 可访问地址"的解析只允许走这里，
  * 避免 TOS 签名与 legacy 媒体路由两条链路混用（P0-4）。
- * - inputs/ 前缀（TOS）→ 签名 URL
+ * - inputs/ 或 assets/ 前缀（TOS）→ 签名 URL
  * - legacy/ 前缀（本地存储，仅开发/自托管）→ HMAC 媒体路由（与 /api/uploads/:id/complete 一致）
  */
 export const resolveUploadMediaUrl = async (media: Pick<MediaObject, "objectKey" | "uploadId" | "fileName">, expiresSeconds = 24 * 3600): Promise<string> => {
-  if (media.objectKey.startsWith("inputs/")) {
+  if (media.objectKey.startsWith("inputs/") || media.objectKey.startsWith("assets/")) {
     return signedObjectUrl(media.objectKey, { expires: expiresSeconds, fileName: media.fileName });
   }
   if (media.objectKey.startsWith("legacy/") && media.uploadId) {
