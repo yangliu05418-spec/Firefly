@@ -30,6 +30,7 @@ import { canCreatePendingAsset } from "./asset-upload-admission.js";
 import { createCanvasAssetFromUpload, isAdmissibleCanvasUpload, prepareCanvasAssetFromUpload } from "./canvas-assets.js";
 import { createCanvasMediaHandler } from "./canvas-media-route.js";
 import { createServiceWorkerHandler } from "./static-web.js";
+import { scheduleBestEffort, scheduleTaskCleanup } from "./cleanup-handoff.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
 import { publicUserAsset } from "./user-asset-public.js";
 import { IMAGE_MODELS, IMAGE_RATIOS, imageModelById, DEFAULT_IMAGE_MODEL } from "./image-models.js";
@@ -535,9 +536,11 @@ app.delete("/api/generations/:id", requireAuth, async (req, res) => {
     const taskId = param(req.params.id);
     const user = res.locals.user as SessionUser;
     if (!users.softDeleteTask(taskId, user.id)) return res.status(404).json({ error: "任务不存在" });
-    const job = await generationQueue.getJob(taskId);
-    if (job) await job.remove().catch(() => undefined);
-    await mediaQueue.add("delete-task-media", { taskId }, { jobId: `delete-${taskId}`, attempts: 8, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: true });
+    scheduleTaskCleanup(taskId, {
+      findGenerationJob: (id) => generationQueue.getJob(id),
+      enqueueMediaDeletion: (id) => mediaQueue.add("delete-task-media", { taskId: id }, { jobId: `delete-${id}`, attempts: 8, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: true }),
+      reportFailure: (stage, id, error) => console.warn(JSON.stringify({ type: "task_cleanup_handoff_failed", at: new Date().toISOString(), taskId: id, stage, code: (error as { code?: string }).code ?? "unknown" })),
+    });
     res.status(204).end();
   } catch (error) { respondError(res, error, 500); }
 });
@@ -747,7 +750,12 @@ app.get("/api/image-generations", requireAuth, (req, res) => {
 
 app.delete("/api/image-generations/:id", requireAuth, (req, res) => {
   const user = res.locals.user as SessionUser;
-  if (!users.softDeleteImageGeneration(param(req.params.id), user.id)) return res.status(404).json({ error: "图片记录不存在" });
+  const taskId = param(req.params.id);
+  if (!users.softDeleteImageGeneration(taskId, user.id)) return res.status(404).json({ error: "图片记录不存在" });
+  scheduleBestEffort(
+    () => mediaQueue.add("reconcile-deletes", {}, { jobId: `image-cleanup-${taskId}`, removeOnComplete: true, removeOnFail: true }),
+    (error) => console.warn(JSON.stringify({ type: "image_cleanup_handoff_failed", at: new Date().toISOString(), taskId, code: (error as { code?: string }).code ?? "unknown" })),
+  );
   res.status(204).end();
 });
 
@@ -1222,11 +1230,11 @@ app.post("/api/canvases/:id/jobs/:jobId/cancel", requireAuth, async (req, res) =
     const cancelled = cancellation.job;
     if (!cancelled) return res.status(404).json({ error: "画布任务不存在" });
     if (cancellation.changed) {
-      await canvasQueue.getJob(job.id).then((queued) => queued?.remove()).catch(() => undefined);
+      scheduleBestEffort(() => canvasQueue.getJob(job.id).then((queued) => queued?.remove()), () => undefined);
       if (job.kind === "image" || job.kind === "character_tool") {
         const mediaId = canvasGeneratedMediaId(job.id);
         if (users.markUnreferencedGeneratedMediaForDeletion(mediaId, user.id)) {
-          await mediaQueue.add("reconcile-deletes", {}, { jobId: `canvas-generated-cleanup-${mediaId}`, removeOnComplete: true, removeOnFail: true }).catch(() => undefined);
+          scheduleBestEffort(() => mediaQueue.add("reconcile-deletes", {}, { jobId: `canvas-generated-cleanup-${mediaId}`, removeOnComplete: true, removeOnFail: true }), () => undefined);
         }
       }
       if (job.providerTaskId) {
@@ -1234,12 +1242,15 @@ app.post("/api/canvases/:id/jobs/:jobId/cancel", requireAuth, async (req, res) =
         if (task && task.ownerId === user.id) {
           users.softDeleteCanvasProjectAssetBySource(canvasId, user.id, "generation", task.id);
           users.softDeleteTask(task.id, user.id);
-          await generationQueue.getJob(task.id).then((queued) => queued?.remove()).catch(() => undefined);
-          await mediaQueue.add("delete-task-media", { taskId: task.id }, { jobId: `delete-${task.id}`, attempts: 5, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: true }).catch(() => undefined);
+          scheduleTaskCleanup(task.id, {
+            findGenerationJob: (id) => generationQueue.getJob(id),
+            enqueueMediaDeletion: (id) => mediaQueue.add("delete-task-media", { taskId: id }, { jobId: `delete-${id}`, attempts: 5, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: true }),
+            reportFailure: () => undefined,
+          });
         }
       }
     }
-    await redis.publish(`canvas:events:${canvasId}`, JSON.stringify({ type: "canvas_job", job: cancelled }));
+    scheduleBestEffort(() => redis.publish(`canvas:events:${canvasId}`, JSON.stringify({ type: "canvas_job", job: cancelled })), () => undefined);
     res.json(publicCanvasJob(cancelled));
   } catch (error) { respondError(res, error, 502); }
 });

@@ -322,7 +322,9 @@ worker.on("failed", async (job, error) => {
   }
 });
 
-const reconcile = setInterval(() => void mediaQueue.add("reconcile-deletes", {}, { jobId: `reconcile-${Math.floor(Date.now() / 3600000)}`, removeOnComplete: true, removeOnFail: true }), 3600000);
+// SQLite tombstones are the deletion source of truth. Scan directly so cleanup
+// recovers quickly even when the original HTTP-to-Redis handoff was unavailable.
+const reconcile = setInterval(() => void deletePendingMedia().catch((error) => console.warn(JSON.stringify({ type: "tos_delete_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }))), 60_000);
 const reconcileArchives = async () => {
   const now = Date.now();
   const tasks = users.recoverableMediaTasks(now + 5 * 60 * 1000, now - 30 * 60 * 1000, 20);
@@ -368,7 +370,7 @@ const reconcileCanvasCopies = async () => {
   }
 };
 const canvasCopyReconcile = setInterval(() => void reconcileCanvasCopies().catch((error) => console.warn(JSON.stringify({ type: "canvas_copy_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }))), 60_000);
-void mediaQueue.add("reconcile-deletes", {}, { removeOnComplete: true, removeOnFail: true });
+void deletePendingMedia().catch((error) => console.warn(JSON.stringify({ type: "tos_delete_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" })));
 void deleteCanvasAssets().catch((error) => console.warn(JSON.stringify({ type: "canvas_asset_cleanup_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" })));
 void reconcileArchives().catch(() => undefined);
 void reconcilePosters().catch(() => undefined);
