@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 5;
 // Compatibility bridge: deploy this reader before the Canvas V2 migration so
 // this image remains a valid blue/green rollback target after the next
 // expand-only migration is applied.
@@ -263,6 +263,42 @@ const addCanvasV2Tables = (database: Database.Database) => {
   `);
 };
 
+const addImageGenerationHistory = (database: Database.Database) => {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS image_generation_tasks (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      model TEXT NOT NULL,
+      model_name TEXT NOT NULL,
+      ratio TEXT NOT NULL,
+      resolution TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      requested_count INTEGER NOT NULL CHECK (requested_count BETWEEN 1 AND 4),
+      status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+      items_json TEXT NOT NULL DEFAULT '[]',
+      failures_json TEXT NOT NULL DEFAULT '[]',
+      error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      deleted_at INTEGER,
+      FOREIGN KEY (owner_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS image_generation_tasks_owner_created_idx
+      ON image_generation_tasks(owner_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS image_generation_tasks_status_updated_idx
+      ON image_generation_tasks(status, updated_at);
+  `);
+  if (tableExists(database, "media_objects")) database.exec(`
+    INSERT OR IGNORE INTO image_generation_tasks
+      (id, owner_id, model, model_name, ratio, resolution, prompt, requested_count, status, items_json, failures_json, created_at, updated_at)
+    SELECT
+      'legacy-' || id, owner_id, 'legacy', '历史生成', '原始比例', '', '', 1, 'succeeded',
+      json_array(json_object('mediaId', id)), '[]', created_at, updated_at
+    FROM media_objects
+    WHERE kind = 'generated' AND status = 'ready' AND deleted_at IS NULL;
+  `);
+};
+
 export const migrateDatabase = (databasePath: string) => {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const database = new Database(databasePath);
@@ -289,6 +325,10 @@ export const migrateDatabase = (databasePath: string) => {
       if (version < 4) {
         addCanvasV2Tables(database);
         database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(4, "add-canvas-v2", Date.now());
+      }
+      if (version < 5) {
+        addImageGenerationHistory(database);
+        database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(5, "add-image-generation-history", Date.now());
       }
       assertSchemaVersion(database);
     }).exclusive();

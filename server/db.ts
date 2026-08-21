@@ -68,6 +68,24 @@ export type MediaObject = {
   deletedAt?: number;
 };
 
+export type ImageGenerationTask = {
+  id: string;
+  ownerId: string;
+  model: string;
+  modelName: string;
+  ratio: string;
+  resolution: string;
+  prompt: string;
+  requestedCount: number;
+  status: "running" | "succeeded" | "failed";
+  items: { mediaId: string; width?: number; height?: number }[];
+  failures: string[];
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+  deletedAt?: number;
+};
+
 export type AssetCategory = "character" | "scene" | "prop" | "material";
 
 export type UserAsset = {
@@ -204,6 +222,12 @@ type MediaRow = {
   etag: string; created_at: number; updated_at: number; deleted_at: number | null;
 };
 
+type ImageGenerationRow = {
+  id: string; owner_id: string; model: string; model_name: string; ratio: string; resolution: string;
+  prompt: string; requested_count: number; status: ImageGenerationTask["status"]; items_json: string;
+  failures_json: string; error: string | null; created_at: number; updated_at: number; deleted_at: number | null;
+};
+
 type UserAssetRow = {
   id: string; provider_asset_id: string | null; owner_id: string; group_id: string; upload_id: string | null; name: string;
   asset_type: UserAsset["assetType"]; status: UserAsset["status"]; category: AssetCategory; url: string | null;
@@ -267,6 +291,14 @@ const mapMedia = (row?: MediaRow): MediaObject | null => row ? ({
   kind: row.kind, objectKey: row.object_key, status: row.status, fileName: row.file_name,
   contentType: row.content_type, size: row.size, etag: row.etag, createdAt: row.created_at,
   updatedAt: row.updated_at, deletedAt: row.deleted_at ?? undefined
+}) : null;
+
+const mapImageGeneration = (row?: ImageGenerationRow): ImageGenerationTask | null => row ? ({
+  id: row.id, ownerId: row.owner_id, model: row.model, modelName: row.model_name,
+  ratio: row.ratio, resolution: row.resolution, prompt: row.prompt, requestedCount: row.requested_count,
+  status: row.status, items: JSON.parse(row.items_json), failures: JSON.parse(row.failures_json),
+  error: row.error ?? undefined, createdAt: row.created_at, updatedAt: row.updated_at,
+  deletedAt: row.deleted_at ?? undefined,
 }) : null;
 
 const mapUserAsset = (row?: UserAssetRow): UserAsset | null => row ? ({
@@ -468,6 +500,59 @@ export class UserStore {
   readMedia(id: string) { return mapMedia(this.database.prepare("SELECT * FROM media_objects WHERE id = ?").get(id) as MediaRow | undefined); }
   readUpload(uploadId: string) { return mapMedia(this.database.prepare("SELECT * FROM media_objects WHERE upload_id = ? AND kind = 'input' AND status = 'ready'").get(uploadId) as MediaRow | undefined); }
   readTaskMedia(taskId: string, kind: "output" | "preview" | "poster") { return mapMedia(this.database.prepare("SELECT * FROM media_objects WHERE task_id = ? AND kind = ? AND status = 'ready' ORDER BY created_at DESC LIMIT 1").get(taskId, kind) as MediaRow | undefined); }
+
+  createImageGeneration(task: ImageGenerationTask) {
+    this.database.prepare(`
+      INSERT INTO image_generation_tasks
+        (id, owner_id, model, model_name, ratio, resolution, prompt, requested_count, status, items_json, failures_json, error, created_at, updated_at, deleted_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      task.id, task.ownerId, task.model, task.modelName, task.ratio, task.resolution, task.prompt,
+      task.requestedCount, task.status, JSON.stringify(task.items), JSON.stringify(task.failures),
+      task.error ?? null, task.createdAt, task.updatedAt, task.deletedAt ?? null,
+    );
+    return task;
+  }
+
+  readImageGeneration(id: string) {
+    return mapImageGeneration(this.database.prepare("SELECT * FROM image_generation_tasks WHERE id = ? AND deleted_at IS NULL").get(id) as ImageGenerationRow | undefined);
+  }
+
+  listImageGenerations(ownerId: string, limit = 50) {
+    return (this.database.prepare("SELECT * FROM image_generation_tasks WHERE owner_id = ? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?").all(ownerId, limit) as ImageGenerationRow[])
+      .map((row) => mapImageGeneration(row)!);
+  }
+
+  updateImageGeneration(id: string, ownerId: string, patch: Pick<ImageGenerationTask, "status" | "items" | "failures"> & { error?: string }) {
+    const result = this.database.prepare(`
+      UPDATE image_generation_tasks
+      SET status = ?, items_json = ?, failures_json = ?, error = ?, updated_at = ?
+      WHERE id = ? AND owner_id = ? AND deleted_at IS NULL
+    `).run(patch.status, JSON.stringify(patch.items), JSON.stringify(patch.failures), patch.error ?? null, Date.now(), id, ownerId);
+    return result.changes ? this.readImageGeneration(id) : null;
+  }
+
+  failStaleImageGenerations(staleBefore: number) {
+    return this.database.prepare(`
+      UPDATE image_generation_tasks
+      SET status = 'failed', error = '生成进程意外中断，请重新提交', updated_at = ?
+      WHERE status = 'running' AND deleted_at IS NULL AND updated_at < ?
+    `).run(Date.now(), staleBefore).changes;
+  }
+
+  softDeleteImageGeneration(id: string, ownerId: string) {
+    const now = Date.now();
+    return this.database.transaction(() => {
+      const task = this.readImageGeneration(id);
+      if (!task || task.ownerId !== ownerId) return false;
+      const removed = this.database.prepare("UPDATE image_generation_tasks SET deleted_at = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").run(now, now, id, ownerId);
+      if (!removed.changes) return false;
+      const mediaIds = task.items.map((item) => item.mediaId);
+      const mark = this.database.prepare("UPDATE media_objects SET status = 'delete_pending', updated_at = ? WHERE id = ? AND owner_id = ? AND kind = 'generated' AND status != 'deleted'");
+      for (const mediaId of mediaIds) mark.run(now, mediaId, ownerId);
+      return true;
+    })();
+  }
 
   /**
    * 删除权限矩阵：owner 可删除自己的任务（private 与 shared 一致）；
@@ -811,6 +896,7 @@ export class UserStore {
 
   clearGenerationHistory() {
     return this.database.transaction(() => {
+      this.database.prepare("DELETE FROM image_generation_tasks").run();
       this.database.prepare("DELETE FROM media_objects").run();
       this.database.prepare("DELETE FROM generation_tasks").run();
     })();

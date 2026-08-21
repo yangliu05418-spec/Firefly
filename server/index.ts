@@ -10,7 +10,7 @@ import { z } from "zod";
 import { config } from "./config.js";
 import { MODELS } from "./capabilities.js";
 import { clearSession, createSession, getSessionUser, publicUser, requireAuth, type SessionUser } from "./auth.js";
-import type { AssetCategory, CanvasJob, CanvasProject, CanvasProjectAsset, UserAsset } from "./db.js";
+import type { AssetCategory, CanvasJob, CanvasProject, CanvasProjectAsset, ImageGenerationTask, UserAsset } from "./db.js";
 import { users } from "./store.js";
 import { canvasDocumentSchema, DEFAULT_CANVAS_DOCUMENT, DEFAULT_CANVAS_DOCUMENT_V1, parseCanvasDocumentSafe, toCanvasDocumentV2 } from "./canvas-document.js";
 import { resolveCanvasContext } from "./canvas-context.js";
@@ -35,6 +35,7 @@ import { publicUserAsset } from "./user-asset-public.js";
 import { IMAGE_MODELS, IMAGE_RATIOS, imageModelById, computeImageSize, DEFAULT_IMAGE_MODEL } from "./image-models.js";
 import { acquireImageSlot, downloadImageBuffer, generateSingleImage, openRouterPool, OpenRouterError, releaseImageSlot } from "./openrouter.js";
 import { storeGeneratedImage } from "./generated-media.js";
+import { publicImageGeneration } from "./image-generation-public.js";
 import { providerAssetName } from "./asset-name.js";
 import { acquireCanvasLease, releaseCanvasLease, renewCanvasLease, validateCanvasLease } from "./canvas-lease.js";
 import { canvasProjectAssetProviderUrl, canvasProjectAssetSignedUrl, createCanvasProjectMediaHandler, publicCanvasProjectAsset } from "./canvas-project-assets.js";
@@ -701,6 +702,7 @@ app.delete("/api/assets/:id", requireAuth, async (req, res) => {
 
 // ---- OpenRouter 图片生成 ----
 const imageGenerationSchema = z.object({
+  requestId: z.string().uuid().optional(),
   model: z.string().min(1).max(120),
   ratio: z.enum(IMAGE_RATIOS),
   resolution: z.string().min(1).max(20),
@@ -713,10 +715,32 @@ app.get("/api/image-models", requireAuth, async (_req, res) => {
   res.json({ Items: IMAGE_MODELS, Ratios: IMAGE_RATIOS, DefaultModel: DEFAULT_IMAGE_MODEL });
 });
 
+app.get("/api/image-generations", requireAuth, (req, res) => {
+  const user = res.locals.user as SessionUser;
+  users.failStaleImageGenerations(Date.now() - 15 * 60_000);
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+  res.json(users.listImageGenerations(user.id, limit).map(publicImageGeneration));
+});
+
+app.delete("/api/image-generations/:id", requireAuth, (req, res) => {
+  const user = res.locals.user as SessionUser;
+  if (!users.softDeleteImageGeneration(param(req.params.id), user.id)) return res.status(404).json({ error: "图片记录不存在" });
+  res.status(204).end();
+});
+
 app.post("/api/image-generation", requireAuth, async (req, res) => {
+  let activeTask: ImageGenerationTask | undefined;
+  let slotOwnerId: string | undefined;
   try {
     const body = imageGenerationSchema.parse(req.body);
     const user = res.locals.user as SessionUser;
+    const requestId = body.requestId ?? crypto.randomUUID();
+    const existing = users.readImageGeneration(requestId);
+    if (existing) {
+      if (existing.ownerId !== user.id) return res.status(409).json({ error: "请求标识已被使用" });
+      if (existing.status === "succeeded") return res.json({ Id: existing.id, Items: existing.items, Model: existing.model, Ratio: existing.ratio, Resolution: existing.resolution, Failed: existing.failures });
+      return res.status(409).json({ error: existing.status === "running" ? "图片正在生成，请稍候" : existing.error ?? "该请求未生成成功" });
+    }
     const spec = imageModelById(body.model);
     if (!spec) return res.status(400).json({ error: "未知的图片模型" });
     if (body.count > spec.maxCount) return res.status(400).json({ error: "该模型单次最多生成 " + spec.maxCount + " 张" });
@@ -731,11 +755,14 @@ app.post("/api/image-generation", requireAuth, async (req, res) => {
     }
     if (!openRouterPool().size) return res.status(503).json({ error: "服务端尚未配置 OpenRouter API Key" });
     if (!acquireImageSlot(user.id)) return res.status(429).json({ error: "图片生成繁忙，请等当前生成完成后再试（每用户同时最多 2 组）" });
+    slotOwnerId = user.id;
     const startedAt = Date.now();
-    let slotReleased = false;
-    const releaseSlot = () => { if (!slotReleased) { slotReleased = true; releaseImageSlot(user.id); } };
-    res.on("finish", releaseSlot);
-    res.on("close", releaseSlot);
+    activeTask = {
+      id: requestId, ownerId: user.id, model: body.model, modelName: spec.name, ratio: body.ratio,
+      resolution: body.resolution, prompt: body.prompt, requestedCount: body.count, status: "running",
+      items: [], failures: [], createdAt: startedAt, updatedAt: startedAt,
+    };
+    users.createImageGeneration(activeTask);
     console.info(JSON.stringify({ type: "image_generation_started", at: new Date().toISOString(), userId: user.id, model: body.model, ratio: body.ratio, resolution: body.resolution, size, count: body.count, references: references.length, healthyKeys: openRouterPool().healthyCount() }));
     // 并发生成（上限 2），逐个落盘
     let cursor = 0;
@@ -760,14 +787,17 @@ app.post("/api/image-generation", requireAuth, async (req, res) => {
     await Promise.all(Array.from({ length: Math.min(2, body.count) }, worker));
     if (!items.length) {
       const message = failures[0] ?? "图片生成失败";
+      users.updateImageGeneration(activeTask.id, user.id, { status: "failed", items, failures, error: message });
       return res.status(502).json({ error: message, requestId: res.locals.requestId });
     }
+    users.updateImageGeneration(activeTask.id, user.id, { status: "succeeded", items, failures });
     console.info(JSON.stringify({ type: "image_generation_done", at: new Date().toISOString(), userId: user.id, model: body.model, requested: body.count, ok: items.length, failed: failures.length, elapsedMs: Date.now() - startedAt }));
-    res.json({ Items: items, Model: body.model, Ratio: body.ratio, Resolution: body.resolution, Failed: failures });
+    res.json({ Id: activeTask.id, Items: items, Model: body.model, Ratio: body.ratio, Resolution: body.resolution, Failed: failures });
   } catch (error) {
+    if (activeTask) users.updateImageGeneration(activeTask.id, activeTask.ownerId, { status: "failed", items: [], failures: [], error: error instanceof Error ? error.message : "图片生成失败" });
     if (error instanceof OpenRouterError) console.warn(JSON.stringify({ type: "image_generation_error", at: new Date().toISOString(), status: error.status, message: error.message }));
     respondError(res, error, error instanceof OpenRouterError ? (error.status === "network" ? 502 : 502) : 400);
-  }
+  } finally { if (slotOwnerId) releaseImageSlot(slotOwnerId); }
 });
 
 app.get("/api/image-media/:id", requireAuth, async (req, res) => {

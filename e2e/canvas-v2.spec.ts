@@ -21,6 +21,7 @@ async function mockAuthenticatedApi(page: Page, options: { leaseHeld?: boolean; 
   let revision = 0;
   let storedDocument = structuredClone(options.document ?? documentV2);
   let leaseReleaseCount = 0;
+  let imageHistory: unknown[] = [];
   let leasePostCount = 0;
   let leaseRenewCount = 0;
   const saveLeaseTokens: string[] = [];
@@ -32,9 +33,12 @@ async function mockAuthenticatedApi(page: Page, options: { leaseHeld?: boolean; 
     if (path === "/api/auth/session") return json(route, { authenticated: true, user: { id: "user-e2e", email: "artist@dokuai.tv", name: "Artist", avatarUrl: "" } });
     if (path === "/api/models") return json(route, videoModels);
     if (path === "/api/image-models") return json(route, { Items: imageModels, Ratios: ["16:9", "1:1", "9:16"], DefaultModel: imageModels[0].id });
+    if (path === "/api/image-generations" && request.method() === "GET") return json(route, imageHistory);
     if (path === "/api/image-generation" && request.method() === "POST") {
+      const body = request.postDataJSON() as { requestId: string; prompt: string; ratio: string; resolution: string; count: number };
       await new Promise((resolve) => setTimeout(resolve, options.imageGenerationDelayMs ?? 0));
-      return json(route, { Items: [{ mediaId: "image-e2e" }], Model: imageModels[0].id, Ratio: "1:1", Resolution: "1024", Failed: [] });
+      imageHistory = [{ id: body.requestId, modelName: imageModels[0].name, ratio: body.ratio, resolution: body.resolution, prompt: body.prompt, requestedCount: body.count, status: "succeeded", items: [{ mediaId: "image-e2e" }], failed: [], createdAt: Date.now() }];
+      return json(route, { Id: body.requestId, Items: [{ mediaId: "image-e2e" }], Model: imageModels[0].id, Ratio: body.ratio, Resolution: body.resolution, Failed: [] });
     }
     if (path === "/api/image-media/image-e2e") return route.fulfill({ status: 200, contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><path fill="#b8d9cf" d="M0 0h8v8H0z"/></svg>' });
     if (path === "/api/generations") return json(route, []);
@@ -228,6 +232,8 @@ test("image generation confirms immediately and moves provider waiting into the 
   await expect(page.locator(".image-result--generating")).toBeVisible();
   await expect(page.getByRole("img", { name: prompt })).toBeVisible({ timeout: 5_000 });
   await expect(page.locator(".image-result--generating")).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByRole("img", { name: prompt })).toBeVisible();
 });
 
 test("a fast text edit is committed to the browser draft before the page leaves", async ({ page }) => {

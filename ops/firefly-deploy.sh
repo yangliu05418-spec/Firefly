@@ -197,14 +197,18 @@ stop_old_workers
 
 failures=0
 checks=0
-while [ "$checks" -lt 30 ]; do
+# Synchronous cutover validation catches immediate regressions without making
+# the release job idle for five minutes. Long-tail observation is handled by
+# firefly-health-audit.timer; the previous web slot remains available for the
+# existing 30-minute rollback window.
+while [ "$checks" -lt 6 ]; do
   checks=$((checks + 1))
   if curl --fail --silent --max-time 5 "http://127.0.0.1:$next_port/api/health/ready" >/dev/null; then failures=0; else failures=$((failures + 1)); fi
   if [ "$failures" -ge 2 ]; then
     failure_event=auto_rollback
     exit 1
   fi
-  sleep 10
+  sleep 3
 done
 
 mkdir -p /etc/firefly /var/lib/firefly/releases
