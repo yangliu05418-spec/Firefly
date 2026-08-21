@@ -5,7 +5,8 @@ import { config } from "./config.js";
  * - 多 Key 负载均衡：round-robin 轮询；
  * - 智能轮换：401（密钥失效）长冷却、429（限流）/5xx（服务错误）短冷却、
  *   网络错误瞬时冷却；失败自动切换下一个健康 Key，全部不可用才报错；
- * - 响应解析：兼容 content 数组（image_url 分段）、markdown 图片、message.images 数组与 data: URL。
+ * - 图片生成使用 OpenRouter 专用 Images API；文本能力继续使用 Chat Completions；
+ * - 响应解析兼容 Images API 的 data[].b64_json，以及旧版 Chat Completions 图片格式。
  */
 
 export type OpenRouterReference = { type: "image_url"; image_url: { url: string } } | { type: "text"; text: string };
@@ -94,6 +95,7 @@ export const releaseImageSlot = (userId: string) => {
 };
 
 const chatCompletionsUrl = () => config.openrouterBaseUrl.replace(/\/$/, "") + "/chat/completions";
+const imagesUrl = () => config.openrouterBaseUrl.replace(/\/$/, "") + "/images";
 
 type ChatRequestBody = {
   model: string;
@@ -103,7 +105,15 @@ type ChatRequestBody = {
   stream?: boolean;
 };
 
-const callWithRetry = async (body: ChatRequestBody): Promise<{ data: unknown; key: string }> => {
+type ImageRequestBody = {
+  model: string;
+  prompt: string;
+  n: number;
+  size?: string;
+  input_references?: { type: "image_url"; image_url: { url: string } }[];
+};
+
+const callWithRetry = async (body: ChatRequestBody | ImageRequestBody, url = chatCompletionsUrl()): Promise<{ data: unknown; key: string }> => {
   const lastError: OpenRouterError = new OpenRouterError("没有可用的 OpenRouter API Key", 503);
   for (let attempt = 0; attempt < Math.max(1, pool.size); attempt++) {
     const key = pool.next();
@@ -113,7 +123,7 @@ const callWithRetry = async (body: ChatRequestBody): Promise<{ data: unknown; ke
       const timer = setTimeout(() => controller.abort(), config.openrouterRequestTimeoutMs);
       let response: Response;
       try {
-        response = await fetch(chatCompletionsUrl(), {
+        response = await fetch(url, {
           method: "POST",
           headers: {
             Authorization: "Bearer " + key,
@@ -174,6 +184,17 @@ export const parseOpenRouterImages = (data: unknown): string[] => {
   const record: Record<string, unknown> = (data ?? {}) as Record<string, unknown>;
   const error = record.error as Record<string, unknown> | undefined;
   if (error) throw new OpenRouterError(String(error.message ?? error.code ?? "OpenRouter 返回错误"), 400);
+  const generated = record.data;
+  if (Array.isArray(generated)) {
+    for (const image of generated) {
+      if (!image || typeof image !== "object") continue;
+      const item = image as Record<string, unknown>;
+      const encoded = item.b64_json;
+      if (typeof encoded !== "string" || !encoded) continue;
+      const mediaType = typeof item.media_type === "string" && item.media_type.startsWith("image/") ? item.media_type : "image/png";
+      push(`data:${mediaType};base64,${encoded}`);
+    }
+  }
   const message = (record.choices as { message?: Record<string, unknown> }[] | undefined)?.[0]?.message;
   const content = message?.content;
   if (Array.isArray(content)) {
@@ -301,20 +322,19 @@ const isDataUrl = (url: string) => url.startsWith("data:");
 
 /** 生成单张图片：返回图片 URL（data: 或 https:），由调用方落盘 */
 export const generateSingleImage = async (input: { model: string; prompt: string; references: string[]; size: string }): Promise<string> => {
-  const content: (OpenRouterReference | { type: "image_url"; image_url: { url: string } })[] = [{ type: "text", text: input.prompt }];
-  input.references.forEach((url) => content.push({ type: "image_url", image_url: { url } }));
-  const base: ChatRequestBody = {
+  const base: ImageRequestBody = {
     model: input.model,
-    messages: [{ role: "user", content }],
-    modalities: ["image", "text"],
+    prompt: input.prompt,
+    n: 1,
+    ...(input.references.length ? { input_references: input.references.map((url) => ({ type: "image_url" as const, image_url: { url } })) } : {}),
   };
   let data: unknown;
   try {
-    ({ data } = await callWithRetry({ ...base, image: { size: input.size } }));
+    ({ data } = await callWithRetry({ ...base, size: input.size }, imagesUrl()));
   } catch (error) {
-    // 部分模型不接受 image.size 参数（400）→ 去掉尺寸参数重试一次
+    // 某些上游端点不接受显式像素尺寸，保留模型默认尺寸作为兼容回退。
     if (!(error instanceof OpenRouterError) || error.status !== 400) throw error;
-    ({ data } = await callWithRetry(base));
+    ({ data } = await callWithRetry(base, imagesUrl()));
   }
   const images = parseOpenRouterImages(data);
   if (!images.length) throw new OpenRouterError("OpenRouter 未返回图片内容（模型可能不支持当前参数）", 400);
