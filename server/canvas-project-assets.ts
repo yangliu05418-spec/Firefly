@@ -4,6 +4,7 @@ import { config } from "./config.js";
 import { users } from "./store.js";
 import { signedObjectUrl, signedProviderObjectUrl } from "./tos.js";
 import { stablePreviewUrl } from "./preview-url-cache.js";
+import type { GenerationInput } from "./provider.js";
 
 export type ResolvedCanvasProjectMedia = {
   objectKey: string;
@@ -58,6 +59,31 @@ export const canvasProjectAssetProviderUrl = (asset: CanvasProjectAsset) => {
   const media = resolveCanvasProjectMedia(asset, true);
   return signedProviderObjectUrl(media.objectKey);
 };
+
+type CanvasGenerationReferenceDependencies = {
+  readAsset(id: string): CanvasProjectAsset | null;
+  providerUrl(asset: CanvasProjectAsset): string;
+};
+
+const defaultCanvasGenerationReferenceDependencies: CanvasGenerationReferenceDependencies = {
+  readAsset: (id) => users.readCanvasProjectAsset(id),
+  providerUrl: canvasProjectAssetProviderUrl,
+};
+
+/** Signs durable canvas references immediately before the provider request. */
+export const resolveCanvasGenerationReferences = (
+  input: GenerationInput,
+  ownerId: string,
+  deps: CanvasGenerationReferenceDependencies = defaultCanvasGenerationReferenceDependencies,
+): GenerationInput => ({
+  ...input,
+  assets: input.assets.map((reference) => {
+    if (!reference.canvasProjectAssetId) return reference;
+    const asset = deps.readAsset(reference.canvasProjectAssetId);
+    if (!asset || asset.ownerId !== ownerId || asset.status !== "ready" || asset.kind !== reference.type) throw new Error(`参考素材「${reference.name}」不存在或尚未就绪`);
+    return { ...reference, canvasProjectAssetId: undefined, url: deps.providerUrl(asset), uploadId: undefined, assetId: undefined };
+  }),
+});
 
 export const publicCanvasProjectAsset = (asset: CanvasProjectAsset) => ({
   id: asset.id,

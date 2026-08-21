@@ -37,7 +37,7 @@ import { openRouterPool } from "./openrouter.js";
 import { publicImageGeneration } from "./image-generation-public.js";
 import { providerAssetName } from "./asset-name.js";
 import { acquireCanvasLease, releaseCanvasLease, renewCanvasLease, validateCanvasLease } from "./canvas-lease.js";
-import { canvasProjectAssetProviderUrl, canvasProjectAssetSignedUrl, createCanvasProjectMediaHandler, publicCanvasProjectAsset } from "./canvas-project-assets.js";
+import { canvasProjectAssetSignedUrl, createCanvasProjectMediaHandler, publicCanvasProjectAsset } from "./canvas-project-assets.js";
 import { readWorkerHealth, type WorkerHealthSnapshot } from "./worker-heartbeat.js";
 import { canvasGeneratedMediaId } from "./canvas-job-media.js";
 import { MediaValidationError, validateMedia } from "./media-validation.js";
@@ -430,6 +430,7 @@ app.post("/api/generations", requireAuth, async (req, res) => {
     const activeSession = session ?? createCreationSession(owner.id);
     const assets = [];
     for (const asset of requestedInput.assets) {
+      if (asset.canvasProjectAssetId) return res.status(404).json({ error: "引用素材不存在或无权访问" });
       if (asset.uploadId) {
         const media = users.readUpload(asset.uploadId);
         if (!media || media.ownerId !== owner.id) return res.status(404).json({ error: "引用素材不存在或已过期" });
@@ -1147,7 +1148,7 @@ app.post("/api/canvases/:id/jobs", requireAuth, async (req, res) => {
       const asset = byId.get(reference.assetId)!;
       const type = asset.kind;
       if ((reference.role === "first_frame" || reference.role === "last_frame") && type !== "image") throw new Error("首帧和尾帧只能引用图片素材");
-      return { id: asset.id, type, role: reference.role, url: canvasProjectAssetProviderUrl(asset), name: asset.title };
+      return { id: asset.id, type, role: reference.role, canvasProjectAssetId: asset.id, name: asset.title };
     });
     const input = validateGeneration({ ...body.payload.generation, prompt: [context.text, String(body.payload.generation.prompt ?? "")].filter(Boolean).join("\n\n"), assets: generationAssets });
     const taskId = crypto.randomUUID();
