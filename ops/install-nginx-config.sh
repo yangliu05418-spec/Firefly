@@ -35,14 +35,6 @@ for candidate in "$enabled_dir"/firefly.conf.bak-*; do
   archive_config "$candidate" "$base"
 done
 
-legacy_enabled="$enabled_dir/internal-image-studio.conf"
-if [ -L "$legacy_enabled" ]; then
-  rm "$legacy_enabled"
-else
-  archive_config "$legacy_enabled" "internal-image-studio.enabled.conf"
-fi
-archive_config "$available_dir/internal-image-studio.conf" "internal-image-studio.conf"
-
 install -o root -g root -m 0644 "$source_config" "$available_dir/firefly.conf"
 ln -sfn "$available_dir/firefly.conf" "$enabled_dir/firefly.conf"
 "$nginx_bin" -t
