@@ -48,6 +48,20 @@ describe("durable async job outbox", () => {
     store.close();
   });
 
+  it("reuses a client generation id without consuming capacity or duplicating the queue intent", () => {
+    const { store, owner } = createStore();
+    const first = task("task-idempotent", owner.id);
+    const intent = { queueName: "generation" as const, jobId: first.id, jobName: "generate", payload: { input: first.request } };
+
+    expect(store.admitTaskWithinLimit(first, 1, intent)).toMatchObject({ status: "created", task: { id: first.id, prompt: "雨夜列车" } });
+    expect(store.admitTaskWithinLimit({ ...first, prompt: "不应覆盖第一次请求", updatedAt: 200 }, 1, intent)).toMatchObject({
+      status: "existing", task: { id: first.id, prompt: "雨夜列车" },
+    });
+    expect(store.asyncJobOutboxStats()).toMatchObject({ pending: 1, dispatched: 0 });
+    expect(store.readAsyncJobIntent("generation", first.id)).toMatchObject({ status: "pending", payload: intent.payload });
+    store.close();
+  });
+
   it("persists the complete image payload needed after a web-process crash", () => {
     const { store, owner } = createStore();
     const createdAt = 200;

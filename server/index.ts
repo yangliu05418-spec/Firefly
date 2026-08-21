@@ -445,9 +445,18 @@ app.delete("/api/creation-sessions/:id", requireAuth, (req, res) => {
 
 app.post("/api/generations", requireAuth, async (req, res) => {
   try {
+    const requestedTaskId = z.string().uuid().optional().parse(req.body?.requestId);
+    const owner = res.locals.user as SessionUser;
+    if (requestedTaskId) {
+      const existing = await readTask(requestedTaskId, true);
+      if (existing) {
+        if (existing.ownerId !== owner.id || existing.deletedAt) return res.status(409).json({ error: "请求标识已被使用", requestId: res.locals.requestId });
+        const active = ["queued", "submitting", "running"].includes(existing.status) || existing.mediaStatus === "archiving";
+        return res.status(active ? 202 : 200).json(publicGenerationTask(existing));
+      }
+    }
     const requestedSessionId = z.string().min(1).max(200).optional().parse(req.body?.sessionId);
     const requestedInput = validateGeneration(req.body);
-    const owner = res.locals.user as SessionUser;
     const session = requestedSessionId ? users.readCreationSession(requestedSessionId) : null;
     if (requestedSessionId && (!session || session.ownerId !== owner.id)) return res.status(404).json({ error: "创作会话不存在" });
     const activeSession = session ?? createCreationSession(owner.id);
@@ -477,11 +486,17 @@ app.post("/api/generations", requireAuth, async (req, res) => {
       assets.push(asset);
     }
     const input = validateGeneration({ ...requestedInput, assets });
-    const id = crypto.randomUUID();
+    const id = requestedTaskId ?? crypto.randomUUID();
     const now = Date.now();
     const task: StoredTask = { id, sessionId: activeSession.id, ownerId: owner.id, visibility: "private", status: "queued", mediaStatus: "none", mediaRevision: 0, prompt: input.prompt, model: input.model, mode: input.mode, ratio: input.ratio, resolution: input.resolution, duration: input.duration, request: requestedInput, createdAt: now, updatedAt: now };
     const intent = { queueName: "generation" as const, jobId: id, jobName: "generate", payload: { input } };
-    if (!users.createTaskWithinLimit(task, config.maxActiveGenerationsPerUser, intent)) return res.status(429).json({ error: `你已有 ${config.maxActiveGenerationsPerUser} 个任务正在生成，请等待其中一个完成`, requestId: res.locals.requestId });
+    const admission = users.admitTaskWithinLimit(task, config.maxActiveGenerationsPerUser, intent);
+    if (admission.status === "limit") return res.status(429).json({ error: `你已有 ${config.maxActiveGenerationsPerUser} 个任务正在生成，请等待其中一个完成`, requestId: res.locals.requestId });
+    if (admission.status === "existing") {
+      if (admission.task.ownerId !== owner.id || admission.task.deletedAt) return res.status(409).json({ error: "请求标识已被使用", requestId: res.locals.requestId });
+      const active = ["queued", "submitting", "running"].includes(admission.task.status) || admission.task.mediaStatus === "archiving";
+      return res.status(active ? 202 : 200).json(publicGenerationTask(admission.task));
+    }
     users.touchCreationSession(activeSession.id, owner.id, input.prompt);
     console.info(JSON.stringify({ type: "generation_admitted", at: new Date().toISOString(), requestId: res.locals.requestId, taskId: id, userId: owner.id, model: input.model, mode: input.mode, assetCount: input.assets.length }));
     res.status(202).json(publicGenerationTask(task));
@@ -768,6 +783,12 @@ app.get("/api/image-generations", requireAuth, (req, res) => {
     return res.json(users.listImageGenerationsForSession(user.id, sessionId, limit).map(publicImageGeneration));
   }
   res.json(users.listImageGenerations(user.id, limit).map(publicImageGeneration));
+});
+
+app.get("/api/image-generations/:id", requireAuth, (req, res) => {
+  const user = res.locals.user as SessionUser;
+  const task = users.readImageGeneration(param(req.params.id));
+  task && task.ownerId === user.id ? res.json(publicImageGeneration(task)) : res.status(404).json({ error: "图片任务不存在" });
 });
 
 app.delete("/api/image-generations/:id", requireAuth, (req, res) => {
