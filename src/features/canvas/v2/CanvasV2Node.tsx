@@ -1,6 +1,6 @@
 import { lazy, memo, Suspense, useEffect, useState } from "react";
 import { Handle, NodeResizer, Position, type Node, type NodeProps } from "@xyflow/react";
-import { Box, CircleStop, Clapperboard, Crop, Download, ImageIcon, Images, LoaderCircle, Maximize2, Plus, RotateCw, ScanFace, TextCursorInput, Users, WandSparkles, X } from "lucide-react";
+import { Box, CircleStop, Clapperboard, Crop, Download, ImageIcon, Images, Library, LoaderCircle, Maximize2, Plus, RotateCw, ScanFace, TextCursorInput, Upload, Users, WandSparkles, X } from "lucide-react";
 import type { CanvasNodeTypeV2, CanvasNodeV2 } from "../canvas-v2-types";
 import { LazyCanvasVideo } from "../components/media/LazyCanvasVideo";
 import type { CanvasMenuAnchor, CanvasReferenceSummary } from "./canvas-ux";
@@ -23,6 +23,8 @@ export type CanvasFlowData = {
   onSelection: (id: string, text: string) => void;
   onCrop: (id: string) => void;
   onRotate: (id: string) => void;
+  onUpload: (id: string, file: File) => void;
+  onPickAsset: (id: string) => void;
 };
 export type CanvasFlowNode = Node<CanvasFlowData, CanvasNodeTypeV2>;
 
@@ -38,9 +40,29 @@ function CanvasV2NodeView({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const status = domain.data.status ?? "idle";
   const mediaStyle = { transform: `rotate(${domain.data.rotation ?? 0}deg)` };
   const canBranch = domain.type !== "group" && domain.type !== "legacy-audio";
+  const canFill = domain.type === "image" || domain.type === "video" || domain.type === "character" || domain.type === "scene";
+  const bodyIsInteractive = domain.type === "text" || domain.type === "legacy-audio" || (domain.type === "video" && Boolean(mediaUrl));
+  const uploadAccept = domain.type === "video" ? "video/mp4,video/quicktime" : "image/*";
   useEffect(() => setImageError(false), [domain.data.projectAssetId, status]);
 
-  return <article className={`canvas-v2-node canvas-v2-node--${domain.type} canvas-v2-node--${status}${data.references.length ? " canvas-v2-node--has-references" : ""}`}>
+  const emptyMedia = canFill ? <div className="canvas-v2-node__empty">
+    <Icon />
+    <span>{imageError ? "素材暂时无法显示" : emptyCopy[domain.type]}</span>
+    {!readOnly && <div className="canvas-v2-node__empty-actions nodrag nowheel">
+      <label>
+        <Upload />
+        <span>本地上传</span>
+        <input type="file" accept={uploadAccept} onChange={(event) => {
+          const file = event.currentTarget.files?.[0];
+          event.currentTarget.value = "";
+          if (file) data.onUpload(id, file);
+        }} />
+      </label>
+      <button type="button" onClick={() => data.onPickAsset(id)}><Library /><span>资产库</span></button>
+    </div>}
+  </div> : <div className="canvas-v2-node__empty"><Icon /><span>{emptyCopy[domain.type]}</span></div>;
+
+  return <article data-node-id={id} className={`canvas-v2-node canvas-v2-node--${domain.type} canvas-v2-node--${status}${data.references.length ? " canvas-v2-node--has-references" : ""}`}>
     {!readOnly && <NodeResizer minWidth={180} minHeight={120} isVisible={selected} lineClassName="canvas-v2-resize-line" handleClassName="canvas-v2-resize-handle" />}
     <Handle type="target" id="left" position={Position.Left} className="canvas-v2-handle" isConnectable={!readOnly} />
     <Handle type="source" id="right" position={Position.Right} className="canvas-v2-handle" isConnectable={!readOnly} />
@@ -62,12 +84,12 @@ function CanvasV2NodeView({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         </span>;
       })}</div>
     </div>}
-    <div className="canvas-v2-node__body nodrag nowheel">
+    <div className={`canvas-v2-node__body${bodyIsInteractive ? " nodrag nowheel" : ""}`}>
       {domain.type === "text" ? <Suspense fallback={<div className="canvas-v2-node__empty" aria-busy="true"><LoaderCircle className="spin" /><span>正在载入文本编辑器</span></div>}><CanvasRichText value={domain.data.markdown ?? ""} richText={domain.data.richText} readOnly={readOnly} onChange={(markdown, richText) => data.onChange(id, { markdown, richText })} onSelection={(selectionText) => data.onSelection(id, selectionText)} /></Suspense> :
         domain.type === "group" ? <div className="canvas-v2-node__group"><Users /><span>内容分组</span><small>拖动节点到这里整理镜头关系</small></div> :
         domain.type === "legacy-audio" ? mediaUrl ? <audio className="canvas-v2-node__media canvas-v2-node__audio" src={mediaUrl} controls preload="metadata" /> : <div className="canvas-v2-node__empty"><Icon /><span>{emptyCopy[domain.type]}</span></div> :
-        domain.type === "video" ? mediaUrl ? <LazyCanvasVideo src={mediaUrl} /> : <div className="canvas-v2-node__empty"><Icon /><span>{emptyCopy[domain.type]}</span></div> :
-        mediaUrl && !imageError ? <img className="canvas-v2-node__media" style={mediaStyle} src={mediaUrl} alt={domain.title} loading="lazy" draggable={false} onError={() => setImageError(true)} /> : <div className="canvas-v2-node__empty"><Icon /><span>{imageError ? "素材暂时无法显示" : emptyCopy[domain.type]}</span></div>}
+        domain.type === "video" ? mediaUrl ? <LazyCanvasVideo src={mediaUrl} /> : emptyMedia :
+        mediaUrl && !imageError ? <img className="canvas-v2-node__media" style={mediaStyle} src={mediaUrl} alt={domain.title} loading="lazy" draggable={false} onError={() => setImageError(true)} /> : emptyMedia}
     </div>
     {selected && domain.type !== "group" && <footer className="canvas-v2-node__tools nodrag">
       {persistedMediaUrl && <><a href={`${persistedMediaUrl}?download=1`} aria-label="下载"><Download /></a><button onClick={() => data.onInspect(id)} aria-label="放大"><Maximize2 /></button>{domain.type === "video" && !readOnly && <button onClick={() => data.onExtractFrame(id)} aria-label="抽取中间帧" title="抽取中间帧"><Images /></button>}{domain.type !== "video" && domain.type !== "legacy-audio" && !readOnly && <><button onClick={() => data.onCrop(id)} aria-label="裁剪"><Crop /></button><button onClick={() => data.onRotate(id)} aria-label="旋转并创建派生图"><RotateCw /></button></>}</>}
