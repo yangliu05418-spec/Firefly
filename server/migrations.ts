@@ -2,9 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 
-export const CURRENT_SCHEMA_VERSION = 7;
-// Read the next expand-only schema before any release creates it. This bridge
-// keeps the old blue/green slot restartable after a schema-8 migration.
+export const CURRENT_SCHEMA_VERSION = 8;
 export const MAX_SUPPORTED_SCHEMA_VERSION = 8;
 
 const baseSchema = `
@@ -70,6 +68,25 @@ const baseSchema = `
   CREATE INDEX IF NOT EXISTS media_objects_task_kind_idx ON media_objects(task_id, kind);
   CREATE INDEX IF NOT EXISTS media_objects_upload_idx ON media_objects(upload_id);
   CREATE INDEX IF NOT EXISTS media_objects_delete_idx ON media_objects(status, updated_at);
+  CREATE TABLE IF NOT EXISTS upload_sessions (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    object_key TEXT NOT NULL UNIQUE,
+    tos_upload_id TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    media_kind TEXT NOT NULL CHECK (media_kind IN ('image', 'video', 'audio')),
+    content_type TEXT NOT NULL,
+    size INTEGER NOT NULL CHECK (size > 0),
+    part_size INTEGER NOT NULL CHECK (part_size > 0),
+    part_count INTEGER NOT NULL CHECK (part_count > 0),
+    state TEXT NOT NULL CHECK (state IN ('uploading', 'finalizing', 'completed', 'failed', 'cancelled')),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    FOREIGN KEY (owner_id) REFERENCES users(id)
+  );
+  CREATE INDEX IF NOT EXISTS upload_sessions_owner_state_idx ON upload_sessions(owner_id, state, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS upload_sessions_expiry_idx ON upload_sessions(expires_at);
   CREATE TABLE IF NOT EXISTS user_assets (
     id TEXT PRIMARY KEY,
     provider_asset_id TEXT,
@@ -370,6 +387,30 @@ const addAsyncJobOutbox = (database: Database.Database) => {
   `);
 };
 
+const addUploadSessions = (database: Database.Database) => {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS upload_sessions (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      object_key TEXT NOT NULL UNIQUE,
+      tos_upload_id TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      media_kind TEXT NOT NULL CHECK (media_kind IN ('image', 'video', 'audio')),
+      content_type TEXT NOT NULL,
+      size INTEGER NOT NULL CHECK (size > 0),
+      part_size INTEGER NOT NULL CHECK (part_size > 0),
+      part_count INTEGER NOT NULL CHECK (part_count > 0),
+      state TEXT NOT NULL CHECK (state IN ('uploading', 'finalizing', 'completed', 'failed', 'cancelled')),
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      FOREIGN KEY (owner_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS upload_sessions_owner_state_idx ON upload_sessions(owner_id, state, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS upload_sessions_expiry_idx ON upload_sessions(expires_at);
+  `);
+};
+
 export const migrateDatabase = (databasePath: string) => {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const database = new Database(databasePath);
@@ -408,6 +449,10 @@ export const migrateDatabase = (databasePath: string) => {
       if (version < 7) {
         addAsyncJobOutbox(database);
         database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(7, "add-async-job-outbox", Date.now());
+      }
+      if (version < 8) {
+        addUploadSessions(database);
+        database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(8, "add-upload-sessions", Date.now());
       }
       assertSchemaVersion(database);
     }).exclusive();
