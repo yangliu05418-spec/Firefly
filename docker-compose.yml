@@ -59,6 +59,11 @@ services:
         condition: service_completed_successfully
     stop_grace_period: 35s
     logging: *default-logging
+    healthcheck:
+      test: ["CMD", "node", "dist-server/worker-healthcheck.js", "generation"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
   media-worker:
     build: .
     restart: unless-stopped
@@ -80,6 +85,11 @@ services:
         condition: service_completed_successfully
     stop_grace_period: 35s
     logging: *default-logging
+    healthcheck:
+      test: ["CMD", "node", "dist-server/worker-healthcheck.js", "media"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
   canvas-worker:
     build: .
     restart: unless-stopped
@@ -96,6 +106,11 @@ services:
         condition: service_completed_successfully
     stop_grace_period: 35s
     logging: *default-logging
+    healthcheck:
+      test: ["CMD", "node", "dist-server/worker-healthcheck.js", "canvas"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
   redis:
     image: redis:7.4-alpine
     restart: unless-stopped

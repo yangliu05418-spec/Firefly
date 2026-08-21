@@ -125,6 +125,8 @@ jobs:
 
           grep -q 'assert_slot_container.*current_slot' ops/firefly-deploy.sh
           grep -q 'assert_legacy_container.*service' ops/firefly-deploy.sh
+          grep -q '/api/health/workers' ops/firefly-deploy.sh
+          grep -q 'failed_worker_readiness' ops/firefly-deploy.sh
 
       - name: Verify co-hosted Nginx configuration is preserved
         shell: bash
@@ -252,6 +254,19 @@ jobs:
             -e DATABASE_PATH=/data/firefly.db \
             -e MEDIA_STORAGE_BACKEND=legacy \
             firefly-ci:${{ github.sha }} node dist-server/migrate.js
+          for role_command in 'worker:dist-server/worker.js' 'media:dist-server/media-worker.js' 'canvas:dist-server/canvas-worker.js'; do
+            role=${role_command%%:*}
+            command=${role_command#*:}
+            docker run -d --name "firefly-ci-$role" --network firefly-ci \
+              -v firefly-ci-data:/data \
+              -e PUBLIC_ORIGIN=http://127.0.0.1:18090 \
+              -e REDIS_URL=redis://firefly-ci-redis:6379 \
+              -e SESSION_SECRET=ci-only-session-secret-at-least-32-bytes \
+              -e DATABASE_PATH=/data/firefly.db \
+              -e UPLOAD_DIR=/data/uploads \
+              -e MEDIA_STORAGE_BACKEND=legacy \
+              firefly-ci:${{ github.sha }} node "$command"
+          done
           docker run -d --name firefly-ci-web --network firefly-ci -p 127.0.0.1:18090:8090 \
             -v firefly-ci-data:/data \
             -e PUBLIC_ORIGIN=http://127.0.0.1:18090 \
@@ -262,7 +277,8 @@ jobs:
             -e MEDIA_STORAGE_BACKEND=legacy \
             firefly-ci:${{ github.sha }}
           for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:18090/api/health/ready >/dev/null; then exit 0; fi
+            if curl --fail --silent http://127.0.0.1:18090/api/health/ready >/dev/null && \
+               curl --fail --silent http://127.0.0.1:18090/api/health/workers >/dev/null; then exit 0; fi
             sleep 2
           done
           docker logs firefly-ci-web

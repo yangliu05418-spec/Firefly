@@ -10,6 +10,7 @@ import { transcodePreview } from "./preview-transcode.js";
 import { closeWorkersWithin } from "./shutdown.js";
 import { markAssetIngestFailed, registerQueuedAsset } from "./asset-ingest.js";
 import { copyPreparedCanvasAsset } from "./canvas-assets.js";
+import { startWorkerHeartbeat } from "./worker-heartbeat.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const numberHeader = (value: unknown) => Number(value ?? 0) || 0;
@@ -255,6 +256,9 @@ const assetWorker = new Worker("asset-ingest", async (job) => {
   return registerQueuedAsset(job.data.assetId);
 }, { connection, concurrency: 2, lockDuration: 240_000 });
 
+await Promise.all([worker.waitUntilReady(), previewWorker.waitUntilReady(), assetWorker.waitUntilReady()]);
+const heartbeat = await startWorkerHeartbeat(connection, "media");
+
 previewWorker.on("failed", (job, error) => {
   console.warn(JSON.stringify({ type: "tos_preview_failed", at: new Date().toISOString(), taskId: job?.data.taskId, attempt: job?.attemptsMade, code: (error as { code?: string }).code ?? "unknown", message: error.message }));
 });
@@ -340,6 +344,7 @@ let shuttingDown = false;
 const shutdown = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
+  await heartbeat.stop();
   clearInterval(reconcile); clearInterval(archiveReconcile); clearInterval(posterReconcile); clearInterval(previewReconcile); clearInterval(assetReconcile); clearInterval(canvasCopyReconcile);
   const graceful = await closeWorkersWithin([worker, previewWorker, assetWorker], config.shutdownGraceMs);
   console.info(JSON.stringify({ type: "worker_shutdown", at: new Date().toISOString(), worker: "media", graceful }));

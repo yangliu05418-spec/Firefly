@@ -8,6 +8,7 @@ import { downloadImageBuffer, generateCanvasText, generateSingleImage } from "./
 import { storeGeneratedImage } from "./generated-media.js";
 import { canvasProjectAssetProviderUrl } from "./canvas-project-assets.js";
 import { closeWorkersWithin } from "./shutdown.js";
+import { startWorkerHeartbeat } from "./worker-heartbeat.js";
 
 type TextPayload = { instruction: string; currentText: string; context: string };
 type ImagePayload = { prompt: string; model: string; ratio: string; resolution: string; referenceAssetIds: string[] };
@@ -90,6 +91,8 @@ const worker = new Worker<CanvasQueuePayload>("canvas-jobs", processCanvasJob, {
   concurrency: 2,
   lockDuration: Math.max(300_000, config.openrouterRequestTimeoutMs + 60_000),
 });
+await worker.waitUntilReady();
+const heartbeat = await startWorkerHeartbeat(redis, "canvas");
 
 worker.on("failed", (job, error) => console.error(JSON.stringify({ type: "canvas_job_failed", at: new Date().toISOString(), jobId: job?.id, code: (error as { code?: string }).code ?? "unknown", message: error.message })));
 
@@ -97,6 +100,7 @@ let shuttingDown = false;
 const shutdown = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
+  await heartbeat.stop();
   const graceful = await closeWorkersWithin([worker], config.shutdownGraceMs);
   console.info(JSON.stringify({ type: "worker_shutdown", at: new Date().toISOString(), worker: "canvas", graceful }));
   await redis.quit(); users.close(); process.exit(0);
