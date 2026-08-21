@@ -223,6 +223,11 @@ test("node menus stay anchored, text expands outside the flow transform, and ref
   await expect(menu.getByRole("menuitem").first()).toBeFocused();
   await page.keyboard.press("ArrowDown");
   await expect(menu.getByRole("menuitem").nth(1)).toBeFocused();
+  // Geometry assertions must observe the settled overlay, not an intermediate
+  // frame of the 180ms entrance animation on faster Linux Chromium runners.
+  await menu.evaluate(async (element) => {
+    await Promise.all(element.getAnimations().map((animation) => animation.finished));
+  });
   const menuBox = await menu.boundingBox();
   expect(plusBox).not.toBeNull(); expect(menuBox).not.toBeNull();
   const placement = await menu.getAttribute("data-placement");
