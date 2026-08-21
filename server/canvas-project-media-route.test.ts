@@ -16,7 +16,7 @@ describe("GET /api/canvas-project-assets/:id/media", () => {
     app.get("/api/canvas-project-assets/:id/media", createCanvasProjectMediaHandler({
       readAsset: () => stored,
       canAccessCanvas: (_canvasId, requester) => requester === canvasOwner,
-      signedUrl: (_asset, attachment) => `https://tos.example/video.mp4?download=${attachment ? 1 : 0}`,
+      signedUrl: async (_asset, attachment) => `https://tos.example/video.mp4?download=${attachment ? 1 : 0}`,
       cacheControl: "private, max-age=60",
     }));
     const server = app.listen(0, "127.0.0.1"); servers.push(server);

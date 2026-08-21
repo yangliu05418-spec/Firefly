@@ -3,6 +3,7 @@ import type { RequestHandler } from "express";
 import { config } from "./config.js";
 import { users } from "./store.js";
 import { signedObjectUrl, signedProviderObjectUrl } from "./tos.js";
+import { stablePreviewUrl } from "./preview-url-cache.js";
 
 export type ResolvedCanvasProjectMedia = {
   objectKey: string;
@@ -45,9 +46,11 @@ export const resolveCanvasProjectMedia = (asset: CanvasProjectAsset, preferOrigi
   throw new Error(`参考素材「${asset.title}」无法读取`);
 };
 
-export const canvasProjectAssetSignedUrl = (asset: CanvasProjectAsset, download = false) => {
+export const canvasProjectAssetSignedUrl = async (asset: CanvasProjectAsset, download = false) => {
   const media = resolveCanvasProjectMedia(asset, download);
-  return signedObjectUrl(media.objectKey, { download, fileName: media.fileName });
+  return download
+    ? signedObjectUrl(media.objectKey, { download: true, fileName: media.fileName })
+    : stablePreviewUrl({ objectKey: media.objectKey, fileName: media.fileName });
 };
 
 /** Provider references always use the archived source-quality object, never the low-bitrate browser preview. */
@@ -76,9 +79,9 @@ export const publicCanvasProjectAsset = (asset: CanvasProjectAsset) => ({
 export const createCanvasProjectMediaHandler = (deps: {
   readAsset: (id: string) => CanvasProjectAsset | null;
   canAccessCanvas: (canvasId: string, userId: string) => boolean;
-  signedUrl: (asset: CanvasProjectAsset, download: boolean) => string;
+  signedUrl: (asset: CanvasProjectAsset, download: boolean) => string | Promise<string>;
   cacheControl: string;
-}): RequestHandler => (req, res) => {
+}): RequestHandler => async (req, res) => {
   try {
     const user = res.locals.user as { id?: string } | undefined;
     const assetId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -87,6 +90,6 @@ export const createCanvasProjectMediaHandler = (deps: {
     if (asset.status !== "ready") return res.status(asset.status === "copying" ? 425 : 409).json({ error: asset.status === "copying" ? "画布素材正在归档" : "画布素材归档失败" });
     res.setHeader("Cache-Control", deps.cacheControl);
     res.setHeader("Vary", "Cookie");
-    res.redirect(302, deps.signedUrl(asset, req.query.download === "1"));
+    res.redirect(302, await deps.signedUrl(asset, req.query.download === "1"));
   } catch { res.status(502).json({ error: "画布素材暂时无法读取" }); }
 };

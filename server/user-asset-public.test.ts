@@ -14,7 +14,12 @@ describe("public user asset", () => {
       id: "asset-local-with space",
       uploadId: "upload-1",
       url: "https://provider.example/temporary-reference.png"
-    })).URL).toBe("/api/assets/asset-local-with%20space/source");
+    })).URL).toBe("/api/assets/asset-local-with%20space/source?variant=thumbnail");
+  });
+
+  it("keeps upload-backed video URLs unprocessed", () => {
+    expect(publicUserAsset(asset({ assetType: "Video", uploadId: "upload-1" })).URL)
+      .toBe("/api/assets/asset-local-1/source");
   });
 
   it("preserves a provider URL for legacy URL-only assets", () => {

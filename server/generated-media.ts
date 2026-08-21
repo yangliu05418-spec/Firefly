@@ -16,7 +16,7 @@ export const storeGeneratedImage = async (input: { ownerId: string; body: Buffer
   const mediaId = "gen-" + crypto.randomUUID();
   const extension = (input.contentType.includes("png") ? "png" : input.contentType.includes("webp") ? "webp" : input.contentType.includes("jpeg") || input.contentType.includes("jpg") ? "jpg" : "png");
   const objectKey = generatedObjectKey(input.ownerId, mediaId, extension);
-  const stored = await putObjectBuffer(objectKey, input.body, input.contentType);
+  const stored = await putObjectBuffer(objectKey, input.body, input.contentType, input.fileName);
   const now = Date.now();
   const media: MediaObject = {
     id: mediaId, ownerId: input.ownerId, kind: "generated", objectKey, status: "ready",

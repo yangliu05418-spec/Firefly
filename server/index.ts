@@ -719,7 +719,10 @@ app.get("/api/assets/:id/source", requireAuth, async (req, res) => {
     if (!media || media.ownerId !== user.id || media.status !== "ready") return res.status(404).json({ error: "素材源文件不存在" });
     res.setHeader("Cache-Control", previewRedirectCacheHeader);
     res.setHeader("Vary", "Cookie");
-    const target = await stablePreviewUrl({ objectKey: media.objectKey, fileName: media.fileName });
+    const process = req.query.variant === "thumbnail" && media.contentType.startsWith("image/")
+      ? "image/resize,w_640/format,webp"
+      : undefined;
+    const target = await stablePreviewUrl({ objectKey: media.objectKey, fileName: media.fileName, process });
     console.info(JSON.stringify({ type: "tos_asset_redirect", at: new Date().toISOString(), assetId: asset.id, userId: user.id }));
     res.redirect(302, target);
   } catch (error) { respondError(res, error, 502); }
@@ -845,7 +848,11 @@ app.get("/api/image-media/:id", requireAuth, async (req, res) => {
     const download = req.query.download === "1";
     res.setHeader("Cache-Control", previewRedirectCacheHeader);
     res.setHeader("Vary", "Cookie");
-    res.redirect(302, signedObjectUrl(media.objectKey, download ? { download: true, fileName: media.fileName } : { fileName: media.fileName }));
+    const process = !download && req.query.variant === "thumbnail" ? "image/resize,w_960/format,webp" : undefined;
+    const target = download
+      ? signedObjectUrl(media.objectKey, { download: true, fileName: media.fileName })
+      : await stablePreviewUrl({ objectKey: media.objectKey, fileName: media.fileName, process });
+    res.redirect(302, target);
   } catch (error) { respondError(res, error, 502); }
 });
 
@@ -1414,7 +1421,7 @@ app.delete("/api/canvases/:id/exports/:exportId", requireAuth, async (req, res) 
 
 app.get("/api/canvas-media/:assetId", requireAuth, createCanvasMediaHandler({
   readCanvasAsset: (assetId) => users.readCanvasAsset(assetId),
-  signedObjectUrl: (objectKey, options) => signedObjectUrl(objectKey, options),
+  signedObjectUrl: (objectKey, options) => stablePreviewUrl({ objectKey, fileName: options.fileName }),
   cacheControl: previewRedirectCacheHeader
 }));
 

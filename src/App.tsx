@@ -792,7 +792,7 @@ function ImageResultsGallery({ results, onInsertCanvas, onRemove }: { results: I
       {result.prompt && <p className="image-result__prompt" title={result.prompt}>「{result.prompt}」</p>}
       {status === "generating" ? <div className="image-result__pending" role="status"><span className="image-result__pending-mark"><WandSparkles /></span><span><b>请求已接收</b><small>正在生成画面，完成后会自动显示在这里。</small></span><div className="image-result__pending-cells" aria-hidden="true">{Array.from({ length: Math.min(4, Math.max(1, count)) }, (_, index) => <i key={index} />)}</div></div> : status === "failed" ? <div className="image-result__failure" role="alert"><X /><span><b>这次没有生成成功</b><small>{result.error ?? "请检查网络或调整参数后重新生成。"}</small></span></div> : <div className="image-result__grid">
         {result.items.map((item) => <figure key={item.mediaId} style={{ aspectRatio: result.ratio.replace(":", " / ") }}>
-          <img src={"/api/image-media/" + encodeURIComponent(item.mediaId)} alt={result.prompt || "生成图片"} loading="lazy" decoding="async" />
+          <img src={"/api/image-media/" + encodeURIComponent(item.mediaId) + "?variant=thumbnail"} alt={result.prompt || "生成图片"} loading="lazy" decoding="async" />
           <figcaption>
             <a href={"/api/image-media/" + encodeURIComponent(item.mediaId) + "?download=1"} download title="下载图片"><Download /> 下载</a>
             <button onClick={() => onInsertCanvas({ kind: "generated", mediaId: item.mediaId, title: (result.prompt || "生成图片").slice(0, 24) })} title="插入画布"><LayoutGrid /> 插入画布</button>
