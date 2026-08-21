@@ -1,7 +1,8 @@
 /* Firefly private thumbnail cache. Originals and video ranges intentionally bypass it. */
-const PRIVATE_MEDIA_CACHE = "firefly-private-thumbnails-v1";
-const PRIVATE_MEDIA_CACHE_PREFIX = "firefly-private-thumbnails-";
+const PRIVATE_MEDIA_LEGACY_CACHE = "firefly-private-thumbnails-v1";
+const PRIVATE_MEDIA_CACHE_PREFIX = "firefly-private-thumbnails-v2-";
 const MAX_PRIVATE_THUMBNAILS = 300;
+let activeScope = null;
 
 const isPrivateThumbnail = (request) => {
   if (request.method !== "GET" || request.destination !== "image") return false;
@@ -29,7 +30,8 @@ const canonicalCacheRequest = (request) => {
 };
 
 const cacheFirst = async (request) => {
-  const cache = await caches.open(PRIVATE_MEDIA_CACHE);
+  if (!activeScope) return fetch(request);
+  const cache = await caches.open(`${PRIVATE_MEDIA_CACHE_PREFIX}${activeScope}`);
   const { key, isRetry } = canonicalCacheRequest(request);
   const cached = isRetry ? undefined : await cache.match(key);
   if (cached) return cached;
@@ -44,8 +46,7 @@ const cacheFirst = async (request) => {
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => {
   event.waitUntil((async () => {
-    const names = await caches.keys();
-    await Promise.all(names.filter((name) => name.startsWith(PRIVATE_MEDIA_CACHE_PREFIX) && name !== PRIVATE_MEDIA_CACHE).map((name) => caches.delete(name)));
+    await caches.delete(PRIVATE_MEDIA_LEGACY_CACHE);
     await self.clients.claim();
   })());
 });
@@ -53,5 +54,14 @@ self.addEventListener("fetch", (event) => {
   if (isPrivateThumbnail(event.request)) event.respondWith(cacheFirst(event.request));
 });
 self.addEventListener("message", (event) => {
-  if (event.data?.type === "CLEAR_PRIVATE_MEDIA_CACHE") event.waitUntil(caches.delete(PRIVATE_MEDIA_CACHE));
+  if (event.data?.type === "SET_PRIVATE_MEDIA_CACHE_SCOPE") {
+    const userId = event.data.userId;
+    activeScope = typeof userId === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(userId) ? userId : null;
+    event.ports[0]?.postMessage({ ok: Boolean(activeScope) });
+  }
+  if (event.data?.type === "CLEAR_PRIVATE_MEDIA_CACHE_SCOPE") activeScope = null;
+  if (event.data?.type === "CLEAR_PRIVATE_MEDIA_CACHE") {
+    activeScope = null;
+    event.waitUntil(caches.keys().then((names) => Promise.all(names.filter((name) => name.startsWith(PRIVATE_MEDIA_CACHE_PREFIX) || name === PRIVATE_MEDIA_LEGACY_CACHE).map((name) => caches.delete(name)))));
+  }
 });

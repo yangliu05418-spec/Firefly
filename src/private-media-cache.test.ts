@@ -1,19 +1,19 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PRIVATE_MEDIA_CACHE_NAME, PRIVATE_MEDIA_SERVICE_WORKER_URL, forgetPrivateMediaCacheUser, persistPrivateMediaStorage, scopePrivateMediaCacheToUser } from "./private-media-cache";
+import { PRIVATE_MEDIA_CACHE_NAME, PRIVATE_MEDIA_CACHE_PREFIX, PRIVATE_MEDIA_LEGACY_CACHE_NAME, PRIVATE_MEDIA_SERVICE_WORKER_URL, deactivatePrivateMediaCacheScope, forgetPrivateMediaCacheUser, persistPrivateMediaStorage, scopePrivateMediaCacheToUser } from "./private-media-cache";
 
 const browser = () => {
   const values = new Map<string, string>();
   const deleted: string[] = [];
   const messages: unknown[] = [];
   vi.stubGlobal("window", {
-    caches: { delete: async (name: string) => { deleted.push(name); return true; } },
+    caches: { keys: async () => [`${PRIVATE_MEDIA_CACHE_PREFIX}user-a`], delete: async (name: string) => { deleted.push(name); return true; } },
     localStorage: {
       getItem: (key: string) => values.get(key) ?? null,
       setItem: (key: string, value: string) => { values.set(key, value); },
       removeItem: (key: string) => { values.delete(key); },
     },
   });
-  vi.stubGlobal("navigator", { serviceWorker: { controller: { postMessage: (message: unknown) => messages.push(message) } } });
+  vi.stubGlobal("navigator", { serviceWorker: { controller: { postMessage: (message: unknown, transfer?: MessagePort[]) => { messages.push(message); transfer?.[0]?.postMessage({ ok: true }); } } } });
   return { values, deleted, messages };
 };
 
@@ -28,11 +28,18 @@ describe("private media cache account scope", () => {
     const state = browser();
     await scopePrivateMediaCacheToUser("user-a");
     await scopePrivateMediaCacheToUser("user-a");
-    expect(state.deleted).toEqual([]);
+    expect(state.deleted).toEqual([PRIVATE_MEDIA_LEGACY_CACHE_NAME, PRIVATE_MEDIA_LEGACY_CACHE_NAME]);
 
     await scopePrivateMediaCacheToUser("user-b");
-    expect(state.deleted).toEqual([PRIVATE_MEDIA_CACHE_NAME]);
-    expect(state.messages).toEqual([{ type: "CLEAR_PRIVATE_MEDIA_CACHE" }]);
+    expect(state.deleted).toContain(PRIVATE_MEDIA_CACHE_NAME);
+    expect(state.deleted).toContain(PRIVATE_MEDIA_LEGACY_CACHE_NAME);
+    expect(state.deleted).toContain(`${PRIVATE_MEDIA_CACHE_PREFIX}user-a`);
+    expect(state.messages).toEqual([
+      { type: "SET_PRIVATE_MEDIA_CACHE_SCOPE", userId: "user-a" },
+      { type: "SET_PRIVATE_MEDIA_CACHE_SCOPE", userId: "user-a" },
+      { type: "CLEAR_PRIVATE_MEDIA_CACHE" },
+      { type: "SET_PRIVATE_MEDIA_CACHE_SCOPE", userId: "user-b" },
+    ]);
     expect([...state.values.values()]).toEqual(["user-b"]);
   });
 
@@ -40,8 +47,27 @@ describe("private media cache account scope", () => {
     const state = browser();
     await scopePrivateMediaCacheToUser("user-a");
     await forgetPrivateMediaCacheUser();
-    expect(state.deleted).toEqual([PRIVATE_MEDIA_CACHE_NAME]);
+    expect(state.deleted).toContain(PRIVATE_MEDIA_CACHE_NAME);
+    expect(state.deleted).toContain(PRIVATE_MEDIA_LEGACY_CACHE_NAME);
+    expect(state.deleted).toContain(`${PRIVATE_MEDIA_CACHE_PREFIX}user-a`);
     expect(state.values.size).toBe(0);
+  });
+
+  it("sets the worker scope even when localStorage is unavailable", async () => {
+    const state = browser();
+    vi.stubGlobal("window", {
+      caches: { keys: async () => [], delete: async () => true },
+      localStorage: { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); } },
+    });
+    await scopePrivateMediaCacheToUser("user-private");
+    expect(state.messages.at(-1)).toEqual({ type: "SET_PRIVATE_MEDIA_CACHE_SCOPE", userId: "user-private" });
+  });
+
+  it("deactivates cache reads as soon as authentication is lost", async () => {
+    const state = browser();
+    await scopePrivateMediaCacheToUser("user-a");
+    await deactivatePrivateMediaCacheScope();
+    expect(state.messages.at(-1)).toEqual({ type: "CLEAR_PRIVATE_MEDIA_CACHE_SCOPE" });
   });
 
   it("asks the browser to protect native asset caches from automatic eviction", async () => {

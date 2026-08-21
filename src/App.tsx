@@ -20,9 +20,10 @@ import { recoverComposerDraftAsset } from "./composer-draft-recovery";
 import { reconcileComposerAssets } from "./composer-assets";
 import { uploadFileUntilAccepted } from "./upload-acceptance";
 import { assetPreviewSource } from "./asset-preview-source";
-import { forgetPrivateMediaCacheUser, scopePrivateMediaCacheToUser } from "./private-media-cache";
+import { deactivatePrivateMediaCacheScope, forgetPrivateMediaCacheUser, scopePrivateMediaCacheToUser } from "./private-media-cache";
 import { usePendingAssetPreviews } from "./use-pending-asset-previews";
 import { RecoveringImage, RecoveringThumbnail } from "./recovering-image";
+import { bootstrapSession } from "./auth-bootstrap";
 
 const modeLabels: Record<CreationMode, string> = { omni: "全能参考", first_frame: "首帧生成", first_last: "首尾帧", edit: "视频编辑", extend: "视频续写", text: "文本生成" };
 const modeNotes: Record<CreationMode, string> = { omni: "自由组合图片、视频和音频", first_frame: "锁定开场画面继续创作", first_last: "精确控制起点与落点", edit: "替换、增删或重绘画面", extend: "向前、向后或多段衔接", text: "只用提示词生成镜头" };
@@ -1085,9 +1086,8 @@ function Studio({ user, route, navigate, logout }: { user: SessionUser; route: s
 export function App() {
   const [route, setRoute] = useState(location.pathname); const [auth, setAuth] = useState<SessionUser | null | undefined>(undefined);
   const navigate = (path: string) => { history.pushState({}, "", path); setRoute(path); };
-  useEffect(() => { const pop = () => setRoute(location.pathname); addEventListener("popstate", pop); api.get<{ authenticated: boolean; user?: SessionUser }>("/api/auth/session").then((r) => setAuth(r.authenticated && r.user ? r.user : null)).catch(() => setAuth(null)); return () => removeEventListener("popstate", pop); }, []);
-  useEffect(() => { if (auth?.id) void scopePrivateMediaCacheToUser(auth.id); }, [auth?.id]);
-  useEffect(() => listenForSignedOut((reason) => { if (reason === "explicit" && auth?.id) { void assetMetadataCache.clear(auth.id); void composerDraftCache.clearUser(auth.id); void forgetPrivateMediaCacheUser(); } setAuth(null); }), [auth?.id]);
+  useEffect(() => { const pop = () => setRoute(location.pathname); addEventListener("popstate", pop); bootstrapSession({ load: () => api.get<{ authenticated: boolean; user?: SessionUser }>("/api/auth/session"), activateMediaScope: scopePrivateMediaCacheToUser, deactivateMediaScope: deactivatePrivateMediaCacheScope }).then(setAuth).catch(() => { void deactivatePrivateMediaCacheScope(); setAuth(null); }); return () => removeEventListener("popstate", pop); }, []);
+  useEffect(() => listenForSignedOut((reason) => { if (reason === "explicit" && auth?.id) { void assetMetadataCache.clear(auth.id); void composerDraftCache.clearUser(auth.id); void forgetPrivateMediaCacheUser(); } else void deactivatePrivateMediaCacheScope(); setAuth(null); }), [auth?.id]);
   if (route === "/") return <Landing enter={() => navigate("/studio")} />;
   if (auth === undefined) return <main className="boot"><FireflyMark /><LoaderCircle className="spin" /></main>;
   if (!auth) return <AccessGate back={() => navigate("/")} />;
