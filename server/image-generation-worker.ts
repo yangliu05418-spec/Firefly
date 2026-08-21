@@ -1,7 +1,8 @@
 import { Worker } from "bullmq";
 import type { Redis } from "ioredis";
 import { config } from "./config.js";
-import { processImageGenerationAttempt, shouldFinalizeImageGenerationFailure } from "./image-generation-processor.js";
+import { processImageGenerationAttempt } from "./image-generation-processor.js";
+import { shouldFinalizeJobFailure } from "./job-failure.js";
 import type { ImageGenerationQueuePayload } from "./redis.js";
 import { users } from "./store.js";
 
@@ -21,7 +22,7 @@ export const createImageGenerationWorker = (connection: Redis) => {
   }, { connection, concurrency: 2, lockDuration: Math.max(240000, config.openrouterRequestTimeoutMs + 60000) });
 
   worker.on("failed", async (job, error) => {
-    if (!job?.id || !shouldFinalizeImageGenerationFailure(error, job.attemptsMade, job.opts.attempts ?? 1)) return;
+    if (!job?.id || !shouldFinalizeJobFailure(error, job.attemptsMade, job.opts.attempts ?? 1)) return;
     try {
       const task = users.readImageGeneration(job.id);
       if (!task || task.status !== "running") return;
