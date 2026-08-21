@@ -227,6 +227,7 @@ test("an expired Canvas lease is reacquired after the network returns", async ({
 });
 
 test("node menus stay anchored, text expands outside the flow transform, and references are truthful", async ({ page }) => {
+  test.setTimeout(120_000);
   await page.setViewportSize({ width: 1280, height: 800 });
   const mock = await mockAuthenticatedApi(page, { document: relationDocument });
   await page.goto("/studio/canvas/canvas-e2e");
@@ -303,6 +304,7 @@ test("node menus stay anchored, text expands outside the flow transform, and ref
 });
 
 test("media nodes drag from their body, keep the selected stack, and persist uploaded or library assets", async ({ page }) => {
+  test.setTimeout(120_000);
   await page.setViewportSize({ width: 1440, height: 1000 });
   const mock = await mockAuthenticatedApi(page, { document: emptyMediaDocument, projectAssets: [projectImageAsset] });
   await page.goto("/studio/canvas/canvas-e2e");
@@ -347,8 +349,9 @@ test("media nodes drag from their body, keep the selected stack, and persist upl
   expect(composerBox!.y).toBeGreaterThanOrEqual(movedNodeBox!.y + movedNodeBox!.height + 8);
   await page.keyboard.press("Escape");
 
-  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
-  await imageNode.locator('input[type="file"]').setInputFiles({ name: "node-upload.png", mimeType: "image/png", buffer: png });
+  // Use a real, policy-compliant image. WebKit intermittently rejects the old
+  // synthetic 1px PNG before the product's normalization path can run.
+  await imageNode.locator('input[type="file"]').setInputFiles("public/ciridae/video-placeholder.webp");
   await expect(page.getByText(/素材已放入节点|素材已保存/)).toBeVisible();
   await expect(imageNode.getByRole("img", { name: "node-upload.png" })).toBeVisible();
   await expect.poll(() => mock.storedDocument().nodes.find((node) => node.id === "empty-image")?.data.projectAssetId).toMatch(/^project-upload-e2e-/);

@@ -8,11 +8,12 @@ import { createPoster, deleteObject, fetchObjectFromUrl, optimizePlaybackObject,
 import { MAX_MEDIA_RECOVERY_ATTEMPTS } from "./db.js";
 import { transcodePreview } from "./preview-transcode.js";
 import { closeWorkersWithin } from "./shutdown.js";
-import { markAssetIngestFailed, registerQueuedAsset } from "./asset-ingest.js";
+import { AssetUploadPendingError, markAssetIngestFailed, registerQueuedAsset } from "./asset-ingest.js";
 import { deleteQueuedProviderAsset } from "./asset-cleanup.js";
 import { copyPreparedCanvasAsset } from "./canvas-assets.js";
 import { startWorkerHeartbeat } from "./worker-heartbeat.js";
 import { finalizeQueuedUpload } from "./upload-finalization.js";
+import { coordinateUploadFinalization } from "./upload-finalization-coordinator.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const numberHeader = (value: unknown) => Number(value ?? 0) || 0;
@@ -240,21 +241,15 @@ const worker = new Worker("media", async (job) => {
 
 const uploadFinalizationWorker = new Worker("upload-finalization", async (job) => {
   if (job.name !== "finalize-upload") throw new Error(`Unknown upload finalization job: ${job.name}`);
-  const result = await finalizeQueuedUpload(job.data.uploadId);
-  if (result.status === "failed") {
-    await connection.set(`upload:error:${job.data.uploadId}`, result.error, "EX", 24 * 3600);
-    await connection.del(`upload:${job.data.uploadId}`);
-  } else if (result.status === "ready") {
-    await connection.del(`upload:error:${job.data.uploadId}`, `upload:${job.data.uploadId}`);
-  } else {
-    const upload = users.readUploadState(job.data.uploadId);
-    if (upload?.status === "ready") {
-      await connection.del(`upload:error:${job.data.uploadId}`, `upload:${job.data.uploadId}`);
-    } else if (upload?.status === "deleted") {
-      await connection.del(`upload:${job.data.uploadId}`);
-    }
-  }
-  return result;
+  return coordinateUploadFinalization(job.data.uploadId, {
+    readUploadState: (uploadId) => users.readUploadState(uploadId),
+    readAsset: (ownerId, uploadId) => users.readUserAssetByUpload(ownerId, uploadId),
+    finalize: (uploadId) => finalizeQueuedUpload(uploadId),
+    rememberError: (uploadId, error) => connection.set(`upload:error:${uploadId}`, error, "EX", 24 * 3600),
+    clearUploadKeys: (uploadId, includeError) => connection.del(...(includeError ? [`upload:error:${uploadId}`, `upload:${uploadId}`] : [`upload:${uploadId}`])),
+    failAsset: (assetId, error) => markAssetIngestFailed(assetId, error),
+    enqueueAsset: (assetId) => assetQueue.add("register", { assetId }, { jobId: assetId, attempts: 3, backoff: { type: "exponential", delay: 15_000 }, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } }),
+  });
 }, { connection, concurrency: 2, lockDuration: 120_000 });
 
 const previewWorker = new Worker("preview", async (job) => {
@@ -276,6 +271,11 @@ previewWorker.on("failed", (job, error) => {
 });
 
 assetWorker.on("failed", (job, error) => {
+  if (job?.name === "register" && error instanceof AssetUploadPendingError) {
+    if (job.attemptsMade >= (job.opts.attempts ?? 1)) void job.remove().catch(() => undefined);
+    console.info(JSON.stringify({ type: "asset_ingest_waiting_for_upload", at: new Date().toISOString(), assetId: job.data.assetId, attempt: job.attemptsMade }));
+    return;
+  }
   if (job?.name === "register" && job.attemptsMade >= (job.opts.attempts ?? 1)) markAssetIngestFailed(job.data.assetId, "素材已上传，但生成引用暂未准备完成");
   console.warn(JSON.stringify({ type: job?.name === "delete-provider" ? "asset_provider_delete_failed" : "asset_ingest_failed", at: new Date().toISOString(), assetId: job?.data.assetId, attempt: job?.attemptsMade, code: (error as { code?: string }).code ?? "unknown" }));
 });
@@ -338,6 +338,7 @@ const previewReconcile = setInterval(() => void reconcilePreviews().catch((error
 const reconcileAssets = async () => {
   const assets = [...users.listProcessingUserAssets(100), ...users.listUserAssetsNeedingMediaPromotion(100)];
   for (const asset of new Map(assets.map((item) => [item.id, item])).values()) {
+    if (asset.uploadId && !users.readUpload(asset.uploadId)) continue;
     await assetQueue.add("register", { assetId: asset.id }, { jobId: asset.id, attempts: 3, backoff: { type: "exponential", delay: 15_000 }, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } });
   }
   const deleteBucket = Math.floor(Date.now() / (5 * 60 * 1000));

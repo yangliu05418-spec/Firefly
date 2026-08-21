@@ -22,6 +22,7 @@ export type AssetIngestDependencies = {
   readAsset: (id: string) => UserAsset | null;
   recordDeletedProviderAsset: (id: string, providerAssetId: string) => unknown;
   readUpload: typeof users.readUpload;
+  readUploadState: typeof users.readUploadState;
   saveAsset: (asset: UserAsset) => unknown;
   callAsset: typeof callAssetApi;
   ensureGroup: () => Promise<string>;
@@ -36,6 +37,7 @@ const defaultDependencies = () => productionDependencies ??= {
   readAsset: (id) => users.readUserAsset(id),
   recordDeletedProviderAsset: (id, providerAssetId) => users.recordProviderIdForDeletedUserAsset(id, providerAssetId),
   readUpload: (uploadId) => users.readUpload(uploadId),
+  readUploadState: (uploadId) => users.readUploadState(uploadId),
   saveAsset: (asset) => users.upsertUserAsset(asset),
   callAsset: callAssetApi,
   ensureGroup: ensureAutoReferenceGroup,
@@ -44,6 +46,11 @@ const defaultDependencies = () => productionDependencies ??= {
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now: Date.now
 };
+
+export class AssetUploadPendingError extends Error {
+  readonly code = "ASSET_UPLOAD_PENDING";
+  constructor() { super("素材已传输，正在完成内容校验"); this.name = "AssetUploadPendingError"; }
+}
 
 const saved = (asset: UserAsset, patch: Partial<UserAsset>, deps: AssetIngestDependencies) => {
   const next = { ...asset, ...patch, updatedAt: deps.now() };
@@ -63,9 +70,12 @@ export const registerQueuedAsset = async (assetId: string, deps: AssetIngestDepe
   if (!asset.uploadId) return markAssetIngestFailed(asset.id, "素材缺少上传记录", deps);
 
   const uploaded = deps.readUpload(asset.uploadId);
-  if (!uploaded || uploaded.ownerId !== asset.ownerId || uploaded.status !== "ready") {
+  if (!uploaded) {
+    const state = deps.readUploadState(asset.uploadId);
+    if (state?.ownerId === asset.ownerId && state.status === "uploading") throw new AssetUploadPendingError();
     return markAssetIngestFailed(asset.id, "已上传文件不存在或尚未完成校验", deps);
   }
+  if (uploaded.ownerId !== asset.ownerId || uploaded.status !== "ready") return markAssetIngestFailed(asset.id, "已上传文件不存在或尚未完成校验", deps);
   let media = uploaded;
   try {
     media = await deps.promoteMedia(uploaded);
