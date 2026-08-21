@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PRIVATE_MEDIA_CACHE_NAME, PRIVATE_MEDIA_CACHE_PREFIX, PRIVATE_MEDIA_LEGACY_CACHE_NAME, PRIVATE_MEDIA_SERVICE_WORKER_URL, deactivatePrivateMediaCacheScope, forgetPrivateMediaCacheUser, persistPrivateMediaStorage, scopePrivateMediaCacheToUser } from "./private-media-cache";
+import { PRIVATE_MEDIA_CACHE_NAME, PRIVATE_MEDIA_CACHE_PREFIX, PRIVATE_MEDIA_LEGACY_CACHE_NAME, PRIVATE_MEDIA_SERVICE_WORKER_URL, deactivatePrivateMediaCacheScope, forgetPrivateMediaCacheUser, persistPrivateMediaStorage, respondToPrivateMediaCacheScopeRequest, scopePrivateMediaCacheToUser } from "./private-media-cache";
 
 const browser = () => {
   const values = new Map<string, string>();
@@ -68,6 +68,13 @@ describe("private media cache account scope", () => {
     await scopePrivateMediaCacheToUser("user-a");
     await deactivatePrivateMediaCacheScope();
     expect(state.messages.at(-1)).toEqual({ type: "CLEAR_PRIVATE_MEDIA_CACHE_SCOPE" });
+  });
+
+  it("restores the authenticated scope when a restarted worker requests it", async () => {
+    const state = browser();
+    await scopePrivateMediaCacheToUser("user-a");
+    await respondToPrivateMediaCacheScopeRequest({ type: "REQUEST_PRIVATE_MEDIA_CACHE_SCOPE" });
+    expect(state.messages.at(-1)).toEqual({ type: "SET_PRIVATE_MEDIA_CACHE_SCOPE", userId: "user-a" });
   });
 
   it("asks the browser to protect native asset caches from automatic eviction", async () => {

@@ -83,8 +83,17 @@ export async function forgetPrivateMediaCacheUser() {
   catch { /* Best-effort privacy cleanup. */ }
 }
 
+export async function respondToPrivateMediaCacheScopeRequest(message: unknown) {
+  if ((message as { type?: unknown })?.type === "REQUEST_PRIVATE_MEDIA_CACHE_SCOPE" && currentPrivateMediaUser) {
+    await postPrivateMediaScope(currentPrivateMediaUser);
+  }
+}
+
 export function registerPrivateMediaCache() {
   if (!import.meta.env.PROD || import.meta.env.VITE_DISABLE_PRIVATE_MEDIA_CACHE === "true" || typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+  navigator.serviceWorker.addEventListener("message", (event) => {
+    void respondToPrivateMediaCacheScopeRequest(event.data);
+  });
   navigator.serviceWorker.addEventListener("controllerchange", () => {
     if (currentPrivateMediaUser) void postPrivateMediaScope(currentPrivateMediaUser);
   });
