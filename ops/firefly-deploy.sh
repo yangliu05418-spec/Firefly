@@ -42,6 +42,9 @@ capture_candidate_diagnostics() {
     printf '\nREADY\n'
     curl --silent --show-error --max-time 5 --write-out '\nhttp_status=%{http_code}\n' \
       "http://127.0.0.1:$next_port/api/health/ready" || true
+    printf '\nWORKERS\n'
+    curl --silent --show-error --max-time 5 --write-out '\nhttp_status=%{http_code}\n' \
+      "http://127.0.0.1:$next_port/api/health/workers" || true
     for role in web worker media-worker canvas-worker; do
       container="firefly-$role-$next_slot"
       printf '\nCONTAINER %s\n' "$container"
@@ -184,12 +187,26 @@ if [ "$ready_count" -lt 3 ]; then failure_event=failed_readiness; cleanup_candid
 
 for role_command in 'worker:dist-server/worker.js' 'media-worker:dist-server/media-worker.js' 'canvas-worker:dist-server/canvas-worker.js'; do
   role=${role_command%%:*}; command=${role_command#*:}
+  heartbeat_role=$role
+  [ "$role" = "worker" ] && heartbeat_role=generation
+  [ "$role" = "media-worker" ] && heartbeat_role=media
+  [ "$role" = "canvas-worker" ] && heartbeat_role=canvas
   /usr/bin/docker run -d --name "firefly-$role-$next_slot" --restart unless-stopped --stop-timeout 35 \
     --network "$network" --label com.firefly.role="$role" --label com.firefly.slot="$next_slot" --security-opt no-new-privileges --cap-drop ALL \
+    --health-cmd "node dist-server/worker-healthcheck.js $heartbeat_role" --health-interval 15s --health-timeout 5s --health-retries 3 \
     --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 \
     --env-file "$app_env" --env-file "$feishu_env" -e FIREFLY_REVISION="$revision" -e FIREFLY_IMAGE_DIGEST="${image##*@}" \
     -v /srv/firefly/uploads:/data/uploads -v /srv/firefly/data:/data "$image" node "$command" >/dev/null
 done
+
+worker_ready_count=0
+worker_attempt=0
+while [ "$worker_attempt" -lt 30 ] && [ "$worker_ready_count" -lt 3 ]; do
+  worker_attempt=$((worker_attempt + 1))
+  if curl --fail --silent --max-time 5 "http://127.0.0.1:$next_port/api/health/workers" >/dev/null; then worker_ready_count=$((worker_ready_count + 1)); else worker_ready_count=0; fi
+  [ "$worker_ready_count" -ge 3 ] || sleep 2
+done
+if [ "$worker_ready_count" -lt 3 ]; then failure_event=failed_worker_readiness; cleanup_candidate; exit 1; fi
 
 if ! switch_upstream "$next_port"; then failure_event=failed_nginx; cleanup_candidate; exit 1; fi
 switched=1

@@ -38,6 +38,7 @@ import { publicImageGeneration } from "./image-generation-public.js";
 import { providerAssetName } from "./asset-name.js";
 import { acquireCanvasLease, releaseCanvasLease, renewCanvasLease, validateCanvasLease } from "./canvas-lease.js";
 import { canvasProjectAssetProviderUrl, canvasProjectAssetSignedUrl, createCanvasProjectMediaHandler, publicCanvasProjectAsset } from "./canvas-project-assets.js";
+import { readWorkerHealth, type WorkerHealthSnapshot } from "./worker-heartbeat.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -1438,27 +1439,41 @@ const probeTos = () => {
 };
 
 const runtimeIdentity = { revision: config.revision, imageDigest: config.imageDigest };
+const workerReadinessRequiredAt = Date.now() + config.workerReadinessGraceMs;
 
 app.get("/api/health/live", (_req, res) => res.json({ status: "ok", ...runtimeIdentity }));
 
+app.get("/api/health/workers", async (_req, res) => {
+  try {
+    const health = await readWorkerHealth(redis);
+    res.status(health.ready ? 200 : 503).json({ status: health.ready ? "ready" : "not_ready", ...health, ...runtimeIdentity });
+  } catch (error) {
+    res.status(503).json({ status: "not_ready", dependency: "redis", code: (error as { code?: string }).code ?? "unknown", ...runtimeIdentity });
+  }
+});
+
 app.get("/api/health/ready", async (_req, res) => {
-  let dependency: "redis" | "database" | "queues" | "tos" = "redis";
+  let dependency: "redis" | "database" | "queues" | "workers" | "tos" = "redis";
+  let workerHealth: WorkerHealthSnapshot | undefined;
   try {
     await redis.ping();
     dependency = "database";
     if (!users.healthCheck()) throw new Error("database unavailable");
     dependency = "queues";
     await Promise.all([generationQueue.getJobCounts("wait", "active"), imageGenerationQueue.getJobCounts("wait", "active"), mediaQueue.getJobCounts("wait", "active"), previewQueue.getJobCounts("wait", "active"), assetQueue.getJobCounts("wait", "active"), canvasQueue.getJobCounts("wait", "active")]);
+    dependency = "workers";
+    workerHealth = await readWorkerHealth(redis);
+    if (!workerHealth.ready && Date.now() >= workerReadinessRequiredAt) throw new Error(`workers unavailable: ${workerHealth.missing.join(",")}`);
     if (tosEnabled()) {
       dependency = "tos";
       const health = tosHealthGate.snapshot();
       if (!health.configured || !health.effectiveReachable) throw new Error("TOS unavailable");
     }
-    res.json({ status: "ready", redis: "ok", database: "ok", queues: "ok", tos: tosEnabled() ? "ok" : "disabled", previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, schemaVersion: users.schemaVersion(), ...runtimeIdentity });
+    res.json({ status: "ready", redis: "ok", database: "ok", queues: "ok", workers: workerHealth.ready ? "ok" : "starting", tos: tosEnabled() ? "ok" : "disabled", previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, schemaVersion: users.schemaVersion(), ...runtimeIdentity });
   } catch (error) {
     const tosHealthSnapshot = tosHealthGate.snapshot();
     console.warn(JSON.stringify({ type: "readiness_failed", at: new Date().toISOString(), dependency, code: (error as { code?: string }).code ?? "unknown", tosConsecutiveFailures: tosHealthSnapshot.consecutiveFailures, tosLastProbeReachable: tosHealthSnapshot.lastProbeReachable }));
-    res.status(503).json({ status: "not_ready", dependency, tosConsecutiveFailures: tosHealthSnapshot.consecutiveFailures, ...runtimeIdentity });
+    res.status(503).json({ status: "not_ready", dependency, missingWorkers: workerHealth?.missing, tosConsecutiveFailures: tosHealthSnapshot.consecutiveFailures, ...runtimeIdentity });
   }
 });
 

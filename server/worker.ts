@@ -9,6 +9,7 @@ import { users } from "./store.js";
 import { closeWorkersWithin } from "./shutdown.js";
 import { createImageGenerationWorker } from "./image-generation-worker.js";
 import { shouldFinalizeJobFailure } from "./job-failure.js";
+import { startWorkerHeartbeat } from "./worker-heartbeat.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -68,6 +69,8 @@ const worker = new Worker("generation", async (job) => {
 }, { connection, concurrency: config.generationConcurrency, lockDuration: 120000 });
 
 const imageWorker = createImageGenerationWorker(connection);
+await Promise.all([worker.waitUntilReady(), imageWorker.waitUntilReady()]);
+const heartbeat = await startWorkerHeartbeat(connection, "generation");
 
 worker.on("failed", async (job, error) => {
   if (!job?.id) return;
@@ -100,6 +103,7 @@ let shuttingDown = false;
 const shutdown = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
+  await heartbeat.stop();
   const graceful = await closeWorkersWithin([worker, imageWorker], config.shutdownGraceMs);
   console.info(JSON.stringify({ type: "worker_shutdown", at: new Date().toISOString(), worker: "generation", graceful }));
   await connection.quit(); users.close(); process.exit(0);
