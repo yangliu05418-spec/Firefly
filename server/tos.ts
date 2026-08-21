@@ -101,6 +101,23 @@ export const signedObjectUrl = (key: string, options: { download?: boolean; file
   });
 };
 
+export const providerObjectSigningInput = (bucket: string, key: string, expires = 2 * 3600) => ({
+  bucket,
+  key,
+  method: "GET" as const,
+  expires,
+});
+
+/**
+ * Provider-facing media URL. Keep this URL free of response header overrides:
+ * Gemini rejects otherwise valid TOS pre-signed URLs containing the encoded
+ * Content-Disposition override as an unsupported image URL scheme.
+ */
+export const signedProviderObjectUrl = (key: string, expires = 2 * 3600) => {
+  requireTos();
+  return tos.getPreSignedUrl(providerObjectSigningInput(config.tosBucket, key, expires));
+};
+
 const fetchSucceeded = (state: string) => ["success", "succeeded", "done", "complete", "completed"].includes(state.toLowerCase());
 const fetchFailed = (state: string) => state.toLowerCase().includes("fail") || state.toLowerCase().includes("cancel");
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));

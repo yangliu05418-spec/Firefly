@@ -24,7 +24,7 @@ import { callAssetApi } from "./asset-api.js";
 import { ensureAutoReferenceGroup } from "./asset-registration.js";
 import { previewRedirectCacheControl } from "./media-cache.js";
 import { stablePreviewUrl } from "./preview-url-cache.js";
-import { abortMultipartUpload, canvasExportObjectKey, completeMultipartUpload, createMultipartUpload, deleteObject, headObject, inputObjectKey, inspectMediaObject, signUploadPart, signedObjectUrl, tosConfigured, tosEnabled, tosHealth, verifyStoredObject } from "./tos.js";
+import { abortMultipartUpload, canvasExportObjectKey, completeMultipartUpload, createMultipartUpload, deleteObject, headObject, inputObjectKey, inspectMediaObject, signUploadPart, signedObjectUrl, signedProviderObjectUrl, tosConfigured, tosEnabled, tosHealth, verifyStoredObject } from "./tos.js";
 import { DependencyHealthGate } from "./dependency-health.js";
 import { canonicalUploadContentType, tosMediaInfoViolation, uploadKindFromContentType } from "./upload-policy.js";
 import { acquireUploadCompletionLock, claimUploadSlot, releaseUploadCompletionLock, releaseUploadSlot, renewUploadSlot, UPLOAD_SESSION_TTL_SECONDS } from "./upload-slots.js";
@@ -727,7 +727,7 @@ app.post("/api/image-generation", requireAuth, async (req, res) => {
     for (const uploadId of body.references) {
       const media = users.readUpload(uploadId);
       if (!media || media.ownerId !== user.id) return res.status(404).json({ error: "参考素材不存在或已过期" });
-      references.push(signedObjectUrl(media.objectKey, { expires: 2 * 3600, fileName: media.fileName }));
+      references.push(signedProviderObjectUrl(media.objectKey));
     }
     if (!openRouterPool().size) return res.status(503).json({ error: "服务端尚未配置 OpenRouter API Key" });
     if (!acquireImageSlot(user.id)) return res.status(429).json({ error: "图片生成繁忙，请等当前生成完成后再试（每用户同时最多 2 组）" });

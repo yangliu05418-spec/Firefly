@@ -2,7 +2,7 @@ import type { CanvasProjectAsset } from "./db.js";
 import type { RequestHandler } from "express";
 import { config } from "./config.js";
 import { users } from "./store.js";
-import { signedObjectUrl } from "./tos.js";
+import { signedObjectUrl, signedProviderObjectUrl } from "./tos.js";
 
 export type ResolvedCanvasProjectMedia = {
   objectKey: string;
@@ -53,7 +53,7 @@ export const canvasProjectAssetSignedUrl = (asset: CanvasProjectAsset, download 
 /** Provider references always use the archived source-quality object, never the low-bitrate browser preview. */
 export const canvasProjectAssetProviderUrl = (asset: CanvasProjectAsset) => {
   const media = resolveCanvasProjectMedia(asset, true);
-  return signedObjectUrl(media.objectKey, { fileName: media.fileName });
+  return signedProviderObjectUrl(media.objectKey);
 };
 
 export const publicCanvasProjectAsset = (asset: CanvasProjectAsset) => ({
