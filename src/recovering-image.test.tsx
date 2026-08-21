@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { imageRetrySource, RecoveringImage } from "./recovering-image";
+import { imageRetrySource, RecoveringImage, RecoveringThumbnail } from "./recovering-image";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -55,6 +55,23 @@ describe("recovering private images", () => {
     expect(container.textContent).toBe("failed");
     await act(async () => { root.render(<RecoveringImage src="/api/assets/two/source" alt="two" fallback={fallback} retryDelays={[]} />); });
     expect(container.querySelector("img")?.getAttribute("src")).toBe("/api/assets/two/source");
+    await act(async () => root.unmount());
+  });
+
+  it("does not create a nested interactive control inside asset buttons", async () => {
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<button type="button"><RecoveringThumbnail src="/api/assets/asset-1/source?variant=thumbnail" alt="测试素材" manualRecovery={false} /></button>);
+    });
+    await act(async () => { container.querySelector("img")?.dispatchEvent(new Event("error")); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    await act(async () => { container.querySelector("img")?.dispatchEvent(new Event("error")); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(6_000); });
+    await act(async () => { container.querySelector("img")?.dispatchEvent(new Event("error")); });
+
+    expect(container.querySelectorAll("button")).toHaveLength(1);
+    expect(container.querySelector("[role=button]")).toBeNull();
+    expect(container.querySelector("[role=status]")?.getAttribute("aria-label")).toBe("测试素材暂时无法载入");
     await act(async () => root.unmount());
   });
 });

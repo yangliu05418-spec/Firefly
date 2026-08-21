@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ImgHTMLAttributes, type ReactNode } from "react";
+import { LoaderCircle, RefreshCw } from "lucide-react";
 
 const DEFAULT_RETRY_DELAYS = [2_000, 6_000] as const;
 
@@ -13,6 +14,12 @@ type RecoveringImageProps = Omit<ImgHTMLAttributes<HTMLImageElement>, "src" | "o
   fallback: (state: ImageRecoveryState) => ReactNode;
   retryDelays?: readonly number[];
   onLoad?: ImgHTMLAttributes<HTMLImageElement>["onLoad"];
+};
+
+type RecoveringThumbnailProps = Omit<ImgHTMLAttributes<HTMLImageElement>, "src" | "onError"> & {
+  src: string;
+  fallbackClassName?: string;
+  manualRecovery?: boolean;
 };
 
 type InternalState = { source: string; cycle: number; attempt: number; phase: "loading" | "ready" | "retrying" | "failed" };
@@ -70,5 +77,31 @@ export function RecoveringImage({ src, fallback, retryDelays = DEFAULT_RETRY_DEL
       timer.current = null;
       setState((previous) => previous.source === src ? { ...previous, attempt: current.attempt + 1, phase: "loading" } : previous);
     }, delay);
+  }} />;
+}
+
+/** Shared compact recovery UI. Disable manualRecovery when rendered inside another button. */
+export function RecoveringThumbnail({ fallbackClassName, manualRecovery = true, alt, ...props }: RecoveringThumbnailProps) {
+  return <RecoveringImage {...props} alt={alt} fallback={({ phase, retry }) => {
+    const failed = phase === "failed";
+    const interactive = failed && manualRecovery;
+    const activate = (event: { stopPropagation: () => void }) => { event.stopPropagation(); if (interactive) retry(); };
+    return <span
+      className={fallbackClassName ?? "image-recovery-fallback"}
+      role={interactive ? "button" : "status"}
+      tabIndex={interactive ? 0 : undefined}
+      aria-label={interactive ? `重新加载${alt || "图片"}` : failed ? `${alt || "图片"}暂时无法载入` : "正在重新载入图片"}
+      title={interactive ? "图片载入失败，点击重新加载" : failed ? "图片暂时无法载入" : "正在重新载入图片"}
+      onClick={interactive ? activate : undefined}
+      onKeyDown={interactive ? (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          activate(event);
+        }
+      } : undefined}
+    >
+      {failed ? <RefreshCw /> : <LoaderCircle className="spin" />}
+      {interactive && <small>重新加载</small>}
+    </span>;
   }} />;
 }
