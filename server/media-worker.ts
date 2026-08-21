@@ -10,7 +10,7 @@ import { transcodePreview } from "./preview-transcode.js";
 import { closeWorkersWithin } from "./shutdown.js";
 import { AssetUploadPendingError, markAssetIngestFailed, registerQueuedAsset } from "./asset-ingest.js";
 import { deleteQueuedProviderAsset } from "./asset-cleanup.js";
-import { copyPreparedCanvasAsset } from "./canvas-assets.js";
+import { CanvasAssetUploadPendingError, copyPreparedCanvasAsset } from "./canvas-assets.js";
 import { startWorkerHeartbeat } from "./worker-heartbeat.js";
 import { finalizeQueuedUpload } from "./upload-finalization.js";
 import { coordinateUploadFinalization } from "./upload-finalization-coordinator.js";
@@ -284,9 +284,16 @@ uploadFinalizationWorker.on("failed", (job, error) => {
   console.warn(JSON.stringify({ type: "tos_upload_finalize_failed", at: new Date().toISOString(), uploadId: job?.data.uploadId, attempt: job?.attemptsMade, code: (error as { code?: string }).code ?? "worker_failure" }));
 });
 
-worker.on("failed", async (job) => {
+worker.on("failed", async (job, error) => {
   if (job?.name === "copy-canvas-asset") {
     if (job.attemptsMade < (job.opts.attempts ?? 1)) return;
+    if (error instanceof CanvasAssetUploadPendingError) {
+      // Deep validation can outlive one BullMQ retry window. Keep the durable
+      // project asset in copying and let the recovery scan enqueue it again.
+      await job.remove().catch(() => undefined);
+      console.info(JSON.stringify({ type: "canvas_copy_waiting_for_upload", at: new Date().toISOString(), assetId: job.data.assetId, attempts: job.attemptsMade }));
+      return;
+    }
     const asset = users.readCanvasAsset(job.data.assetId);
     if (asset) {
       users.updateCanvasAsset(asset.id, { status: "failed" });
@@ -355,8 +362,9 @@ const reconcileUploadFinalizations = async () => {
 };
 const uploadFinalizeReconcile = setInterval(() => void reconcileUploadFinalizations().catch((error) => console.warn(JSON.stringify({ type: "tos_upload_finalize_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }))), 60_000);
 const reconcileCanvasCopies = async () => {
+  const bucket = Math.floor(Date.now() / 60_000);
   for (const asset of users.copyingCanvasAssets(100)) {
-    await mediaQueue.add("copy-canvas-asset", { assetId: asset.id }, { jobId: `copy-${asset.id}`, attempts: 5, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } });
+    await mediaQueue.add("copy-canvas-asset", { assetId: asset.id }, { jobId: `copy-${asset.id}-${bucket}`, attempts: 5, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } });
   }
 };
 const canvasCopyReconcile = setInterval(() => void reconcileCanvasCopies().catch((error) => console.warn(JSON.stringify({ type: "canvas_copy_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }))), 60_000);

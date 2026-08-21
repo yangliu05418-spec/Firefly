@@ -7,9 +7,11 @@ import {
 import "@xyflow/react/dist/style.css";
 import dagre from "@dagrejs/dagre";
 import { Archive, Check, ChevronDown, CircleHelp, Copy, Download, FolderOpen, Grid2X2, Group as GroupIcon, Home, ImageIcon, Keyboard, LayoutDashboard, Library, LoaderCircle, LockKeyhole, LogOut, Map as MapIcon, MousePointer2, Move, Plus, Redo2, RefreshCw, ScanFace, Scissors, Search, Sparkles, TextCursorInput, Undo2, Ungroup, Upload, Users, Video, WandSparkles, X, ZoomIn, ZoomOut } from "lucide-react";
-import { api, inferUploadType, uploadFile } from "../../../api";
+import { api, inferUploadType } from "../../../api";
+import { uploadFileUntilAccepted } from "../../../upload-acceptance";
 import { filterCachedAssets, loadAssetsCacheFirst } from "../../../asset-metadata-cache";
 import { runWithConcurrency } from "../../../concurrency";
+import { readPendingAssetPreview, removePendingAssetPreview, storePendingAssetPreview } from "../../../pending-asset-preview-cache";
 import type { AssetCategory, ImageModel, LibraryAsset, ModelCapability, SessionUser } from "../../../types";
 import {
   acquireCanvasLease, cancelCanvasJob, createCanvasJob, getCanvasV2, importCanvasProjectAsset, listCanvasAssets, listCanvasJobs,
@@ -36,6 +38,7 @@ const typeIcons: Record<string, typeof ImageIcon> = { character: ScanFace, scene
 const assetCategoryLabels: Record<AssetCategory, string> = { character: "角色", scene: "场景", prop: "道具", material: "素材" };
 const acceptsProjectAsset = (nodeType: CanvasNodeTypeV2, assetKind: CanvasProjectAsset["kind"]) =>
   nodeType === "video" ? assetKind === "video" : ["image", "character", "scene"].includes(nodeType) ? assetKind === "image" : false;
+const canvasPreviewCacheId = (canvasId: string, assetId: string) => `canvas:${canvasId}:${assetId}`;
 const shortcutGroups = [
   ["创作", [["成组", "Ctrl / Cmd + G"], ["解组", "Ctrl / Cmd + Shift + G"], ["生成", "Ctrl / Cmd + Enter"], ["新建节点", "Tab"], ["复制节点", "Alt / Option + 拖动"], ["复制选区", "Ctrl / Cmd + Alt / Option + 拖动"]]],
   ["视图", [["放大 / 缩小", "Ctrl / Cmd + + / −"], ["适应画布", "Ctrl / Cmd + 0"], ["移动画布", "Space + 拖动"], ["整理画布", "Alt / Option + Shift + F"]]],
@@ -119,6 +122,8 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   const ephemeralNodeIds = useRef(new Set<string>());
   const localPreviewUrls = useRef(new Map<string, string>());
   const [localPreviews, setLocalPreviews] = useState<Record<string, string>>({});
+  const localAssetPreviewUrls = useRef(new Map<string, string>());
+  const [localAssetPreviews, setLocalAssetPreviews] = useState<Record<string, string>>({});
   const [composer, setComposer] = useState<ComposerState | null>(null);
   const [inspectAsset, setInspectAsset] = useState<CanvasProjectAsset | null>(null);
   const [cropNodeId, setCropNodeId] = useState<string | null>(null);
@@ -172,6 +177,30 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     });
   }, []);
 
+  const showLocalAssetPreview = useCallback((assetId: string, blob: Blob) => {
+    const previous = localAssetPreviewUrls.current.get(assetId);
+    if (previous) URL.revokeObjectURL(previous);
+    const url = URL.createObjectURL(blob);
+    localAssetPreviewUrls.current.set(assetId, url);
+    setLocalAssetPreviews((current) => ({ ...current, [assetId]: url }));
+  }, []);
+
+  const clearLocalAssetPreview = useCallback((assetId: string) => {
+    const url = localAssetPreviewUrls.current.get(assetId);
+    if (url) URL.revokeObjectURL(url);
+    localAssetPreviewUrls.current.delete(assetId);
+    setLocalAssetPreviews((current) => {
+      if (!(assetId in current)) return current;
+      const next = { ...current }; delete next[assetId]; return next;
+    });
+  }, []);
+
+  const rememberLocalAssetPreview = useCallback((assetId: string, blob?: Blob) => {
+    if (!blob) return;
+    showLocalAssetPreview(assetId, blob);
+    void storePendingAssetPreview(user.id, canvasPreviewCacheId(canvasId, assetId), blob);
+  }, [canvasId, showLocalAssetPreview, user.id]);
+
   const adoptLease = useCallback((token: string) => {
     leaseTokenRef.current = token;
     setLeaseToken(token);
@@ -221,6 +250,8 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     browserWorkers.current.clear();
     for (const url of localPreviewUrls.current.values()) URL.revokeObjectURL(url);
     localPreviewUrls.current.clear();
+    for (const url of localAssetPreviewUrls.current.values()) URL.revokeObjectURL(url);
+    localAssetPreviewUrls.current.clear();
   }, []);
 
   const patchNode = useCallback((id: string, patch: Partial<CanvasNodeV2["data"]>) => {
@@ -491,6 +522,26 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     return () => window.clearTimeout(timer);
   }, [assets, refreshAssets]);
   useEffect(() => {
+    let cancelled = false;
+    const restore = async () => {
+      for (const asset of assets) {
+        if (asset.kind !== "image" || asset.status === "ready" || localAssetPreviewUrls.current.has(asset.id)) continue;
+        const blob = await readPendingAssetPreview(user.id, canvasPreviewCacheId(canvasId, asset.id));
+        if (cancelled || !blob || localAssetPreviewUrls.current.has(asset.id)) continue;
+        showLocalAssetPreview(asset.id, blob);
+      }
+    };
+    void restore();
+    return () => { cancelled = true; };
+  }, [assets, canvasId, showLocalAssetPreview, user.id]);
+  useEffect(() => {
+    for (const asset of assets) {
+      if (asset.status !== "ready" || !localAssetPreviewUrls.current.has(asset.id)) continue;
+      clearLocalAssetPreview(asset.id);
+      void removePendingAssetPreview(user.id, canvasPreviewCacheId(canvasId, asset.id));
+    }
+  }, [assets, canvasId, clearLocalAssetPreview, user.id]);
+  useEffect(() => {
     if (!Object.keys(localPreviews).length) return;
     const ready = new Set(assets.filter((asset) => asset.status === "ready").map((asset) => asset.id));
     for (const node of nodes) {
@@ -556,9 +607,9 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     const domains = nodes.map((node) => node.data.domain);
     return nodes.map((node) => ({
       ...node,
-      data: { ...node.data, references: incomingCanvasReferences(node.id, domains, edges), localPreviewUrl: localPreviews[node.id] },
+      data: { ...node.data, references: incomingCanvasReferences(node.id, domains, edges), localPreviewUrl: localPreviews[node.id] ?? (node.data.domain.data.projectAssetId ? localAssetPreviews[node.data.domain.data.projectAssetId] : undefined) },
     }));
-  }, [edges, localPreviews, nodes]);
+  }, [edges, localAssetPreviews, localPreviews, nodes]);
   const renderedEdges = useMemo(() => edges.map((edge) => ({ ...edge, hidden: edgesHidden })), [edges, edgesHidden]);
 
   const createMenuStyle = useMemo<CreateMenuStyle | undefined>(() => {
@@ -818,9 +869,10 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
       const controller = new AbortController(); browserOperationControllers.current.add(controller);
       void (async () => {
         const file = new File([blob], `${sourceAsset.title.slice(0, 60) || "video"}-frame.webp`, { type: "image/webp" });
-        const uploaded = await uploadFile(file, "image", () => undefined, { signal: controller.signal });
+        const uploaded = await uploadFileUntilAccepted(file, "image", () => undefined, { signal: controller.signal });
         const imported = await importCanvasProjectAsset(canvasId, { kind: "upload", uploadId: uploaded.uploadId ?? uploaded.id });
         setAssets((current) => [imported.projectAsset, ...current.filter((asset) => asset.id !== imported.projectAsset.id)]);
+        rememberLocalAssetPreview(imported.projectAsset.id, blob);
         ephemeralNodeIds.current.delete(derivedId);
         patchNode(derivedId, { projectAssetId: imported.projectAsset.id, mimeType: imported.projectAsset.contentType, status: imported.projectAsset.status === "ready" ? "succeeded" : "running", error: undefined });
         if (imported.projectAsset.status === "ready") clearLocalPreview(derivedId);
@@ -832,7 +884,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     };
     worker.onerror = () => { browserWorkers.current.delete(worker); patchNode(nodeId, { status: "succeeded", error: "视频抽帧线程异常" }); setMessage("视频抽帧线程异常"); worker.terminate(); };
     worker.postMessage({ url: sourceAsset.mediaUrl, timestamp: Math.max(0, (sourceAsset.durationMs ?? 0) / 2000) });
-  }, [assets, canvasId, clearLocalPreview, createOptimisticImageNode, flow, patchNode]);
+  }, [assets, canvasId, clearLocalPreview, createOptimisticImageNode, flow, patchNode, rememberLocalAssetPreview]);
   extractFrameRef.current = extractFrame;
 
   const deriveImage = useCallback((nodeId: string, operation: { cropRatio?: number; rotation?: 90 | 180 | 270 }) => {
@@ -855,9 +907,10 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
       const controller = new AbortController(); browserOperationControllers.current.add(controller);
       void (async () => {
         const file = new File([blob], `${sourceAsset.title.slice(0, 56) || "image"}-${suffix}.webp`, { type: "image/webp" });
-        const uploaded = await uploadFile(file, "image", () => undefined, { signal: controller.signal });
+        const uploaded = await uploadFileUntilAccepted(file, "image", () => undefined, { signal: controller.signal });
         const imported = await importCanvasProjectAsset(canvasId, { kind: "upload", uploadId: uploaded.uploadId ?? uploaded.id });
         setAssets((current) => [imported.projectAsset, ...current.filter((asset) => asset.id !== imported.projectAsset.id)]);
+        rememberLocalAssetPreview(imported.projectAsset.id, blob);
         ephemeralNodeIds.current.delete(derivedId);
         patchNode(derivedId, { projectAssetId: imported.projectAsset.id, mimeType: imported.projectAsset.contentType, status: imported.projectAsset.status === "ready" ? "succeeded" : "running", error: undefined });
         if (imported.projectAsset.status === "ready") clearLocalPreview(derivedId);
@@ -869,7 +922,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     };
     worker.onerror = () => { browserWorkers.current.delete(worker); patchNode(nodeId, { status: "succeeded", error: "图片处理线程异常" }); setMessage("图片处理线程异常"); worker.terminate(); };
     worker.postMessage({ url: sourceAsset.mediaUrl, ...operation });
-  }, [assets, canvasId, clearLocalPreview, createOptimisticImageNode, flow, patchNode]);
+  }, [assets, canvasId, clearLocalPreview, createOptimisticImageNode, flow, patchNode, rememberLocalAssetPreview]);
   deriveImageRef.current = deriveImage;
 
   const uploadAssets = async (files: readonly File[]) => {
@@ -884,10 +937,12 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
         const kind = inferUploadType(file);
         if (!kind) { setUploading((old) => old.map((item) => item.id === id ? { ...item, error: "不支持的文件类型" } : item)); return; }
         try {
-          const uploaded = await uploadFile(file, kind, (progress, phase) => setUploading((old) => old.map((item) => item.id === id ? { ...item, progress, phase: phase === "ready" ? "verifying" : phase } : item)), { signal: controller.signal });
+          let preparedPreview: Blob | undefined;
+          const uploaded = await uploadFileUntilAccepted(file, kind, (progress, phase) => setUploading((old) => old.map((item) => item.id === id ? { ...item, progress, phase: phase === "ready" ? "verifying" : phase } : item)), { signal: controller.signal, onPreparedPreview: kind === "image" ? (blob) => { preparedPreview = blob; } : undefined });
           setUploading((old) => old.map((item) => item.id === id ? { ...item, progress: 100, phase: "saving" } : item));
           const imported = await importCanvasProjectAsset(canvasId, { kind: "upload", uploadId: uploaded.uploadId ?? uploaded.id });
           setAssets((old) => [imported.projectAsset, ...old.filter((item) => item.id !== imported.projectAsset.id)]);
+          rememberLocalAssetPreview(imported.projectAsset.id, preparedPreview);
           setUploading((old) => old.filter((item) => item.id !== id));
         } catch (error) {
           if (error instanceof DOMException && error.name === "AbortError") return;
@@ -927,9 +982,11 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     const controller = new AbortController();
     uploadBatchControllers.current.add(controller);
     try {
-      const uploaded = await uploadFile(file, kind, () => undefined, { signal: controller.signal });
+      let preparedPreview: Blob | undefined;
+      const uploaded = await uploadFileUntilAccepted(file, kind, () => undefined, { signal: controller.signal, onPreparedPreview: kind === "image" ? (blob) => { preparedPreview = blob; } : undefined });
       const imported = await importCanvasProjectAsset(canvasId, { kind: "upload", uploadId: uploaded.uploadId ?? uploaded.id });
       setAssets((current) => [imported.projectAsset, ...current.filter((asset) => asset.id !== imported.projectAsset.id)]);
+      rememberLocalAssetPreview(imported.projectAsset.id, preparedPreview);
       fillNodeWithAsset(nodeId, imported.projectAsset);
       if (imported.projectAsset.status === "ready") clearLocalPreview(nodeId);
       setMessage(imported.projectAsset.status === "ready" ? "素材已保存，可直接引用" : "素材已上传，正在后台归档");
@@ -941,7 +998,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     } finally {
       uploadBatchControllers.current.delete(controller);
     }
-  }, [canvasId, clearLocalPreview, fillNodeWithAsset, flow, patchNode, setNodes, showLocalPreview]);
+  }, [canvasId, clearLocalPreview, fillNodeWithAsset, flow, patchNode, rememberLocalAssetPreview, setNodes, showLocalPreview]);
   openNodeAssetPickerRef.current = openNodeAssetPicker;
   uploadNodeFileRef.current = (nodeId, file) => { void uploadIntoNode(nodeId, file); };
 
@@ -1091,7 +1148,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
       {assetTab === "project" && <label className="canvas-v2-assets__upload"><Upload /><b>上传到项目</b><span>支持多选，上传完成后可立即插入</span><input type="file" multiple accept={assetTargetNode?.data.domain.type === "video" ? "video/mp4,video/quicktime" : assetTargetNode ? "image/*" : "image/*,video/mp4,video/quicktime,audio/mpeg,audio/wav"} onChange={(event) => { const selected = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void uploadAssets(selected); }} /></label>}
       <div className="canvas-v2-assets__list">
         {uploading.map((item) => <div className="canvas-v2-assets__progress" key={item.id}><span>{item.name}</span><i><em style={{ width: `${item.progress}%` }} /></i><small>{item.error ?? (item.phase === "preparing" ? "正在检查图片" : item.phase === "verifying" ? "上传完成 · 正在确认" : item.phase === "saving" ? "已上传 · 正在加入项目" : `${item.progress}%`)}</small></div>)}
-        {assetTab === "project" ? visibleProjectAssets.map((asset) => <button key={asset.id} onClick={() => insertAsset(asset)} disabled={asset.status === "failed"}><span className="canvas-v2-assets__thumb">{asset.kind === "video" ? <Video /> : asset.kind === "audio" ? <Sparkles /> : <img src={asset.mediaUrl} loading="lazy" alt="" />}</span><div><b>{asset.title}</b><small>{asset.kind === "video" ? "视频" : asset.kind === "audio" ? "音频" : "图片"} · {asset.status === "ready" ? "可用" : asset.status === "copying" ? "正在归档" : "不可用"}</small></div><Plus /></button>) : visibleGlobalAssets.map((asset) => <button key={asset.Id} onClick={() => void importGlobal(asset)} disabled={asset.Status !== "Active"}><span className="canvas-v2-assets__thumb">{asset.URL ? <img src={asset.URL} loading="lazy" alt="" /> : <ImageIcon />}</span><div><b>{asset.Name}</b><small>{assetCategoryLabels[asset.Category]} · {asset.Status === "Active" ? "可用" : "处理中"}</small></div><Plus /></button>)}
+        {assetTab === "project" ? visibleProjectAssets.map((asset) => <button key={asset.id} onClick={() => insertAsset(asset)} disabled={asset.status === "failed"}><span className="canvas-v2-assets__thumb">{asset.kind === "video" ? <Video /> : asset.kind === "audio" ? <Sparkles /> : <img src={localAssetPreviews[asset.id] ?? asset.mediaUrl} loading="lazy" alt="" />}</span><div><b>{asset.title}</b><small>{asset.kind === "video" ? "视频" : asset.kind === "audio" ? "音频" : "图片"} · {asset.status === "ready" ? "可用" : asset.status === "copying" ? "正在归档" : "不可用"}</small></div><Plus /></button>) : visibleGlobalAssets.map((asset) => <button key={asset.Id} onClick={() => void importGlobal(asset)} disabled={asset.Status !== "Active"}><span className="canvas-v2-assets__thumb">{asset.URL ? <img src={asset.URL} loading="lazy" alt="" /> : <ImageIcon />}</span><div><b>{asset.Name}</b><small>{assetCategoryLabels[asset.Category]} · {asset.Status === "Active" ? "可用" : "处理中"}</small></div><Plus /></button>)}
         {assetTab === "project" && visibleProjectAssets.length === 0 && <div className="canvas-v2-assets__empty"><Library /><b>暂无可用素材</b><span>可直接在节点中本地上传，或先上传到项目资产。</span></div>}
         {assetTab === "global" && visibleGlobalAssets.length === 0 && <div className="canvas-v2-assets__empty"><Library /><b>{assetTargetNode?.data.domain.type === "video" ? "全局资产库暂不包含视频" : "暂无匹配素材"}</b><span>切换到项目资产，或调整分类与搜索条件。</span></div>}
       </div>

@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { UserStore } from "./db.js";
 import { migrateDatabase } from "./migrations.js";
-import { canvasAssetObjectKey } from "./canvas-assets.js";
+import { canvasAssetObjectKey, isAdmissibleCanvasUpload } from "./canvas-assets.js";
 
 const makeUser = (store: UserStore, email: string) =>
   store.upsertFromFeishu({ openId: "ou_" + email, unionId: "on_" + email, tenantKey: "tenant-dokuai", email, name: email.split("@")[0], avatarUrl: "" });
@@ -63,5 +63,17 @@ describe("canvas asset persistence", () => {
     const key2 = canvasAssetObjectKey("user-1", "canvas-9", "canvas-asset-3", "参考 图 片 (2).png");
     expect(key2).toBe(key);
     expect(key.length).toBeLessThan(300);
+  });
+
+  it("admits a durable upload while deep validation is still running", () => {
+    const base = {
+      id: "input:upload-1", ownerId: "owner-1", uploadId: "upload-1", kind: "input" as const,
+      objectKey: "inputs/one.png", fileName: "one.png", contentType: "image/png", size: 10,
+      etag: "etag", createdAt: 1, updatedAt: 1,
+    };
+    expect(isAdmissibleCanvasUpload({ ...base, status: "uploading" }, "owner-1")).toBe(true);
+    expect(isAdmissibleCanvasUpload({ ...base, status: "ready" }, "owner-1")).toBe(true);
+    expect(isAdmissibleCanvasUpload({ ...base, status: "deleted" }, "owner-1")).toBe(false);
+    expect(isAdmissibleCanvasUpload({ ...base, status: "uploading" }, "owner-2")).toBe(false);
   });
 });

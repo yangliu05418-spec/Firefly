@@ -27,7 +27,7 @@ import { DependencyHealthGate } from "./dependency-health.js";
 import { canonicalUploadContentType, uploadKindFromContentType } from "./upload-policy.js";
 import { acquireUploadCompletionLock, claimUploadSlot, releaseUploadCompletionLock, releaseUploadSlot, renewUploadSlot, UPLOAD_SESSION_TTL_SECONDS } from "./upload-slots.js";
 import { canCreatePendingAsset } from "./asset-upload-admission.js";
-import { createCanvasAssetFromUpload, prepareCanvasAssetFromUpload } from "./canvas-assets.js";
+import { createCanvasAssetFromUpload, isAdmissibleCanvasUpload, prepareCanvasAssetFromUpload } from "./canvas-assets.js";
 import { createCanvasMediaHandler } from "./canvas-media-route.js";
 import { createServiceWorkerHandler } from "./static-web.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
@@ -1011,6 +1011,7 @@ app.post("/api/canvases/:id/media", requireAuth, async (req, res) => {
       return;
     }
     if (body.kind === "upload") {
+      if (!isAdmissibleCanvasUpload(users.readUploadState(body.uploadId), user.id)) return res.status(404).json({ error: "上传素材不存在或已失效" });
       const v2 = canvasV2EnabledFor(user);
       const asset = v2
         ? prepareCanvasAssetFromUpload({ uploadId: body.uploadId, ownerId: user.id, canvasId })
