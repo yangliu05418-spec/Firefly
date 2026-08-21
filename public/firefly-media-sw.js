@@ -20,13 +20,22 @@ const trimCache = async (cache) => {
   if (overflow > 0) await Promise.all(keys.slice(0, overflow).map((key) => cache.delete(key)));
 };
 
+const canonicalCacheRequest = (request) => {
+  const url = new URL(request.url);
+  const isRetry = url.searchParams.has("_ff_retry");
+  if (!isRetry) return { key: request, isRetry: false };
+  url.searchParams.delete("_ff_retry");
+  return { key: new Request(url.toString(), request), isRetry: true };
+};
+
 const cacheFirst = async (request) => {
   const cache = await caches.open(PRIVATE_MEDIA_CACHE);
-  const cached = await cache.match(request);
+  const { key, isRetry } = canonicalCacheRequest(request);
+  const cached = isRetry ? undefined : await cache.match(key);
   if (cached) return cached;
   const response = await fetch(request);
   if (response.ok || response.type === "opaque") {
-    await cache.put(request, response.clone()).catch(() => undefined);
+    await cache.put(key, response.clone()).catch(() => undefined);
     void trimCache(cache).catch(() => undefined);
   }
   return response;

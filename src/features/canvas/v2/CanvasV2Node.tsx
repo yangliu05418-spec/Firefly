@@ -1,6 +1,7 @@
-import { lazy, memo, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, memo, Suspense, useRef } from "react";
 import { Handle, NodeResizer, Position, type Node, type NodeProps } from "@xyflow/react";
-import { Box, CircleStop, Clapperboard, Crop, Download, ImageIcon, Images, Library, LoaderCircle, Maximize2, Plus, RotateCw, ScanFace, TextCursorInput, Upload, Users, WandSparkles, X } from "lucide-react";
+import { Box, CircleStop, Clapperboard, Crop, Download, ImageIcon, Images, Library, LoaderCircle, Maximize2, Plus, RefreshCw, RotateCw, ScanFace, TextCursorInput, Upload, Users, WandSparkles, X } from "lucide-react";
+import { RecoveringImage, type ImageRecoveryState } from "../../../recovering-image";
 import type { CanvasNodeTypeV2, CanvasNodeV2 } from "../canvas-v2-types";
 import { LazyCanvasVideo } from "../components/media/LazyCanvasVideo";
 import type { CanvasMenuAnchor, CanvasReferenceSummary } from "./canvas-ux";
@@ -34,7 +35,6 @@ const emptyCopy: Record<CanvasNodeTypeV2, string> = { character: "添加角色�
 function CanvasV2NodeView({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const { domain, readOnly } = data;
   const Icon = icons[domain.type];
-  const [imageError, setImageError] = useState(false);
   const uploadInput = useRef<HTMLInputElement>(null);
   const persistedMediaUrl = domain.data.projectAssetId ? `/api/canvas-project-assets/${encodeURIComponent(domain.data.projectAssetId)}/media${["image", "character", "scene"].includes(domain.type) ? "?variant=thumbnail" : ""}` : "";
   const mediaUrl = data.localPreviewUrl ?? persistedMediaUrl;
@@ -44,11 +44,10 @@ function CanvasV2NodeView({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const canFill = domain.type === "image" || domain.type === "video" || domain.type === "character" || domain.type === "scene";
   const bodyIsInteractive = domain.type === "text" || domain.type === "legacy-audio" || (domain.type === "video" && Boolean(mediaUrl));
   const uploadAccept = domain.type === "video" ? "video/mp4,video/quicktime" : "image/*";
-  useEffect(() => setImageError(false), [domain.data.projectAssetId, status]);
 
   const emptyMedia = canFill ? <div className="canvas-v2-node__empty">
     <Icon />
-    <span>{imageError ? "素材暂时无法显示" : emptyCopy[domain.type]}</span>
+    <span>{emptyCopy[domain.type]}</span>
     {!readOnly && <div className="canvas-v2-node__empty-actions nodrag nowheel">
       <button type="button" onClick={() => uploadInput.current?.click()}>
         <Upload />
@@ -62,6 +61,11 @@ function CanvasV2NodeView({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       <button type="button" onClick={() => data.onPickAsset(id)}><Library /><span>资产库</span></button>
     </div>}
   </div> : <div className="canvas-v2-node__empty"><Icon /><span>{emptyCopy[domain.type]}</span></div>;
+  const imageFallback = ({ phase, retry }: ImageRecoveryState) => <div className="canvas-v2-node__empty" role="status" aria-live="polite">
+    {phase === "retrying" ? <LoaderCircle className="spin" /> : <Icon />}
+    <span>{phase === "retrying" ? "正在重新载入素材" : "素材连接失败"}</span>
+    {phase === "failed" && <div className="canvas-v2-node__empty-actions nodrag nowheel"><button type="button" onClick={(event) => { event.stopPropagation(); retry(); }}><RefreshCw /><span>重新加载</span></button></div>}
+  </div>;
 
   return <article data-node-id={id} className={`canvas-v2-node canvas-v2-node--${domain.type} canvas-v2-node--${status}${data.references.length ? " canvas-v2-node--has-references" : ""}`}>
     {!readOnly && <NodeResizer minWidth={180} minHeight={120} isVisible={selected} lineClassName="canvas-v2-resize-line" handleClassName="canvas-v2-resize-handle" />}
@@ -90,7 +94,7 @@ function CanvasV2NodeView({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         domain.type === "group" ? <div className="canvas-v2-node__group"><Users /><span>内容分组</span><small>拖动节点到这里整理镜头关系</small></div> :
         domain.type === "legacy-audio" ? mediaUrl ? <audio className="canvas-v2-node__media canvas-v2-node__audio" src={mediaUrl} controls preload="metadata" /> : <div className="canvas-v2-node__empty"><Icon /><span>{emptyCopy[domain.type]}</span></div> :
         domain.type === "video" ? mediaUrl ? <LazyCanvasVideo src={mediaUrl} /> : emptyMedia :
-        mediaUrl && !imageError ? <img className="canvas-v2-node__media" style={mediaStyle} src={mediaUrl} alt={domain.title} loading="lazy" draggable={false} onError={() => setImageError(true)} /> : emptyMedia}
+        mediaUrl ? <RecoveringImage className="canvas-v2-node__media" style={mediaStyle} src={mediaUrl} alt={domain.title} loading="lazy" draggable={false} fallback={imageFallback} /> : emptyMedia}
     </div>
     {selected && domain.type !== "group" && <footer className="canvas-v2-node__tools nodrag">
       {persistedMediaUrl && <><a href={`${persistedMediaUrl}?download=1`} aria-label="下载"><Download /></a><button onClick={() => data.onInspect(id)} aria-label="放大"><Maximize2 /></button>{domain.type === "video" && !readOnly && <button onClick={() => data.onExtractFrame(id)} aria-label="抽取中间帧" title="抽取中间帧"><Images /></button>}{domain.type !== "video" && domain.type !== "legacy-audio" && !readOnly && <><button onClick={() => data.onCrop(id)} aria-label="裁剪"><Crop /></button><button onClick={() => data.onRotate(id)} aria-label="旋转并创建派生图"><RotateCw /></button></>}</>}
