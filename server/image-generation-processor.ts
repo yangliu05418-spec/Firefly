@@ -1,0 +1,128 @@
+import { UnrecoverableError } from "bullmq";
+import type { ImageGenerationTask, MediaObject } from "./db.js";
+import { storeGeneratedImage } from "./generated-media.js";
+import { openRouterResolution } from "./image-models.js";
+import { downloadImageBuffer, generateSingleImage, OpenRouterError } from "./openrouter.js";
+import type { ImageGenerationQueuePayload } from "./redis.js";
+import { users } from "./store.js";
+import { signedProviderObjectUrl } from "./tos.js";
+
+export type ImageGenerationAttempt = {
+  id: string;
+  data: ImageGenerationQueuePayload;
+  attemptNumber: number;
+  maxAttempts: number;
+};
+
+export type ImageGenerationProcessorDependencies = {
+  readTask: (id: string) => ImageGenerationTask | null;
+  readUpload: typeof users.readUpload;
+  updateTask: typeof users.updateImageGeneration;
+  signReference: (objectKey: string) => string;
+  generate: typeof generateSingleImage;
+  download: typeof downloadImageBuffer;
+  store: (input: { ownerId: string; body: Buffer; contentType: string; fileName: string }) => Promise<MediaObject>;
+  discard: (media: MediaObject) => unknown;
+};
+
+let productionDependencies: ImageGenerationProcessorDependencies | undefined;
+const defaultDependencies = () => productionDependencies ??= {
+  readTask: (id) => users.readImageGeneration(id),
+  readUpload: users.readUpload.bind(users),
+  updateTask: users.updateImageGeneration.bind(users),
+  signReference: signedProviderObjectUrl,
+  generate: generateSingleImage,
+  download: downloadImageBuffer,
+  store: storeGeneratedImage,
+  discard: (media) => users.upsertMedia({ ...media, status: "delete_pending", updatedAt: Date.now() }),
+};
+
+export const isRetryableImageGenerationError = (error: unknown) => {
+  if (!(error instanceof OpenRouterError)) return true;
+  if (error.status === "network") return true;
+  return error.status === 408 || error.status === 409 || error.status === 425 || error.status === 429 || error.status >= 500;
+};
+
+const imageContentType = (url: string) => url.startsWith("data:image/webp")
+  ? "image/webp"
+  : url.startsWith("data:image/jpeg")
+    ? "image/jpeg"
+    : "image/png";
+
+const extensionFor = (contentType: string) => contentType === "image/webp" ? "webp" : contentType === "image/jpeg" ? "jpg" : "png";
+const errorMessage = (error: unknown) => (error instanceof Error ? error.message : "生成失败").slice(0, 500);
+
+/**
+ * Process one durable image-generation attempt.
+ *
+ * Successful items and terminal item failures are checkpointed after every
+ * slot. A transient error is deliberately rethrown before it is recorded so
+ * BullMQ can retry the same slot without regenerating already stored items.
+ */
+export const processImageGenerationAttempt = async (
+  job: ImageGenerationAttempt,
+  deps: ImageGenerationProcessorDependencies = defaultDependencies(),
+) => {
+  const task = deps.readTask(job.id);
+  if (!task || task.status !== "running") return;
+  if (task.ownerId !== job.data.ownerId) throw new UnrecoverableError("图片任务所有者校验失败");
+
+  const references = job.data.referenceUploadIds.map((uploadId) => {
+    const media = deps.readUpload(uploadId);
+    if (!media || media.ownerId !== job.data.ownerId) throw new UnrecoverableError("参考素材不存在或已过期");
+    return deps.signReference(media.objectKey);
+  });
+  const items = [...task.items];
+  const failures = [...task.failures];
+  const completed = items.length + failures.length;
+  console.info(JSON.stringify({
+    type: "image_generation_worker_started", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId,
+    attempt: job.attemptNumber, completed, requested: task.requestedCount,
+  }));
+
+  for (let index = completed; index < task.requestedCount; index += 1) {
+    if (!deps.readTask(task.id)) return;
+    try {
+      const url = await deps.generate({
+        model: job.data.model,
+        prompt: job.data.prompt,
+        references,
+        ratio: job.data.ratio,
+        resolution: openRouterResolution(job.data.resolution),
+      });
+      const buffer = await deps.download(url);
+      const contentType = imageContentType(url);
+      const extension = extensionFor(contentType);
+      const media = await deps.store({ ownerId: task.ownerId, body: buffer, contentType, fileName: `firefly-${index + 1}.${extension}` });
+      items.push({ mediaId: media.id });
+      if (!deps.updateTask(task.id, task.ownerId, { status: "running", items, failures })) {
+        deps.discard(media);
+        return;
+      }
+      console.info(JSON.stringify({ type: "image_generation_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, mediaId: media.id, index, bytes: buffer.length }));
+    } catch (error) {
+      const message = errorMessage(error);
+      const retryable = isRetryableImageGenerationError(error);
+      if (retryable && job.attemptNumber < job.maxAttempts) {
+        console.warn(JSON.stringify({
+          type: "image_generation_item_retry", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId,
+          index, attempt: job.attemptNumber, status: error instanceof OpenRouterError ? error.status : undefined, message,
+        }));
+        throw error;
+      }
+      failures.push(message);
+      deps.updateTask(task.id, task.ownerId, { status: "running", items, failures });
+      console.warn(JSON.stringify({
+        type: "image_generation_item_failed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId,
+        index, attempt: job.attemptNumber, retryable, status: error instanceof OpenRouterError ? error.status : undefined, message,
+      }));
+    }
+  }
+
+  if (!items.length) throw new UnrecoverableError(failures[0] ?? "图片生成失败");
+  deps.updateTask(task.id, task.ownerId, { status: "succeeded", items, failures });
+  console.info(JSON.stringify({ type: "image_generation_done", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, requested: task.requestedCount, ok: items.length, failed: failures.length }));
+};
+
+export const shouldFinalizeImageGenerationFailure = (error: unknown, attemptsMade: number, maxAttempts: number) =>
+  error instanceof UnrecoverableError || (error instanceof Error && error.name === "UnrecoverableError") || attemptsMade >= maxAttempts;

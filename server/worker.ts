@@ -7,11 +7,7 @@ import { mediaQueue, readTask, saveTask } from "./redis.js";
 import { AssetRegistrationRejected, isRetryableAssetRejection, prepareProviderAssets } from "./asset-registration.js";
 import { users } from "./store.js";
 import { closeWorkersWithin } from "./shutdown.js";
-import { downloadImageBuffer, generateSingleImage, OpenRouterError } from "./openrouter.js";
-import { storeGeneratedImage } from "./generated-media.js";
-import { openRouterResolution } from "./image-models.js";
-import { signedProviderObjectUrl } from "./tos.js";
-import type { ImageGenerationQueuePayload } from "./redis.js";
+import { createImageGenerationWorker } from "./image-generation-worker.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -70,45 +66,7 @@ const worker = new Worker("generation", async (job) => {
   throw new Error("任务查询超时，可稍后通过官方任务 ID 查询");
 }, { connection, concurrency: config.generationConcurrency, lockDuration: 120000 });
 
-const imageWorker = new Worker<ImageGenerationQueuePayload>("image-generation", async (job) => {
-  const task = users.readImageGeneration(job.id!);
-  if (!task || task.status !== "running") return;
-  const references = job.data.referenceUploadIds.map((uploadId) => {
-    const media = users.readUpload(uploadId);
-    if (!media || media.ownerId !== job.data.ownerId) throw new UnrecoverableError("参考素材不存在或已过期");
-    return signedProviderObjectUrl(media.objectKey);
-  });
-  const items = [...task.items];
-  const failures = [...task.failures];
-  const completed = items.length + failures.length;
-  console.info(JSON.stringify({ type: "image_generation_worker_started", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, completed, requested: task.requestedCount }));
-  for (let index = completed; index < task.requestedCount; index += 1) {
-    try {
-      const url = await generateSingleImage({
-        model: job.data.model,
-        prompt: job.data.prompt,
-        references,
-        ratio: job.data.ratio,
-        resolution: openRouterResolution(job.data.resolution),
-      });
-      const buffer = await downloadImageBuffer(url);
-      const contentType = url.startsWith("data:image/webp") ? "image/webp" : url.startsWith("data:image/jpeg") ? "image/jpeg" : "image/png";
-      const extension = contentType === "image/webp" ? "webp" : contentType === "image/jpeg" ? "jpg" : "png";
-      const media = await storeGeneratedImage({ ownerId: task.ownerId, body: buffer, contentType, fileName: `firefly-${index + 1}.${extension}` });
-      items.push({ mediaId: media.id });
-      users.updateImageGeneration(task.id, task.ownerId, { status: "running", items, failures });
-      console.info(JSON.stringify({ type: "image_generation_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, mediaId: media.id, index, bytes: buffer.length }));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "生成失败";
-      failures.push(message);
-      users.updateImageGeneration(task.id, task.ownerId, { status: "running", items, failures });
-      console.warn(JSON.stringify({ type: "image_generation_item_failed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, index, status: error instanceof OpenRouterError ? error.status : undefined, message }));
-    }
-  }
-  if (!items.length) throw new UnrecoverableError(failures[0] ?? "图片生成失败");
-  users.updateImageGeneration(task.id, task.ownerId, { status: "succeeded", items, failures });
-  console.info(JSON.stringify({ type: "image_generation_done", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, requested: task.requestedCount, ok: items.length, failed: failures.length }));
-}, { connection, concurrency: 2, lockDuration: Math.max(240000, config.openrouterRequestTimeoutMs + 60000) });
+const imageWorker = createImageGenerationWorker(connection);
 
 worker.on("failed", async (job, error) => {
   if (!job?.id) return;
@@ -134,18 +92,6 @@ worker.on("failed", async (job, error) => {
     console.error(JSON.stringify({ type: "generation_failed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, providerId: task.providerId, attempts: job.attemptsMade, message: error.message }));
   } catch (handlerError) {
     console.error(JSON.stringify({ type: "generation_failure_handler_failed", at: new Date().toISOString(), taskId: job.id, code: (handlerError as { code?: string }).code ?? "unknown" }));
-  }
-});
-
-imageWorker.on("failed", async (job, error) => {
-  if (!job?.id || job.attemptsMade < (job.opts.attempts ?? 1)) return;
-  try {
-    const task = users.readImageGeneration(job.id);
-    if (!task || task.status !== "running") return;
-    users.updateImageGeneration(task.id, task.ownerId, { status: "failed", items: task.items, failures: task.failures, error: error.message.slice(0, 500) });
-    console.error(JSON.stringify({ type: "image_generation_failed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, message: error.message }));
-  } catch (handlerError) {
-    console.error(JSON.stringify({ type: "image_generation_failure_handler_failed", at: new Date().toISOString(), taskId: job.id, code: (handlerError as { code?: string }).code ?? "unknown" }));
   }
 });
 

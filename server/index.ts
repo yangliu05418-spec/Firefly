@@ -817,7 +817,13 @@ app.post("/api/image-generation", requireAuth, async (req, res) => {
       await imageGenerationQueue.add("generate-image", {
         ownerId: user.id, model: body.model, prompt: body.prompt, ratio: body.ratio,
         resolution: body.resolution, count: body.count, referenceUploadIds: body.references,
-      }, { jobId: requestId, attempts: 1, removeOnComplete: { age: 7 * 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } });
+      }, {
+        jobId: requestId,
+        attempts: 3,
+        backoff: { type: "exponential", delay: 5000, jitter: 0.5 },
+        removeOnComplete: { age: 7 * 24 * 3600 },
+        removeOnFail: { age: 7 * 24 * 3600 },
+      });
     } catch (error) {
       users.updateImageGeneration(activeTask.id, user.id, { status: "failed", items: [], failures: [], error: "任务进入生成队列失败，请重新提交" });
       console.error(JSON.stringify({ type: "image_generation_enqueue_failed", at: new Date().toISOString(), taskId: activeTask.id, userId: user.id, code: (error as { code?: string }).code ?? "unknown" }));
