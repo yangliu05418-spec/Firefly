@@ -4,8 +4,9 @@ import Database from "better-sqlite3";
 
 export const CURRENT_SCHEMA_VERSION = 4;
 // Compatibility bridge: deploy this reader before the Canvas V2 migration so
-// the previous image remains a valid blue/green rollback target after schema 4.
-export const MAX_SUPPORTED_SCHEMA_VERSION = 4;
+// this image remains a valid blue/green rollback target after the next
+// expand-only migration is applied.
+export const MAX_SUPPORTED_SCHEMA_VERSION = 5;
 
 const baseSchema = `
   CREATE TABLE IF NOT EXISTS users (

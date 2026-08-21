@@ -17,7 +17,7 @@ const imageModels = [{ id: "google/gemini-3.1-flash-lite-image", name: "Nano Ban
 
 const json = (route: Route, body: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
-async function mockAuthenticatedApi(page: Page, options: { leaseHeld?: boolean; expireLeaseOnce?: boolean; document?: CanvasDocumentV2 } = {}) {
+async function mockAuthenticatedApi(page: Page, options: { leaseHeld?: boolean; expireLeaseOnce?: boolean; document?: CanvasDocumentV2; imageGenerationDelayMs?: number } = {}) {
   let revision = 0;
   let storedDocument = structuredClone(options.document ?? documentV2);
   let leaseReleaseCount = 0;
@@ -32,6 +32,11 @@ async function mockAuthenticatedApi(page: Page, options: { leaseHeld?: boolean; 
     if (path === "/api/auth/session") return json(route, { authenticated: true, user: { id: "user-e2e", email: "artist@dokuai.tv", name: "Artist", avatarUrl: "" } });
     if (path === "/api/models") return json(route, videoModels);
     if (path === "/api/image-models") return json(route, { Items: imageModels, Ratios: ["16:9", "1:1", "9:16"], DefaultModel: imageModels[0].id });
+    if (path === "/api/image-generation" && request.method() === "POST") {
+      await new Promise((resolve) => setTimeout(resolve, options.imageGenerationDelayMs ?? 0));
+      return json(route, { Items: [{ mediaId: "image-e2e" }], Model: imageModels[0].id, Ratio: "1:1", Resolution: "1024", Failed: [] });
+    }
+    if (path === "/api/image-media/image-e2e") return route.fulfill({ status: 200, contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><path fill="#b8d9cf" d="M0 0h8v8H0z"/></svg>' });
     if (path === "/api/generations") return json(route, []);
     if (path === "/api/assets") return json(route, { Items: [], HasMore: false });
     if (path === "/api/canvas/config") return json(route, { enabled: true });
@@ -207,6 +212,22 @@ test("node menus stay anchored, text expands outside the flow transform, and ref
   await expect(target.getByLabel("引用来源")).toHaveCount(0);
   await expect.poll(() => mock.storedDocument().connections.some((edge) => edge.source === "source-text" && edge.target === "target-image")).toBe(false);
   await expect.poll(() => mock.storedDocument().connections.some((edge) => edge.source === "target-image" && edge.target === generatedNodeId)).toBe(true);
+});
+
+test("image generation confirms immediately and moves provider waiting into the result card", async ({ page }) => {
+  await mockAuthenticatedApi(page, { imageGenerationDelayMs: 1_500 });
+  await page.goto("/studio");
+  await page.getByRole("button", { name: "视频生成", exact: true }).click();
+  await page.getByRole("button", { name: "图片生成 支持文生图与图生图" }).click();
+  const prompt = "一盏放在雨夜窗边的暖色台灯";
+  await page.getByRole("textbox", { name: "创作提示词" }).fill(prompt);
+  const send = page.locator(".send-button");
+  await send.click();
+  await expect(page.getByText("已提交，正在生成")).toBeVisible({ timeout: 500 });
+  await expect(send.locator(".spin")).toHaveCount(0);
+  await expect(page.locator(".image-result--generating")).toBeVisible();
+  await expect(page.getByRole("img", { name: prompt })).toBeVisible({ timeout: 5_000 });
+  await expect(page.locator(".image-result--generating")).toHaveCount(0);
 });
 
 test("a fast text edit is committed to the browser draft before the page leaves", async ({ page }) => {
