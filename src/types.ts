@@ -14,6 +14,9 @@ export type ImageResultBundle = {
   prompt: string;
   items: ImageGenItem[];
   createdAt: number;
+  status?: "generating" | "succeeded" | "failed";
+  requestedCount?: number;
+  error?: string;
   failed?: string[];
 };
 export type LibraryGroup = { Id: string; Name: string; Description?: string };
