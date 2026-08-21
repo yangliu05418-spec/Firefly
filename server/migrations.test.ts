@@ -4,7 +4,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { UserStore } from "./db.js";
-import { assertSchemaVersion, CURRENT_SCHEMA_VERSION, MAX_SUPPORTED_SCHEMA_VERSION, migrateDatabase, schemaVersion } from "./migrations.js";
+import { assertSchemaVersion, CURRENT_SCHEMA_VERSION, migrateDatabase, schemaVersion } from "./migrations.js";
 
 describe("versioned database migrations", () => {
   const directories: string[] = [];
@@ -23,12 +23,13 @@ describe("versioned database migrations", () => {
     const database = new Database(target, { readonly: true });
     expect(schemaVersion(database)).toBe(CURRENT_SCHEMA_VERSION);
     expect(assertSchemaVersion(database)).toBe(CURRENT_SCHEMA_VERSION);
-    expect((database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number }).count).toBe(6);
+    expect((database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number }).count).toBe(7);
     const assetColumns = (database.prepare("PRAGMA table_info(user_assets)").all() as { name: string }[]).map((column) => column.name);
     expect(assetColumns).toEqual(expect.arrayContaining(["category", "provider_asset_id", "last_error"]));
     expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='canvas_project_assets'").get() as { name: string }).name).toBe("canvas_project_assets");
     expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='image_generation_tasks'").get() as { name: string }).name).toBe("image_generation_tasks");
     expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='creation_sessions'").get() as { name: string }).name).toBe("creation_sessions");
+    expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='async_job_outbox'").get() as { name: string }).name).toBe("async_job_outbox");
     database.close();
   });
 
@@ -60,18 +61,22 @@ describe("versioned database migrations", () => {
     store.close();
   });
 
-  it("keeps the current image rollback-compatible with the next expand-only schema", () => {
+  it("upgrades schema six by adding only the durable outbox", () => {
     const target = databasePath();
     migrateDatabase(target);
     const database = new Database(target);
-    database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (7, 'future-incompatible', ?)").run(Date.now());
+    database.exec("DELETE FROM schema_migrations WHERE version = 7; DROP TABLE async_job_outbox");
+    const taskSqlBefore = (database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'generation_tasks'").get() as { sql: string }).sql;
     database.close();
-    const compatible = new Database(target, { readonly: true });
-    expect(assertSchemaVersion(compatible)).toBe(MAX_SUPPORTED_SCHEMA_VERSION);
-    compatible.close();
+
+    expect(migrateDatabase(target)).toBe(7);
+    const upgraded = new Database(target, { readonly: true });
+    expect((upgraded.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'generation_tasks'").get() as { sql: string }).sql).toBe(taskSqlBefore);
+    expect(upgraded.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'async_job_outbox'").get()).toMatchObject({ name: "async_job_outbox" });
+    upgraded.close();
   });
 
-  it("rejects a database beyond the declared rollback window", () => {
+  it("rejects a database newer than this release", () => {
     const target = databasePath();
     migrateDatabase(target);
     const database = new Database(target);

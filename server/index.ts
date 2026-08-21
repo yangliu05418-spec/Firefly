@@ -14,7 +14,7 @@ import { canvasDocumentSchema, DEFAULT_CANVAS_DOCUMENT, DEFAULT_CANVAS_DOCUMENT_
 import { resolveCanvasContext } from "./canvas-context.js";
 import { publicCanvasProject, publicCanvasProjectDetail } from "./canvas-public.js";
 import { consumeFeishuAuthorization, createFeishuAuthorization, exchangeFeishuCode } from "./feishu.js";
-import { assetQueue, canvasQueue, generationQueue, imageGenerationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, previewQueue, readTask, redis, saveTask, type StoredTask, uploadFinalizationQueue } from "./redis.js";
+import { assetQueue, canvasQueue, generationQueue, imageGenerationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, previewQueue, readTask, redis, type StoredTask, uploadFinalizationQueue } from "./redis.js";
 import { canAccessTask } from "./task-access.js";
 import { publicTask } from "./task-public.js";
 import { validateGeneration } from "./provider.js";
@@ -216,8 +216,8 @@ app.post("/api/uploads/:id/heartbeat", requireAuth, async (req, res) => {
   } catch (error) { respondError(res, error); }
 });
 
-const enqueueUploadFinalization = async (uploadId: string) => {
-  await uploadFinalizationQueue.add("finalize-upload", { uploadId }, {
+const enqueueUploadFinalization = (uploadId: string) => {
+  void uploadFinalizationQueue.add("finalize-upload", { uploadId }, {
     jobId: `finalize-upload-${uploadId}`,
     priority: 1,
     attempts: 5,
@@ -312,8 +312,8 @@ app.post("/api/uploads/:id/complete", requireAuth, async (req, res) => {
           meta.finalizing = true;
           await redis.set(`upload:${uploadId}`, JSON.stringify(meta), "EX", UPLOAD_SESSION_TTL_SECONDS);
           await releaseUploadSlot(redis, owner.id, uploadId);
-          await enqueueUploadFinalization(uploadId);
-          stageLog("queued");
+          enqueueUploadFinalization(uploadId);
+          stageLog("finalization_scheduled");
           console.info(JSON.stringify({ type: "tos_upload_transport_completed", at: new Date().toISOString(), userId: meta.ownerId, uploadId, size, requestId: head.requestId }));
           return res.status(202).json({ id: uploadId, uploadId, name: meta.name, type: meta.type, size, state: "processing" });
         } catch (error) {
@@ -456,18 +456,10 @@ app.post("/api/generations", requireAuth, async (req, res) => {
     const id = crypto.randomUUID();
     const now = Date.now();
     const task: StoredTask = { id, sessionId: activeSession.id, ownerId: owner.id, visibility: "private", status: "queued", mediaStatus: "none", mediaRevision: 0, prompt: input.prompt, model: input.model, mode: input.mode, ratio: input.ratio, resolution: input.resolution, duration: input.duration, request: requestedInput, createdAt: now, updatedAt: now };
-    if (!users.createTaskWithinLimit(task, config.maxActiveGenerationsPerUser)) return res.status(429).json({ error: `你已有 ${config.maxActiveGenerationsPerUser} 个任务正在生成，请等待其中一个完成`, requestId: res.locals.requestId });
-    await saveTask(task);
-    try {
-      await generationQueue.add("generate", { input }, { jobId: id, attempts: 4, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: { age: 7 * 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } });
-    } catch (error) {
-      const failed = { ...task, status: "failed" as const, error: "任务进入生成队列失败，请重新提交", updatedAt: Date.now() };
-      await saveTask(failed);
-      console.error(JSON.stringify({ type: "generation_enqueue_failed", at: new Date().toISOString(), taskId: id, userId: owner.id, code: (error as { code?: string }).code ?? "unknown" }));
-      return res.status(503).json({ error: `${failed.error}（Case ID: ${id}）`, caseId: id });
-    }
+    const intent = { queueName: "generation" as const, jobId: id, jobName: "generate", payload: { input } };
+    if (!users.createTaskWithinLimit(task, config.maxActiveGenerationsPerUser, intent)) return res.status(429).json({ error: `你已有 ${config.maxActiveGenerationsPerUser} 个任务正在生成，请等待其中一个完成`, requestId: res.locals.requestId });
     users.touchCreationSession(activeSession.id, owner.id, input.prompt);
-    console.info(JSON.stringify({ type: "generation_queued", at: new Date().toISOString(), requestId: res.locals.requestId, taskId: id, userId: owner.id, model: input.model, mode: input.mode, assetCount: input.assets.length }));
+    console.info(JSON.stringify({ type: "generation_admitted", at: new Date().toISOString(), requestId: res.locals.requestId, taskId: id, userId: owner.id, model: input.model, mode: input.mode, assetCount: input.assets.length }));
     res.status(202).json(publicGenerationTask(task));
   } catch (error) { respondError(res, error); }
 });
@@ -629,12 +621,10 @@ app.post("/api/assets", requireAuth, async (req, res) => {
       if (!stored) throw new Error("素材上传记录未能持久化");
       if (stored.id !== asset.id) return res.status(202).json(publicUserAsset(stored));
       if (users.readUpload(body.uploadId)) {
-        try {
-          await assetQueue.add("register", { assetId: asset.id }, { jobId: asset.id, attempts: 3, backoff: { type: "exponential", delay: 15_000 }, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } });
-        } catch (error) {
+        void assetQueue.add("register", { assetId: asset.id }, { jobId: asset.id, attempts: 3, backoff: { type: "exponential", delay: 15_000 }, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } }).catch((error) => {
           users.upsertUserAsset({ ...asset, lastError: "素材已上传，生成引用将在后台继续准备", updatedAt: Date.now() });
           console.warn(JSON.stringify({ type: "asset_ingest_enqueue_failed", at: new Date().toISOString(), assetId: asset.id, userId: user.id, code: (error as { code?: string }).code ?? "unknown" }));
-        }
+        });
       }
       console.info(JSON.stringify({ type: "user_asset_mutation", action: "queue_asset", userId: user.id, assetId: asset.id, at: new Date().toISOString() }));
       return res.status(202).json(publicUserAsset(users.readUserAsset(asset.id)!));
@@ -792,25 +782,14 @@ app.post("/api/image-generation", requireAuth, async (req, res) => {
       resolution: body.resolution, prompt: body.prompt, requestedCount: body.count, status: "running",
       items: [], failures: [], createdAt: startedAt, updatedAt: startedAt,
     };
-    if (!users.createImageGenerationWithinLimit(activeTask, 2)) return res.status(429).json({ error: "图片生成繁忙，请等当前生成完成后再试（每用户同时最多 2 组）" });
-    try {
-      await imageGenerationQueue.add("generate-image", {
-        ownerId: user.id, model: body.model, prompt: body.prompt, ratio: body.ratio,
-        resolution: body.resolution, count: body.count, referenceUploadIds: body.references,
-      }, {
-        jobId: requestId,
-        attempts: 3,
-        backoff: { type: "exponential", delay: 5000, jitter: 0.5 },
-        removeOnComplete: { age: 7 * 24 * 3600 },
-        removeOnFail: { age: 7 * 24 * 3600 },
-      });
-    } catch (error) {
-      users.updateImageGeneration(activeTask.id, user.id, { status: "failed", items: [], failures: [], error: "任务进入生成队列失败，请重新提交" });
-      console.error(JSON.stringify({ type: "image_generation_enqueue_failed", at: new Date().toISOString(), taskId: activeTask.id, userId: user.id, code: (error as { code?: string }).code ?? "unknown" }));
-      return res.status(503).json({ error: "任务进入生成队列失败，请重新提交", requestId: res.locals.requestId });
-    }
+    const payload = {
+      ownerId: user.id, model: body.model, prompt: body.prompt, ratio: body.ratio,
+      resolution: body.resolution, count: body.count, referenceUploadIds: body.references,
+    };
+    const intent = { queueName: "image-generation" as const, jobId: requestId, jobName: "generate-image", payload };
+    if (!users.createImageGenerationWithinLimit(activeTask, 2, intent)) return res.status(429).json({ error: "图片生成繁忙，请等当前生成完成后再试（每用户同时最多 2 组）" });
     users.touchCreationSession(activeSession.id, user.id, body.prompt);
-    console.info(JSON.stringify({ type: "image_generation_queued", at: new Date().toISOString(), taskId: activeTask.id, userId: user.id, model: body.model, ratio: body.ratio, resolution: body.resolution, count: body.count, references: body.references.length, healthyKeys: openRouterPool().healthyCount() }));
+    console.info(JSON.stringify({ type: "image_generation_admitted", at: new Date().toISOString(), taskId: activeTask.id, userId: user.id, model: body.model, ratio: body.ratio, resolution: body.resolution, count: body.count, references: body.references.length, healthyKeys: openRouterPool().healthyCount() }));
     res.status(202).json({ Id: activeTask.id, Items: [], Model: body.model, Ratio: body.ratio, Resolution: body.resolution, Failed: [], Status: "generating" });
   } catch (error) {
     respondError(res, error, 400);
@@ -1147,20 +1126,17 @@ app.post("/api/canvases/:id/jobs", requireAuth, async (req, res) => {
     };
 
     if (body.kind === "text") {
-      users.createCanvasJob(canvasJob);
-      try {
-        await canvasQueue.add("text", { canvasJobId: canvasJob.id, kind: "text", payload: { instruction: body.payload.instruction, currentText: context.target.data.markdown ?? "", context: context.text } }, { jobId: canvasJob.id, attempts: 3, backoff: { type: "exponential", delay: 3000 }, removeOnComplete: { age: 7 * 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } });
-      } catch (error) { users.transitionActiveCanvasJob(canvasJob.id, { status: "failed", error: "任务进入文本队列失败" }); throw error; }
+      const payload = { canvasJobId: canvasJob.id, kind: "text" as const, payload: { instruction: body.payload.instruction, currentText: context.target.data.markdown ?? "", context: context.text } };
+      users.createCanvasJobWithOutbox(canvasJob, { queueName: "canvas-jobs", jobId: canvasJob.id, jobName: "text", payload });
       return res.status(202).json(publicCanvasJob(canvasJob));
     }
 
     if (body.kind === "image" || body.kind === "character_tool") {
       const references = ownedCanvasProjectAssets(canvasId, user.id, [...context.assetIds, ...body.payload.referenceAssetIds]);
-      if (!users.createCanvasImageJobWithinLimit(canvasJob, 2)) return res.status(429).json({ error: "你已有 2 个图片任务正在处理，请等待其中一个完成" });
       const prompt = [context.text, body.kind === "character_tool" ? characterToolPrompts[body.payload.tool] : "", body.payload.prompt].filter(Boolean).join("\n\n");
-      try {
-        await canvasQueue.add(body.kind, { canvasJobId: canvasJob.id, kind: body.kind, payload: { prompt, model: body.payload.model, ratio: body.payload.ratio, resolution: body.payload.resolution, referenceAssetIds: references.map((asset) => asset.id) } }, { jobId: canvasJob.id, attempts: 3, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: { age: 7 * 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } });
-      } catch (error) { users.transitionActiveCanvasJob(canvasJob.id, { status: "failed", error: "任务进入图片队列失败" }); throw error; }
+      const payload = { canvasJobId: canvasJob.id, kind: body.kind, payload: { prompt, model: body.payload.model, ratio: body.payload.ratio, resolution: body.payload.resolution, referenceAssetIds: references.map((asset) => asset.id) } };
+      const intent = { queueName: "canvas-jobs" as const, jobId: canvasJob.id, jobName: body.kind, payload };
+      if (!users.createCanvasImageJobWithinLimit(canvasJob, 2, intent)) return res.status(429).json({ error: "你已有 2 个图片任务正在处理，请等待其中一个完成" });
       return res.status(202).json(publicCanvasJob(canvasJob));
     }
 
@@ -1176,16 +1152,9 @@ app.post("/api/canvases/:id/jobs", requireAuth, async (req, res) => {
     const input = validateGeneration({ ...body.payload.generation, prompt: [context.text, String(body.payload.generation.prompt ?? "")].filter(Boolean).join("\n\n"), assets: generationAssets });
     const taskId = crypto.randomUUID();
     const task: StoredTask = { id: taskId, ownerId: user.id, visibility: "private", status: "queued", mediaStatus: "none", mediaRevision: 0, prompt: input.prompt, model: input.model, mode: input.mode, ratio: input.ratio, resolution: input.resolution, duration: input.duration, request: input, createdAt: now, updatedAt: now };
-    if (!users.createTaskWithinLimit(task, config.maxActiveGenerationsPerUser)) return res.status(429).json({ error: `你已有 ${config.maxActiveGenerationsPerUser} 个任务正在生成，请稍后再试` });
-    users.createCanvasJob({ ...canvasJob, providerTaskId: taskId });
-    await saveTask(task);
-    try {
-      await generationQueue.add("generate", { input }, { jobId: taskId, attempts: 4, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: { age: 7 * 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } });
-    } catch (error) {
-      users.transitionActiveCanvasJob(canvasJob.id, { status: "failed", error: "任务进入生成队列失败" });
-      await saveTask({ ...task, status: "failed", error: "任务进入生成队列失败", updatedAt: Date.now() });
-      throw error;
-    }
+    const linkedCanvasJob = { ...canvasJob, providerTaskId: taskId };
+    const intent = { queueName: "generation" as const, jobId: taskId, jobName: "generate", payload: { input } };
+    if (!users.createCanvasVideoJobWithinLimit(task, linkedCanvasJob, config.maxActiveGenerationsPerUser, intent)) return res.status(429).json({ error: `你已有 ${config.maxActiveGenerationsPerUser} 个任务正在生成，请稍后再试` });
     res.status(202).json(publicCanvasJob(users.readCanvasJob(canvasJob.id)!));
   } catch (error) { respondError(res, error, 502); }
 });
@@ -1457,7 +1426,7 @@ app.get("/api/health/ready", async (_req, res) => {
       const health = tosHealthGate.snapshot();
       if (!health.configured || !health.effectiveReachable) throw new Error("TOS unavailable");
     }
-    res.json({ status: "ready", redis: "ok", database: "ok", queues: "ok", workers: workerHealth.ready ? "ok" : "starting", tos: tosEnabled() ? "ok" : "disabled", previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, schemaVersion: users.schemaVersion(), ...runtimeIdentity });
+    res.json({ status: "ready", redis: "ok", database: "ok", queues: "ok", workers: workerHealth.ready ? "ok" : "starting", tos: tosEnabled() ? "ok" : "disabled", asyncJobs: users.asyncJobOutboxStats(), previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, schemaVersion: users.schemaVersion(), ...runtimeIdentity });
   } catch (error) {
     const tosHealthSnapshot = tosHealthGate.snapshot();
     console.warn(JSON.stringify({ type: "readiness_failed", at: new Date().toISOString(), dependency, code: (error as { code?: string }).code ?? "unknown", tosConsecutiveFailures: tosHealthSnapshot.consecutiveFailures, tosLastProbeReachable: tosHealthSnapshot.lastProbeReachable }));
@@ -1470,7 +1439,7 @@ app.get("/api/health", async (_req, res) => {
   try {
     await redis.ping();
     if (!users.healthCheck()) throw new Error("database unavailable");
-    res.json({ status: "ok", redis: "ok", database: "ok", schemaVersion: users.schemaVersion(), tosConfigured: tosHealthSnapshot.configured, tosReachable: tosHealthSnapshot.effectiveReachable, tosLastProbeReachable: tosHealthSnapshot.lastProbeReachable, tosCheckedAt: tosHealthSnapshot.checkedAt, tosLastSuccessfulAt: tosHealthSnapshot.lastSuccessfulAt, tosConsecutiveFailures: tosHealthSnapshot.consecutiveFailures, previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, ...runtimeIdentity });
+    res.json({ status: "ok", redis: "ok", database: "ok", schemaVersion: users.schemaVersion(), asyncJobs: users.asyncJobOutboxStats(), tosConfigured: tosHealthSnapshot.configured, tosReachable: tosHealthSnapshot.effectiveReachable, tosLastProbeReachable: tosHealthSnapshot.lastProbeReachable, tosCheckedAt: tosHealthSnapshot.checkedAt, tosLastSuccessfulAt: tosHealthSnapshot.lastSuccessfulAt, tosConsecutiveFailures: tosHealthSnapshot.consecutiveFailures, previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, ...runtimeIdentity });
   } catch { res.status(503).json({ status: "degraded", redis: "unavailable", database: "unavailable", tosConfigured: tosHealthSnapshot.configured, tosReachable: tosHealthSnapshot.effectiveReachable, tosLastProbeReachable: tosHealthSnapshot.lastProbeReachable, tosCheckedAt: tosHealthSnapshot.checkedAt, tosLastSuccessfulAt: tosHealthSnapshot.lastSuccessfulAt, tosConsecutiveFailures: tosHealthSnapshot.consecutiveFailures, previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, ...runtimeIdentity }); }
 });
 

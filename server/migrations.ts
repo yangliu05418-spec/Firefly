@@ -2,10 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 
-export const CURRENT_SCHEMA_VERSION = 6;
-// Compatibility bridge: deploy this reader before the Canvas V2 migration so
-// this image remains a valid blue/green rollback target after the next
-// expand-only migration is applied.
+export const CURRENT_SCHEMA_VERSION = 7;
+// Keep the readable ceiling explicit; the previous bridge release supports
+// both schema 6 and 7, so this expand-only migration remains rollback-safe.
 export const MAX_SUPPORTED_SCHEMA_VERSION = 7;
 
 const baseSchema = `
@@ -350,6 +349,27 @@ const addCreationSessions = (database: Database.Database) => {
   }
 };
 
+const addAsyncJobOutbox = (database: Database.Database) => {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS async_job_outbox (
+      queue_name TEXT NOT NULL CHECK (queue_name IN ('generation', 'image-generation', 'canvas-jobs')),
+      job_id TEXT NOT NULL,
+      job_name TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'dispatched', 'complete')),
+      publish_attempts INTEGER NOT NULL DEFAULT 0,
+      available_at INTEGER NOT NULL,
+      dispatched_at INTEGER,
+      last_error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (queue_name, job_id)
+    );
+    CREATE INDEX IF NOT EXISTS async_job_outbox_dispatch_idx
+      ON async_job_outbox(status, available_at, updated_at);
+  `);
+};
+
 export const migrateDatabase = (databasePath: string) => {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const database = new Database(databasePath);
@@ -384,6 +404,10 @@ export const migrateDatabase = (databasePath: string) => {
       if (version < 6) {
         addCreationSessions(database);
         database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(6, "add-creation-sessions", Date.now());
+      }
+      if (version < 7) {
+        addAsyncJobOutbox(database);
+        database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(7, "add-async-job-outbox", Date.now());
       }
       assertSchemaVersion(database);
     }).exclusive();

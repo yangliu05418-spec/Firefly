@@ -1,15 +1,16 @@
-import { UnrecoverableError, Worker } from "bullmq";
+import { UnrecoverableError, Worker, type Job } from "bullmq";
 import { Redis } from "ioredis";
 import { config } from "./config.js";
 import { shouldRecoverArchiveHandoff } from "./archive-state.js";
 import { createProviderTask, getProviderTask, validateGeneration, type GenerationInput } from "./provider.js";
-import { mediaQueue, readTask, saveTask } from "./redis.js";
+import { canvasQueue, generationQueue, imageGenerationQueue, mediaQueue, readTask, saveTask } from "./redis.js";
 import { AssetRegistrationRejected, isRetryableAssetRejection, prepareProviderAssets } from "./asset-registration.js";
 import { users } from "./store.js";
 import { closeWorkersWithin } from "./shutdown.js";
 import { createImageGenerationWorker } from "./image-generation-worker.js";
 import { shouldFinalizeJobFailure } from "./job-failure.js";
 import { startWorkerHeartbeat } from "./worker-heartbeat.js";
+import { startAsyncJobOutboxDispatcher } from "./async-job-outbox.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -17,7 +18,7 @@ const maxPolls = Math.ceil(6 * 3600 * 1000 / config.providerPollIntervalMs);
 const archiveRecoveryBucketMs = 15 * 60 * 1000;
 const outputFormatFor = (task: { request?: unknown }) => (task.request as { outputFormat?: unknown } | undefined)?.outputFormat === "mov" ? "mov" as const : "mp4" as const;
 
-const worker = new Worker("generation", async (job) => {
+const processGenerationJob = async (job: Job<{ input: unknown }>) => {
   let input = validateGeneration(job.data.input) as GenerationInput;
   let task = await readTask(job.id!, true);
   if (!task || task.deletedAt) return;
@@ -66,11 +67,21 @@ const worker = new Worker("generation", async (job) => {
     await delay(config.providerPollIntervalMs);
   }
   throw new Error("任务查询超时，可稍后通过官方任务 ID 查询");
+};
+
+const worker = new Worker<{ input: unknown }>("generation", async (job) => {
+  await processGenerationJob(job);
+  users.completeAsyncJobIntent("generation", job.id!);
 }, { connection, concurrency: config.generationConcurrency, lockDuration: 120000 });
 
 const imageWorker = createImageGenerationWorker(connection);
 await Promise.all([worker.waitUntilReady(), imageWorker.waitUntilReady()]);
 const heartbeat = await startWorkerHeartbeat(connection, "generation");
+const stopOutboxDispatcher = startAsyncJobOutboxDispatcher(users, {
+  generation: generationQueue,
+  "image-generation": imageGenerationQueue,
+  "canvas-jobs": canvasQueue,
+});
 
 worker.on("failed", async (job, error) => {
   if (!job?.id) return;
@@ -85,6 +96,7 @@ worker.on("failed", async (job, error) => {
         attempts: 4, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 24 * 3600 }
       });
       console.warn(JSON.stringify({ type: "generation_archive_handoff_recovered", at: new Date().toISOString(), taskId: task.id }));
+      users.completeAsyncJobIntent("generation", job.id);
       return;
     }
     await saveTask({ ...task, status: "failed", error: error.message, updatedAt: Date.now() });
@@ -94,6 +106,7 @@ worker.on("failed", async (job, error) => {
       if (failed) await connection.publish(`canvas:events:${canvasJob.canvasId}`, JSON.stringify({ type: "canvas_job", job: failed }));
     }
     console.error(JSON.stringify({ type: "generation_failed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, providerId: task.providerId, attempts: job.attemptsMade, message: error.message }));
+    users.completeAsyncJobIntent("generation", job.id);
   } catch (handlerError) {
     console.error(JSON.stringify({ type: "generation_failure_handler_failed", at: new Date().toISOString(), taskId: job.id, code: (handlerError as { code?: string }).code ?? "unknown" }));
   }
@@ -103,6 +116,7 @@ let shuttingDown = false;
 const shutdown = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
+  await stopOutboxDispatcher();
   await heartbeat.stop();
   const graceful = await closeWorkersWithin([worker, imageWorker], config.shutdownGraceMs);
   console.info(JSON.stringify({ type: "worker_shutdown", at: new Date().toISOString(), worker: "generation", graceful }));

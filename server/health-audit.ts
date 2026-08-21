@@ -29,6 +29,7 @@ const main = async () => {
   const uploads = new Queue("upload-finalization", { connection: redis });
   let database: Database.Database | undefined;
   let queueCounts: Record<string, unknown> = {};
+  let outboxCounts = { pending: 0, stalled: 0 };
   let backupAgeMs = Number.POSITIVE_INFINITY;
   let tos = { configured: false, reachable: false };
   let workerHealth: WorkerHealthSnapshot | undefined;
@@ -38,6 +39,14 @@ const main = async () => {
       database = new Database(config.databasePath, { readonly: true, fileMustExist: true });
       assertSchemaVersion(database);
       if (database.pragma("quick_check", { simple: true }) !== "ok") reasons.push("sqlite_integrity_failed");
+      const outbox = database.prepare(`
+        SELECT
+          SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+          SUM(CASE WHEN status = 'pending' AND available_at < ? THEN 1 ELSE 0 END) AS stalled
+        FROM async_job_outbox
+      `).get(Date.now() - 2 * 60_000) as { pending: number | null; stalled: number | null };
+      outboxCounts = { pending: outbox.pending ?? 0, stalled: outbox.stalled ?? 0 };
+      if (outboxCounts.stalled > 0) reasons.push("async_outbox_stalled");
     } catch { reasons.push("sqlite_unavailable"); }
     try {
       const [generationCounts, mediaCounts, previewCounts, assetCounts, imageCounts, canvasCounts, uploadCounts] = await Promise.all([
@@ -62,7 +71,7 @@ const main = async () => {
     redis.disconnect();
   }
   const blockingReasons = reasons;
-  const result = { type: "health_audit", at: new Date().toISOString(), ok: blockingReasons.length === 0, state: blockingReasons.sort().join(",") || "ok", warnings: [], backupAgeSeconds: Number.isFinite(backupAgeMs) ? Math.round(backupAgeMs / 1000) : null, queueCounts, workerHealth, tos, revision: config.revision, imageDigest: config.imageDigest };
+  const result = { type: "health_audit", at: new Date().toISOString(), ok: blockingReasons.length === 0, state: blockingReasons.sort().join(",") || "ok", warnings: [], backupAgeSeconds: Number.isFinite(backupAgeMs) ? Math.round(backupAgeMs / 1000) : null, queueCounts, outboxCounts, workerHealth, tos, revision: config.revision, imageDigest: config.imageDigest };
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (!result.ok) process.exitCode = 1;
 };

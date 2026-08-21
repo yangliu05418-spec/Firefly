@@ -19,6 +19,7 @@ export const createImageGenerationWorker = (connection: Redis) => {
       attemptNumber: job.attemptsMade + 1,
       maxAttempts: job.opts.attempts ?? 1,
     });
+    users.completeAsyncJobIntent("image-generation", job.id!);
   }, { connection, concurrency: 2, lockDuration: Math.max(240000, config.openrouterRequestTimeoutMs + 60000) });
 
   worker.on("failed", async (job, error) => {
@@ -32,6 +33,7 @@ export const createImageGenerationWorker = (connection: Redis) => {
         failures: task.failures,
         error: error.message.slice(0, 500),
       });
+      users.completeAsyncJobIntent("image-generation", job.id);
       console.error(JSON.stringify({
         type: "image_generation_failed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId,
         attempts: job.attemptsMade, message: error.message,
