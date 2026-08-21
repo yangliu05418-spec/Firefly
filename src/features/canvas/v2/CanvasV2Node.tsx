@@ -36,7 +36,7 @@ function CanvasV2NodeView({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const Icon = icons[domain.type];
   const [imageError, setImageError] = useState(false);
   const uploadInput = useRef<HTMLInputElement>(null);
-  const persistedMediaUrl = domain.data.projectAssetId ? `/api/canvas-project-assets/${encodeURIComponent(domain.data.projectAssetId)}/media` : "";
+  const persistedMediaUrl = domain.data.projectAssetId ? `/api/canvas-project-assets/${encodeURIComponent(domain.data.projectAssetId)}/media${["image", "character", "scene"].includes(domain.type) ? "?variant=thumbnail" : ""}` : "";
   const mediaUrl = data.localPreviewUrl ?? persistedMediaUrl;
   const status = domain.data.status ?? "idle";
   const mediaStyle = { transform: `rotate(${domain.data.rotation ?? 0}deg)` };
