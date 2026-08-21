@@ -20,6 +20,7 @@ import { reconcileComposerAssets } from "./composer-assets";
 import { uploadFileUntilAccepted } from "./upload-acceptance";
 import { assetPreviewSource } from "./asset-preview-source";
 import { forgetPrivateMediaCacheUser, scopePrivateMediaCacheToUser } from "./private-media-cache";
+import { readPendingAssetPreview, removePendingAssetPreview, storePendingAssetPreview } from "./pending-asset-preview-cache";
 
 const modeLabels: Record<CreationMode, string> = { omni: "全能参考", first_frame: "首帧生成", first_last: "首尾帧", edit: "视频编辑", extend: "视频续写", text: "文本生成" };
 const modeNotes: Record<CreationMode, string> = { omni: "自由组合图片、视频和音频", first_frame: "锁定开场画面继续创作", first_last: "精确控制起点与落点", edit: "替换、增删或重绘画面", extend: "向前、向后或多段衔接", text: "只用提示词生成镜头" };
@@ -791,15 +792,33 @@ function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: Library
   useEffect(() => { void api.get<{ Items?: LibraryGroup[] }>("/api/assets/groups").then((result) => setGroup(result.Items?.[0] ?? null)).catch((loadError) => setError(loadError instanceof Error ? loadError.message : "素材空间暂时不可用")); }, []);
   useEffect(() => () => { for (const controller of uploadControllers.current) controller.abort(); uploadControllers.current.clear(); for (const url of localPreviews.current.values()) URL.revokeObjectURL(url); localPreviews.current.clear(); }, []);
   useEffect(() => {
+    let cancelled = false;
+    const restore = async () => {
+      let changed = false;
+      for (const asset of assets) {
+        if (asset.Status === "Active" || localPreviews.current.has(asset.Id)) continue;
+        const blob = await readPendingAssetPreview(userId, asset.Id);
+        if (!blob) continue;
+        const url = URL.createObjectURL(blob);
+        if (cancelled || localPreviews.current.has(asset.Id)) { URL.revokeObjectURL(url); continue; }
+        localPreviews.current.set(asset.Id, url); changed = true;
+      }
+      if (changed && !cancelled) setPreviewRevision((revision) => revision + 1);
+    };
+    void restore();
+    return () => { cancelled = true; };
+  }, [userId, assets.map((asset) => `${asset.Id}:${asset.Status}`).join("|")]);
+  useEffect(() => {
     let changed = false;
     const visible = new Map(assets.map((asset) => [asset.Id, asset.Status]));
     for (const [id, url] of localPreviews.current) {
       const status = visible.get(id);
-      if (status === "Processing" || status === "Failed") continue;
+      if (status !== "Active") continue;
       URL.revokeObjectURL(url); localPreviews.current.delete(id); changed = true;
+      void removePendingAssetPreview(userId, id);
     }
     if (changed) setPreviewRevision((revision) => revision + 1);
-  }, [assets.map((asset) => `${asset.Id}:${asset.Status}`).join("|")]);
+  }, [userId, assets.map((asset) => `${asset.Id}:${asset.Status}`).join("|")]);
   useEffect(() => { const timer = window.setTimeout(() => void loadPage(1, true, query), query ? 260 : 0); return () => window.clearTimeout(timer); }, [query, category]);
   useEffect(() => {
     const processing = assets.filter((asset) => asset.Status === "Processing");
@@ -818,7 +837,7 @@ function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: Library
     if (images.length > 50) { setError("单次最多上传 50 张图片"); if (fileInput.current) fileInput.current.value = ""; return; }
     setUploading(true); setProgress({ done: 0, total: images.length }); setError(""); setNotice(""); const created: LibraryAsset[] = []; let normalizedCount = 0; const failures: string[] = selectedFiles.filter((file) => !images.includes(file)).map((file) => `${file.name}（不支持的格式）`); let cursor = 0;
     const uploadCategory: AssetCategory = category === "all" ? "material" : category;
-    const next = async () => { while (cursor < images.length) { const file = images[cursor++]; if (!file) continue; const controller = new AbortController(); uploadControllers.current.add(controller); try { const uploaded = await uploadFileUntilAccepted(file, "image", () => undefined, { signal: controller.signal }); if (uploaded.normalized) normalizedCount += 1; const asset = await api.post<LibraryAsset>("/api/assets", { groupId: group.Id, uploadId: uploaded.uploadId ?? uploaded.id, type: "Image", name: file.name, category: uploadCategory }); created.push(asset); const preview = URL.createObjectURL(file); localPreviews.current.set(asset.Id, preview); setAssets((current) => [asset, ...current.filter((item) => item.Id !== asset.Id)]); setPreviewRevision((revision) => revision + 1); void assetMetadataCache.merge(userId, [asset]); } catch (uploadError) { failures.push(`${file.name}（${uploadError instanceof Error ? uploadError.message.split(" · ")[0].slice(0, 60) : "上传失败"}）`); } finally { uploadControllers.current.delete(controller); setProgress((current) => current ? { ...current, done: current.done + 1 } : current); } } };
+    const next = async () => { while (cursor < images.length) { const file = images[cursor++]; if (!file) continue; const controller = new AbortController(); let preparedPreview: Blob | undefined; uploadControllers.current.add(controller); try { const uploaded = await uploadFileUntilAccepted(file, "image", () => undefined, { signal: controller.signal, onPreparedPreview: (blob) => { preparedPreview = blob; } }); if (uploaded.normalized) normalizedCount += 1; const asset = await api.post<LibraryAsset>("/api/assets", { groupId: group.Id, uploadId: uploaded.uploadId ?? uploaded.id, type: "Image", name: file.name, category: uploadCategory }); created.push(asset); const previewBlob = preparedPreview ?? (file.size <= 2 * 1024 * 1024 ? file : undefined); if (previewBlob) { const preview = URL.createObjectURL(previewBlob); localPreviews.current.set(asset.Id, preview); void storePendingAssetPreview(userId, asset.Id, previewBlob); } setAssets((current) => [asset, ...current.filter((item) => item.Id !== asset.Id)]); setPreviewRevision((revision) => revision + 1); void assetMetadataCache.merge(userId, [asset]); } catch (uploadError) { failures.push(`${file.name}（${uploadError instanceof Error ? uploadError.message.split(" · ")[0].slice(0, 60) : "上传失败"}）`); } finally { uploadControllers.current.delete(controller); setProgress((current) => current ? { ...current, done: current.done + 1 } : current); } } };
     try {
       await Promise.all(Array.from({ length: Math.min(3, images.length) }, next));
       if (created.length) setNotice(`${created.length} 张图片已上传，生成引用正在后台准备${normalizedCount ? `，${normalizedCount} 张已自动补白` : ""}`);
@@ -852,7 +871,7 @@ function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: Library
   };
   const deleteSelection = async () => {
     const ids = [...selected]; if (!ids.length) return; setDeleting(true); setError("");
-    try { const result = await api.post<{ deleted: string[]; failed: string[] }>("/api/assets/bulk-delete", { ids }); setAssets((current) => current.filter((asset) => !result.deleted.includes(asset.Id))); void assetMetadataCache.remove(userId, result.deleted); setSelected(new Set(result.failed)); setConfirmDelete(false); setNotice(`${result.deleted.length} 个素材已删除`); if (result.failed.length) setError(`${result.failed.length} 个素材删除失败，可再次重试`); }
+    try { const result = await api.post<{ deleted: string[]; failed: string[] }>("/api/assets/bulk-delete", { ids }); setAssets((current) => current.filter((asset) => !result.deleted.includes(asset.Id))); for (const id of result.deleted) { const preview = localPreviews.current.get(id); if (preview) URL.revokeObjectURL(preview); localPreviews.current.delete(id); void removePendingAssetPreview(userId, id); } void assetMetadataCache.remove(userId, result.deleted); setSelected(new Set(result.failed)); setConfirmDelete(false); setNotice(`${result.deleted.length} 个素材已删除`); if (result.failed.length) setError(`${result.failed.length} 个素材删除失败，可再次重试`); }
     catch (deleteError) { setError(deleteError instanceof Error ? deleteError.message : "删除失败，请稍后重试"); }
     finally { setDeleting(false); }
   };
