@@ -59,6 +59,18 @@ describe("Canvas V2 durable recovery records", () => {
     database.close();
   });
 
+  it("paginates project assets without skipping rows that share a timestamp", () => {
+    const database = store();
+    const user = database.upsertFromFeishu({ openId: "ou_canvas_assets", unionId: "on_canvas_assets", tenantKey: "tenant", email: "canvas-assets@dokuai.tv", name: "Assets", avatarUrl: "" });
+    const now = Date.now();
+    database.createCanvasProject({ id: "canvas-assets", ownerId: user.id, title: "Assets", documentJson: JSON.stringify(DEFAULT_CANVAS_DOCUMENT_V1), revision: 0, createdAt: now, updatedAt: now });
+    for (const suffix of ["c", "b", "a"]) database.upsertCanvasProjectAsset({ id: `asset-${suffix}`, ownerId: user.id, canvasId: "canvas-assets", kind: "image", sourceType: "generated", sourceId: `source-${suffix}`, title: suffix, contentType: "image/webp", size: 1, status: "ready", createdAt: now, updatedAt: now });
+    const first = database.listCanvasProjectAssets("canvas-assets", user.id, 2);
+    const second = database.listCanvasProjectAssets("canvas-assets", user.id, 2, first.at(-1)!.createdAt, first.at(-1)!.id);
+    expect([...first, ...second].map((item) => item.id)).toEqual(["asset-c", "asset-b", "asset-a"]);
+    database.close();
+  });
+
   it("enforces the per-user active image job limit atomically", () => {
     const database = store();
     const first = database.upsertFromFeishu({ openId: "ou_canvas_limit_1", unionId: "on_canvas_limit_1", tenantKey: "tenant", email: "canvas-limit-1@dokuai.tv", name: "One", avatarUrl: "" });

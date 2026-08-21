@@ -672,12 +672,13 @@ export class UserStore {
       .run(status, Date.now(), sourceType, sourceId).changes;
   }
 
-  listCanvasProjectAssets(canvasId: string, ownerId: string, limit = 100, before = Number.MAX_SAFE_INTEGER) {
+  listCanvasProjectAssets(canvasId: string, ownerId: string, limit = 100, before = Number.MAX_SAFE_INTEGER, beforeId = "\uffff") {
     return (this.database.prepare(`
       SELECT * FROM canvas_project_assets
-      WHERE canvas_id = ? AND owner_id = ? AND deleted_at IS NULL AND created_at < ?
-      ORDER BY created_at DESC LIMIT ?
-    `).all(canvasId, ownerId, before, limit) as CanvasProjectAssetRow[]).map((row) => mapCanvasProjectAsset(row)!);
+      WHERE canvas_id = ? AND owner_id = ? AND deleted_at IS NULL
+        AND (created_at < ? OR (created_at = ? AND id < ?))
+      ORDER BY created_at DESC, id DESC LIMIT ?
+    `).all(canvasId, ownerId, before, before, beforeId, limit) as CanvasProjectAssetRow[]).map((row) => mapCanvasProjectAsset(row)!);
   }
 
   createCanvasJob(job: CanvasJob) {
