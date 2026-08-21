@@ -104,7 +104,26 @@ export const saveCanvasV2 = async (id: string, revision: number, document: Canva
   return response.json();
 };
 
-export const listCanvasAssets = (canvasId: string) => api.get<{ Items: CanvasProjectAsset[]; HasMore: boolean }>(`/api/canvases/${encode(canvasId)}/assets?limit=100`);
+export const listCanvasAssets = async (canvasId: string) => {
+  const Items: CanvasProjectAsset[] = [];
+  const seen = new Set<string>();
+  let before: number | undefined;
+  let beforeId: string | undefined;
+  let HasMore = true;
+  // Bound the browser work while allowing substantially larger projects than one API page.
+  for (let pageNumber = 0; HasMore && pageNumber < 50; pageNumber += 1) {
+    const query = new URLSearchParams({ limit: "100" });
+    if (before !== undefined) query.set("before", String(before));
+    if (beforeId) query.set("beforeId", beforeId);
+    const page = await api.get<{ Items: CanvasProjectAsset[]; HasMore: boolean; NextBefore?: number; NextBeforeId?: string }>(`/api/canvases/${encode(canvasId)}/assets?${query}`);
+    for (const asset of page.Items) if (!seen.has(asset.id)) { seen.add(asset.id); Items.push(asset); }
+    HasMore = page.HasMore;
+    if (!HasMore) break;
+    if (page.NextBefore === undefined || !page.NextBeforeId) break;
+    before = page.NextBefore; beforeId = page.NextBeforeId;
+  }
+  return { Items, HasMore };
+};
 export const importCanvasProjectAsset = (canvasId: string, body: { kind: "generation"; taskId: string } | { kind: "upload"; uploadId: string } | { kind: "generated"; mediaId: string } | { kind: "user_asset"; assetId: string }) => api.post<CanvasMediaImportResult & { projectAsset: CanvasProjectAsset }>(`/api/canvases/${encode(canvasId)}/media`, body);
 export const listCanvasJobs = (canvasId: string, updatedAfter = 0) => api.get<{ Items: CanvasJob[] }>(`/api/canvases/${encode(canvasId)}/jobs?updatedAfter=${updatedAfter}`);
 export const createCanvasJob = (canvasId: string, body: unknown) => api.post<CanvasJob>(`/api/canvases/${encode(canvasId)}/jobs`, body);

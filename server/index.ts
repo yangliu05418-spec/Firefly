@@ -13,9 +13,10 @@ import { clearSession, createSession, getSessionUser, publicUser, requireAuth, t
 import type { AssetCategory, CanvasJob, CanvasProject, CanvasProjectAsset, UserAsset } from "./db.js";
 import { users } from "./store.js";
 import { canvasDocumentSchema, DEFAULT_CANVAS_DOCUMENT, DEFAULT_CANVAS_DOCUMENT_V1, parseCanvasDocumentSafe, toCanvasDocumentV2 } from "./canvas-document.js";
+import { resolveCanvasContext } from "./canvas-context.js";
 import { publicCanvasProject, publicCanvasProjectDetail } from "./canvas-public.js";
 import { consumeFeishuAuthorization, createFeishuAuthorization, exchangeFeishuCode } from "./feishu.js";
-import { assetQueue, canvasQueue, generationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, readTask, redis, saveTask, type StoredTask } from "./redis.js";
+import { assetQueue, canvasQueue, generationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, previewQueue, readTask, redis, saveTask, type StoredTask } from "./redis.js";
 import { canAccessTask } from "./task-access.js";
 import { publicTask } from "./task-public.js";
 import { validateGeneration } from "./provider.js";
@@ -62,7 +63,7 @@ app.use((req, res, next) => {
 const respondError = (res: express.Response, error: unknown, status = 400) => {
   const message = error instanceof z.ZodError ? error.issues[0]?.message : error instanceof Error ? error.message : "请求失败";
   const code = (error as { code?: string }).code;
-  res.status(status).json({ error: message, ...(code ? { code } : {}), requestId: res.locals.requestId });
+  res.status(error instanceof z.ZodError ? 400 : status).json({ error: message, ...(code ? { code } : {}), requestId: res.locals.requestId });
 };
 const param = (value: string | string[]) => Array.isArray(value) ? value[0] : value;
 const execFileAsync = promisify(execFile);
@@ -1026,9 +1027,11 @@ app.get("/api/canvases/:id/assets", requireAuth, async (req, res) => {
     const user = res.locals.user as SessionUser;
     const canvasId = param(req.params.id);
     if (!accessibleCanvas(canvasId, user.id)) return res.status(404).json({ error: "画布不存在" });
-    const query = z.object({ before: z.coerce.number().int().positive().optional(), limit: z.coerce.number().int().min(1).max(100).default(50) }).parse(req.query);
-    const items = users.listCanvasProjectAssets(canvasId, user.id, query.limit + 1, query.before ?? Number.MAX_SAFE_INTEGER);
-    res.json({ Items: items.slice(0, query.limit).map(publicCanvasProjectAsset), HasMore: items.length > query.limit, NextBefore: items.at(query.limit - 1)?.createdAt });
+    const query = z.object({ before: z.coerce.number().int().positive().optional(), beforeId: z.string().min(1).max(128).optional(), limit: z.coerce.number().int().min(1).max(100).default(50) }).parse(req.query);
+    const items = users.listCanvasProjectAssets(canvasId, user.id, query.limit + 1, query.before ?? Number.MAX_SAFE_INTEGER, query.beforeId ?? "\uffff");
+    const page = items.slice(0, query.limit);
+    const pageEnd = page.at(-1);
+    res.json({ Items: page.map(publicCanvasProjectAsset), HasMore: items.length > query.limit, NextBefore: pageEnd?.createdAt, NextBeforeId: pageEnd?.id });
   } catch (error) { respondError(res, error, 502); }
 });
 
@@ -1056,15 +1059,9 @@ const canvasContextForNode = (canvasId: string, ownerId: string, nodeId: string)
   if (!project) return null;
   const parsed = parseCanvasDocumentSafe(project.documentJson);
   const document = parsed ? toCanvasDocumentV2(parsed) : null;
-  const target = document?.nodes.find((node) => node.id === nodeId);
-  if (!document || !target) return null;
-  const sources = document.connections
-    .filter((edge) => edge.target === nodeId)
-    .map((edge) => document.nodes.find((node) => node.id === edge.source))
-    .filter((node): node is NonNullable<typeof node> => Boolean(node));
-  const text = sources.filter((node) => node.type === "text").map((node) => node.data.markdown?.trim()).filter(Boolean).join("\n\n");
-  const assetIds = sources.map((node) => node.data.projectAssetId).filter((value): value is string => typeof value === "string");
-  return { project, document, target, text, assetIds };
+  if (!document) return null;
+  const context = resolveCanvasContext(document, nodeId);
+  return context ? { project, document, ...context } : null;
 };
 
 const ownedCanvasProjectAssets = (canvasId: string, ownerId: string, ids: string[]) => [...new Set(ids)].map((id) => {
@@ -1374,7 +1371,7 @@ app.get("/api/health/ready", async (_req, res) => {
     dependency = "database";
     if (!users.healthCheck()) throw new Error("database unavailable");
     dependency = "queues";
-    await Promise.all([generationQueue.getJobCounts("wait", "active"), mediaQueue.getJobCounts("wait", "active"), assetQueue.getJobCounts("wait", "active"), canvasQueue.getJobCounts("wait", "active")]);
+    await Promise.all([generationQueue.getJobCounts("wait", "active"), mediaQueue.getJobCounts("wait", "active"), previewQueue.getJobCounts("wait", "active"), assetQueue.getJobCounts("wait", "active"), canvasQueue.getJobCounts("wait", "active")]);
     if (tosEnabled()) {
       dependency = "tos";
       const health = tosHealthGate.snapshot();
@@ -1427,6 +1424,18 @@ const cleanupTimer = setInterval(() => void cleanupUploads().catch(console.error
 void probeTos();
 const tosProbeTimer = setInterval(() => void probeTos(), 60 * 1000);
 const server = app.listen(config.port, "0.0.0.0", () => console.log(`Firefly listening on ${config.port}`));
-const shutdown = async () => { clearInterval(cleanupTimer); clearInterval(tosProbeTimer); server.close(); await Promise.all([generationQueue.close(), mediaQueue.close()]); await redis.quit(); users.close(); process.exit(0); };
+let shuttingDown = false;
+const shutdown = async () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  clearInterval(cleanupTimer); clearInterval(tosProbeTimer);
+  const httpClosed = new Promise<void>((resolve) => server.close(() => resolve()));
+  // SSE connections are intentionally long-lived. Give ordinary requests time to finish,
+  // then close remaining streams so a blue/green retirement cannot hang indefinitely.
+  const forceClose = setTimeout(() => server.closeAllConnections(), Math.min(config.shutdownGraceMs, 10_000));
+  await httpClosed; clearTimeout(forceClose);
+  await Promise.all([generationQueue.close(), mediaQueue.close(), previewQueue.close(), assetQueue.close(), canvasQueue.close()]);
+  await redis.quit(); users.close(); process.exit(0);
+};
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);

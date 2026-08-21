@@ -1,13 +1,27 @@
 type TransformMessage = { url: string; cropRatio?: number; rotation?: 90 | 180 | 270 };
 type WorkerPort = { onmessage: ((event: MessageEvent<TransformMessage>) => void) | null; postMessage: (value: unknown, transfer?: Transferable[]) => void };
 const port = globalThis as unknown as WorkerPort;
+const IMAGE_CACHE = "firefly-canvas-images-v1";
+const MAX_CACHEABLE_IMAGE_BYTES = 32 * 1024 * 1024;
+
+const readImageBlob = async (url: string) => {
+  const request = new Request(new URL(url, location.origin), { credentials: "same-origin" });
+  const cache = globalThis.caches ? await caches.open(IMAGE_CACHE) : undefined;
+  const cached = await cache?.match(request);
+  if (cached) return cached.blob();
+  const response = await fetch(request, { cache: "force-cache" });
+  if (!response.ok) throw new Error(`图片读取失败 (${response.status})`);
+  const blob = await response.blob();
+  if (cache && blob.size <= MAX_CACHEABLE_IMAGE_BYTES) {
+    await cache.put(request, new Response(blob, { headers: { "Content-Type": blob.type || "image/*", "X-Firefly-Cached-At": String(Date.now()) } })).catch(() => undefined);
+  }
+  return blob;
+};
 
 port.onmessage = (event) => {
   void (async () => {
     if (!globalThis.OffscreenCanvas || !globalThis.createImageBitmap) throw new Error("当前浏览器不支持本地图片处理");
-    const response = await fetch(new URL(event.data.url, location.origin), { credentials: "same-origin" });
-    if (!response.ok) throw new Error(`图片读取失败 (${response.status})`);
-    const bitmap = await createImageBitmap(await response.blob());
+    const bitmap = await createImageBitmap(await readImageBlob(event.data.url));
     try {
       let sx = 0; let sy = 0; let sourceWidth = bitmap.width; let sourceHeight = bitmap.height;
       if (event.data.cropRatio) {
