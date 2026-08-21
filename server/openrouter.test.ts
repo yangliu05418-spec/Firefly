@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildImageRequestBody, fetchOpenRouterJsonWithinDeadline, isRetryableOpenRouterFailure, OpenRouterError, OpenRouterKeyPool, parseOpenRouterImages, parseOpenRouterTextDelta } from "./openrouter.js";
+import { buildImageRequestBody, downloadGeneratedImage, fetchOpenRouterJsonWithinDeadline, generatedImageContentType, isRetryableOpenRouterFailure, OpenRouterError, OpenRouterKeyPool, parseOpenRouterImages, parseOpenRouterTextDelta } from "./openrouter.js";
 import { computeImageSize, IMAGE_MODELS, imageModelById, openRouterResolution } from "./image-models.js";
 
 describe("OpenRouterKeyPool", () => {
@@ -78,6 +78,50 @@ describe("OpenRouter transport deadline", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("OpenRouter generated image validation", () => {
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xdb]);
+  const webp = Buffer.from("RIFF0000WEBP", "ascii");
+
+  it("detects supported formats from bytes instead of trusting the URL", () => {
+    expect(generatedImageContentType(png)).toBe("image/png");
+    expect(generatedImageContentType(jpeg)).toBe("image/jpeg");
+    expect(generatedImageContentType(webp)).toBe("image/webp");
+  });
+
+  it("preserves the actual image format for data URLs", async () => {
+    await expect(downloadGeneratedImage(`data:image/png;base64,${jpeg.toString("base64")}`)).resolves.toEqual({
+      body: jpeg,
+      contentType: "image/jpeg",
+    });
+  });
+
+  it("rejects a successful provider response that is not an image", async () => {
+    await expect(downloadGeneratedImage(`data:text/html;base64,${Buffer.from("<html>error</html>").toString("base64")}`))
+      .rejects.toMatchObject({ status: 502 });
+  });
+
+  it("uses remote response bytes instead of a misleading content type", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(jpeg, { headers: { "content-type": "image/png" } })));
+    try {
+      await expect(downloadGeneratedImage("https://provider.test/result.png")).resolves.toEqual({ body: jpeg, contentType: "image/jpeg" });
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("rejects an oversized remote image before buffering its body", async () => {
+    const arrayBuffer = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      headers: new Headers({ "content-length": String(21 * 1024 * 1024) }),
+      arrayBuffer,
+    })));
+    try {
+      await expect(downloadGeneratedImage("https://provider.test/oversized.png")).rejects.toMatchObject({ status: 400 });
+      expect(arrayBuffer).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
   });
 });
 
