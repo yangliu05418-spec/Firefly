@@ -795,8 +795,8 @@ export class UserStore {
     return task;
   }
 
-  readImageGeneration(id: string) {
-    return mapImageGeneration(this.database.prepare("SELECT * FROM image_generation_tasks WHERE id = ? AND deleted_at IS NULL").get(id) as ImageGenerationRow | undefined);
+  readImageGeneration(id: string, includeDeleted = false) {
+    return mapImageGeneration(this.database.prepare(`SELECT * FROM image_generation_tasks WHERE id = ?${includeDeleted ? "" : " AND deleted_at IS NULL"}`).get(id) as ImageGenerationRow | undefined);
   }
 
   listImageGenerations(ownerId: string, limit = 50) {
@@ -809,14 +809,21 @@ export class UserStore {
       .map((row) => mapImageGeneration(row)!);
   }
 
-  createImageGenerationWithinLimit(task: ImageGenerationTask, limit: number, intent?: AsyncJobIntent) {
+  admitImageGenerationWithinLimit(task: ImageGenerationTask, limit: number, intent?: AsyncJobIntent) {
     return this.database.transaction(() => {
+      const existing = this.readImageGeneration(task.id, true);
+      if (existing) return { status: "existing" as const, task: existing };
       const count = (this.database.prepare("SELECT COUNT(*) AS count FROM image_generation_tasks WHERE owner_id = ? AND status = 'running' AND deleted_at IS NULL").get(task.ownerId) as { count: number }).count;
-      if (count >= limit) return false;
-      this.createImageGeneration(task);
+      if (count >= limit) return { status: "limit" as const };
+      const created = this.createImageGeneration(task);
       if (intent) this.insertAsyncJobIntent(intent, task.createdAt);
-      return true;
+      return { status: "created" as const, task: created };
     })();
+  }
+
+  /** Backward-compatible boolean admission for maintenance callers. */
+  createImageGenerationWithinLimit(task: ImageGenerationTask, limit: number, intent?: AsyncJobIntent) {
+    return this.admitImageGenerationWithinLimit(task, limit, intent).status === "created";
   }
 
   updateImageGeneration(id: string, ownerId: string, patch: Pick<ImageGenerationTask, "status" | "items" | "failures"> & { error?: string }) {
