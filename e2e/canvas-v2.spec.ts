@@ -219,6 +219,22 @@ test("studio recovers transient session bootstrap failures without showing a fal
   expect(await page.evaluate(() => (window as typeof window & { __feishuLoginSeen: boolean }).__feishuLoginSeen)).toBe(false);
 });
 
+test("asset archive preserves the selected media view across refresh", async ({ page }) => {
+  await mockAuthenticatedApi(page);
+  await page.goto("/studio/assets");
+
+  await page.getByRole("button", { name: "图片资产" }).click();
+  await expect(page).toHaveURL(/\/studio\/assets\?view=images$/);
+  await expect(page.getByRole("heading", { name: "生成图片" })).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByRole("button", { name: "图片资产" })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("heading", { name: "生成图片" })).toBeVisible();
+
+  await page.getByRole("button", { name: "视频资产" }).click();
+  await expect(page).toHaveURL(/\/studio\/assets$/);
+});
+
 test("studio restores an unsent composer draft and isolates it between creation sessions", async ({ page }) => {
   await mockAuthenticatedApi(page);
   await page.goto("/studio");
