@@ -3,9 +3,9 @@ import path from "node:path";
 import Database from "better-sqlite3";
 
 export const CURRENT_SCHEMA_VERSION = 7;
-// Keep the readable ceiling explicit; the previous bridge release supports
-// both schema 6 and 7, so this expand-only migration remains rollback-safe.
-export const MAX_SUPPORTED_SCHEMA_VERSION = 7;
+// Read the next expand-only schema before any release creates it. This bridge
+// keeps the old blue/green slot restartable after a schema-8 migration.
+export const MAX_SUPPORTED_SCHEMA_VERSION = 8;
 
 const baseSchema = `
   CREATE TABLE IF NOT EXISTS users (

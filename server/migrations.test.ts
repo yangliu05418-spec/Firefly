@@ -76,11 +76,23 @@ describe("versioned database migrations", () => {
     upgraded.close();
   });
 
-  it("rejects a database newer than this release", () => {
+  it("accepts the next expand-only schema for blue-green rollback compatibility", () => {
     const target = databasePath();
     migrateDatabase(target);
     const database = new Database(target);
-    database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (8, 'future-incompatible', ?)").run(Date.now());
+    database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (8, 'next-expand-only', ?)").run(Date.now());
+    database.close();
+    expect(migrateDatabase(target)).toBe(8);
+    const compatible = new Database(target, { readonly: true });
+    expect(assertSchemaVersion(compatible)).toBe(8);
+    compatible.close();
+  });
+
+  it("rejects a database newer than the rollback compatibility ceiling", () => {
+    const target = databasePath();
+    migrateDatabase(target);
+    const database = new Database(target);
+    database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (9, 'future-incompatible', ?)").run(Date.now());
     database.close();
     expect(() => migrateDatabase(target)).toThrow("newer than this release");
     const incompatible = new Database(target, { readonly: true });
