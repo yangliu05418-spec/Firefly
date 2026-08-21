@@ -1085,11 +1085,13 @@ function Studio({ user, route, navigate, logout }: { user: SessionUser; route: s
 
 export function App() {
   const [route, setRoute] = useState(location.pathname); const [auth, setAuth] = useState<SessionUser | null | undefined>(undefined);
+  const [authError, setAuthError] = useState(false); const [authRetry, setAuthRetry] = useState(0);
   const navigate = (path: string) => { history.pushState({}, "", path); setRoute(path); };
-  useEffect(() => { const pop = () => setRoute(location.pathname); addEventListener("popstate", pop); bootstrapSession({ load: () => api.get<{ authenticated: boolean; user?: SessionUser }>("/api/auth/session"), activateMediaScope: scopePrivateMediaCacheToUser, deactivateMediaScope: deactivatePrivateMediaCacheScope }).then(setAuth).catch(() => { void deactivatePrivateMediaCacheScope(); setAuth(null); }); return () => removeEventListener("popstate", pop); }, []);
+  useEffect(() => { const pop = () => setRoute(location.pathname); addEventListener("popstate", pop); return () => removeEventListener("popstate", pop); }, []);
+  useEffect(() => { let active = true; setAuthError(false); bootstrapSession({ load: () => api.get<{ authenticated: boolean; user?: SessionUser }>("/api/auth/session", { timeoutMs: 8000 }), activateMediaScope: scopePrivateMediaCacheToUser, deactivateMediaScope: deactivatePrivateMediaCacheScope }).then((user) => { if (active) setAuth(user); }).catch(() => { void deactivatePrivateMediaCacheScope(); if (active) setAuthError(true); }); return () => { active = false; }; }, [authRetry]);
   useEffect(() => listenForSignedOut((reason) => { if (reason === "explicit" && auth?.id) { void assetMetadataCache.clear(auth.id); void composerDraftCache.clearUser(auth.id); void forgetPrivateMediaCacheUser(); } else void deactivatePrivateMediaCacheScope(); setAuth(null); }), [auth?.id]);
   if (route === "/") return <Landing enter={() => navigate("/studio")} />;
-  if (auth === undefined) return <main className="boot"><FireflyMark /><LoaderCircle className="spin" /></main>;
+  if (auth === undefined) return <main className="boot"><FireflyMark />{authError ? <div className="boot-recovery" role="alert"><p>暂时无法确认登录状态</p><small>网络或会话服务正在恢复，你的登录 Cookie 没有被清除。</small><button className="primary-button" onClick={() => setAuthRetry((value) => value + 1)}><RefreshCw /> 重新连接</button></div> : <LoaderCircle className="spin" />}</main>;
   if (!auth) return <AccessGate back={() => navigate("/")} />;
   return <AssetCacheScope userId={auth.id}><Studio user={auth} route={route} navigate={navigate} logout={async () => { await api.delete("/api/auth/session"); notifySignedOut("explicit"); navigate("/"); }} /></AssetCacheScope>;
 }
