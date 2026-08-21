@@ -9,6 +9,7 @@ import { MAX_MEDIA_RECOVERY_ATTEMPTS } from "./db.js";
 import { transcodePreview } from "./preview-transcode.js";
 import { closeWorkersWithin } from "./shutdown.js";
 import { markAssetIngestFailed, registerQueuedAsset } from "./asset-ingest.js";
+import { deleteQueuedProviderAsset } from "./asset-cleanup.js";
 import { copyPreparedCanvasAsset } from "./canvas-assets.js";
 import { startWorkerHeartbeat } from "./worker-heartbeat.js";
 
@@ -242,8 +243,9 @@ const previewWorker = new Worker("preview", async (job) => {
 }, { connection, concurrency: config.tosPreviewConcurrency, lockDuration: config.tosTranscodeDeadlineMs + config.tosSourceStreamTimeoutMs + 60_000 });
 
 const assetWorker = new Worker("asset-ingest", async (job) => {
-  if (job.name !== "register") throw new Error(`Unknown asset job: ${job.name}`);
-  return registerQueuedAsset(job.data.assetId);
+  if (job.name === "register") return registerQueuedAsset(job.data.assetId);
+  if (job.name === "delete-provider") return deleteQueuedProviderAsset(job.data.assetId);
+  throw new Error(`Unknown asset job: ${job.name}`);
 }, { connection, concurrency: 2, lockDuration: 240_000 });
 
 await Promise.all([worker.waitUntilReady(), previewWorker.waitUntilReady(), assetWorker.waitUntilReady()]);
@@ -254,8 +256,8 @@ previewWorker.on("failed", (job, error) => {
 });
 
 assetWorker.on("failed", (job, error) => {
-  if (job && job.attemptsMade >= (job.opts.attempts ?? 1)) markAssetIngestFailed(job.data.assetId, "素材已上传，但生成引用暂未准备完成");
-  console.warn(JSON.stringify({ type: "asset_ingest_failed", at: new Date().toISOString(), assetId: job?.data.assetId, attempt: job?.attemptsMade, code: (error as { code?: string }).code ?? "unknown" }));
+  if (job?.name === "register" && job.attemptsMade >= (job.opts.attempts ?? 1)) markAssetIngestFailed(job.data.assetId, "素材已上传，但生成引用暂未准备完成");
+  console.warn(JSON.stringify({ type: job?.name === "delete-provider" ? "asset_provider_delete_failed" : "asset_ingest_failed", at: new Date().toISOString(), assetId: job?.data.assetId, attempt: job?.attemptsMade, code: (error as { code?: string }).code ?? "unknown" }));
 });
 
 worker.on("failed", async (job) => {
@@ -313,6 +315,10 @@ const reconcileAssets = async () => {
   const assets = [...users.listProcessingUserAssets(100), ...users.listUserAssetsNeedingMediaPromotion(100)];
   for (const asset of new Map(assets.map((item) => [item.id, item])).values()) {
     await assetQueue.add("register", { assetId: asset.id }, { jobId: asset.id, attempts: 3, backoff: { type: "exponential", delay: 15_000 }, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } });
+  }
+  const deleteBucket = Math.floor(Date.now() / (5 * 60 * 1000));
+  for (const asset of users.listDeletedUserAssetsNeedingProviderDelete(100)) {
+    await assetQueue.add("delete-provider", { assetId: asset.id }, { jobId: `delete-${asset.id}-${deleteBucket}`, attempts: 6, backoff: { type: "exponential", delay: 10_000 }, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } });
   }
 };
 const assetReconcile = setInterval(() => void reconcileAssets().catch((error) => console.warn(JSON.stringify({ type: "asset_ingest_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }))), 60_000);

@@ -185,7 +185,7 @@ describe("enterprise identity and isolation", () => {
     const owner = store.upsertFromFeishu({ openId: "ou_asset_owner", unionId: "on_asset_owner", tenantKey: "tenant-dokuai", email: "asset-owner@dokuai.tv", name: "Owner", avatarUrl: "" });
     const other = store.upsertFromFeishu({ openId: "ou_asset_other", unionId: "on_asset_other", tenantKey: "tenant-dokuai", email: "asset-other@dokuai.tv", name: "Other", avatarUrl: "" });
     const now = Date.now();
-    store.upsertUserAsset({ id: "asset-owner-1", ownerId: owner.id, groupId: "group-shared-provider", uploadId: "upload-owner", name: "owner.png", assetType: "Image", status: "Active", category: "character", url: "https://example.com/owner.png", createdAt: now, updatedAt: now });
+    store.upsertUserAsset({ id: "asset-owner-1", providerAssetId: "asset-provider-owner-1", ownerId: owner.id, groupId: "group-shared-provider", uploadId: "upload-owner", name: "owner.png", assetType: "Image", status: "Active", category: "character", url: "https://example.com/owner.png", createdAt: now, updatedAt: now });
     store.upsertUserAsset({ id: "asset-other-1", ownerId: other.id, groupId: "group-shared-provider", uploadId: "upload-other", name: "other.png", assetType: "Image", status: "Active", category: "scene", createdAt: now, updatedAt: now });
     store.upsertUserAsset({ id: "asset-owner-video", ownerId: owner.id, groupId: "group-shared-provider", name: "clip.mp4", assetType: "Video", status: "Active", category: "material", createdAt: now - 1, updatedAt: now });
     expect(store.listUserAssets(owner.id).map((asset) => asset.id)).toEqual(["asset-owner-1", "asset-owner-video"]);
@@ -205,6 +205,15 @@ describe("enterprise identity and isolation", () => {
     expect(store.readUserAsset("asset-owner-1")?.name).toBe("renamed.png");
     expect(store.deleteUserAsset("asset-owner-1", owner.id)).toBe(true);
     expect(store.readUserAsset("asset-owner-1")).toBeNull();
+    expect(store.readUserAssetIncludingDeleted("asset-owner-1")).toMatchObject({ deletedAt: expect.any(Number), providerAssetId: "asset-provider-owner-1" });
+    expect(store.listDeletedUserAssetsNeedingProviderDelete().map((asset) => asset.id)).toEqual(["asset-owner-1"]);
+    expect(store.clearDeletedUserAssetProviderId("asset-owner-1", "wrong-provider-id")).toBe(false);
+    expect(store.clearDeletedUserAssetProviderId("asset-owner-1", "asset-provider-owner-1")).toBe(true);
+    expect(store.listDeletedUserAssetsNeedingProviderDelete()).toEqual([]);
+    store.upsertUserAsset({ id: "asset-raced-delete", ownerId: owner.id, groupId: "", name: "race.png", assetType: "Image", status: "Processing", category: "material", createdAt: now, updatedAt: now });
+    expect(store.deleteUserAsset("asset-raced-delete", owner.id)).toBe(true);
+    expect(store.recordProviderIdForDeletedUserAsset("asset-raced-delete", "asset-provider-race")).toBe(true);
+    expect(store.readUserAssetIncludingDeleted("asset-raced-delete")?.providerAssetId).toBe("asset-provider-race");
     store.close();
   });
 

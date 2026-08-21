@@ -20,6 +20,7 @@ type ProviderAssetRecord = {
 
 export type AssetIngestDependencies = {
   readAsset: (id: string) => UserAsset | null;
+  recordDeletedProviderAsset: (id: string, providerAssetId: string) => unknown;
   readUpload: typeof users.readUpload;
   saveAsset: (asset: UserAsset) => unknown;
   callAsset: typeof callAssetApi;
@@ -33,6 +34,7 @@ export type AssetIngestDependencies = {
 let productionDependencies: AssetIngestDependencies | undefined;
 const defaultDependencies = () => productionDependencies ??= {
   readAsset: (id) => users.readUserAsset(id),
+  recordDeletedProviderAsset: (id, providerAssetId) => users.recordProviderIdForDeletedUserAsset(id, providerAssetId),
   readUpload: (uploadId) => users.readUpload(uploadId),
   saveAsset: (asset) => users.upsertUserAsset(asset),
   callAsset: callAssetApi,
@@ -100,7 +102,9 @@ export const registerQueuedAsset = async (assetId: string, deps: AssetIngestDepe
     providerAssetId = created.Id;
     const current = deps.readAsset(asset.id);
     if (!current) {
-      await deps.callAsset("DeleteAsset", { Id: providerAssetId }).catch(() => undefined);
+      // A concurrent local delete won the race. Persist the remote id on its tombstone;
+      // the cleanup worker will reconcile deletion without swallowing failures here.
+      deps.recordDeletedProviderAsset(asset.id, providerAssetId);
       return;
     }
     asset = saved(current, {
@@ -120,7 +124,8 @@ export const registerQueuedAsset = async (assetId: string, deps: AssetIngestDepe
   while (deps.now() < deadline) {
     const current = deps.readAsset(asset.id);
     if (!current) {
-      await deps.callAsset("DeleteAsset", { Id: providerAssetId }).catch(() => undefined);
+      // The tombstone already retains providerAssetId. Let the durable cleanup queue
+      // own provider deletion instead of hiding a best-effort failure in this worker.
       return;
     }
     const provider = await deps.callAsset<ProviderAssetRecord>("GetAsset", { Id: providerAssetId });

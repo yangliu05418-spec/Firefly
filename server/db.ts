@@ -698,6 +698,11 @@ export class UserStore {
     return mapUserAsset(this.database.prepare("SELECT * FROM user_assets WHERE id = ? AND deleted_at IS NULL").get(id) as UserAssetRow | undefined);
   }
 
+  /** Internal recovery read: includes soft-deleted tombstones used as the provider cleanup outbox. */
+  readUserAssetIncludingDeleted(id: string) {
+    return mapUserAsset(this.database.prepare("SELECT * FROM user_assets WHERE id = ?").get(id) as UserAssetRow | undefined);
+  }
+
   /** 按上传 ID 查已登记的素材（幂等复用：同一 uploadId 重复请求时直接返回既有资产） */
   readUserAssetByUpload(ownerId: string, uploadId: string) {
     return mapUserAsset(this.database.prepare("SELECT * FROM user_assets WHERE owner_id = ? AND upload_id = ? AND deleted_at IS NULL").get(ownerId, uploadId) as UserAssetRow | undefined);
@@ -715,6 +720,31 @@ export class UserStore {
 
   listProcessingUserAssets(limit = 100) {
     return (this.database.prepare("SELECT * FROM user_assets WHERE status = 'Processing' AND deleted_at IS NULL ORDER BY updated_at ASC LIMIT ?").all(limit) as UserAssetRow[]).map((row) => mapUserAsset(row)!);
+  }
+
+  /** Soft-deleted rows retain the provider id until the asynchronous delete is confirmed. */
+  listDeletedUserAssetsNeedingProviderDelete(limit = 100) {
+    return (this.database.prepare(`
+      SELECT * FROM user_assets
+      WHERE deleted_at IS NOT NULL AND provider_asset_id IS NOT NULL
+      ORDER BY updated_at ASC LIMIT ?
+    `).all(limit) as UserAssetRow[]).map((row) => mapUserAsset(row)!);
+  }
+
+  recordProviderIdForDeletedUserAsset(id: string, providerAssetId: string) {
+    const result = this.database.prepare(`
+      UPDATE user_assets SET provider_asset_id = ?, updated_at = ?
+      WHERE id = ? AND deleted_at IS NOT NULL AND provider_asset_id IS NULL
+    `).run(providerAssetId, Date.now(), id);
+    return result.changes > 0;
+  }
+
+  clearDeletedUserAssetProviderId(id: string, providerAssetId: string) {
+    const result = this.database.prepare(`
+      UPDATE user_assets SET provider_asset_id = NULL, updated_at = ?
+      WHERE id = ? AND deleted_at IS NOT NULL AND provider_asset_id = ?
+    `).run(Date.now(), id, providerAssetId);
+    return result.changes > 0;
   }
 
   /** Reusable library assets must be copied outside inputs/' seven-day lifecycle. */

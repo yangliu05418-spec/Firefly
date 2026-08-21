@@ -17,6 +17,7 @@ const setup = (asset = pending()) => {
   });
   const deps: AssetIngestDependencies = {
     readAsset: () => stored,
+    recordDeletedProviderAsset: vi.fn(),
     readUpload: vi.fn(() => ({ ownerId: "owner-1", status: "ready", objectKey: "inputs/actor.png", uploadId: "upload-1", fileName: "actor.png" }) as never),
     saveAsset: (next) => { stored = next; },
     callAsset: callAsset as never,
@@ -43,6 +44,16 @@ describe("background asset ingestion", () => {
     await registerQueuedAsset("asset-local-1", context.deps);
     expect(context.deps.callAsset).toHaveBeenCalledTimes(1);
     expect(context.stored()).toMatchObject({ status: "Failed", lastError: expect.stringContaining("已上传") });
+  });
+
+  it("records a created provider id on the tombstone when deletion wins the registration race", async () => {
+    const context = setup();
+    context.deps.readAsset = vi.fn()
+      .mockReturnValueOnce(pending())
+      .mockReturnValueOnce(null);
+    await registerQueuedAsset("asset-local-1", context.deps);
+    expect(context.deps.recordDeletedProviderAsset).toHaveBeenCalledWith("asset-local-1", "asset-provider-1");
+    expect(context.callAsset.mock.calls.map(([action]) => action)).toEqual(["CreateAsset"]);
   });
 
   it("resumes polling from a persisted provider id without creating another asset", async () => {
