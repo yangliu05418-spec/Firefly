@@ -207,17 +207,6 @@ jobs:
       - run: npm run typecheck
       - run: npm test -- --maxWorkers=1
       - run: npm run build
-      - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium webkit
-      - name: Exercise authenticated Canvas journeys
-        run: npm run test:e2e
-      - name: Upload Playwright report
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: playwright-report
-          path: playwright-report
-          retention-days: 7
       - name: Exercise SQLite backup and restore drill
         shell: bash
         run: |
@@ -229,6 +218,36 @@ jobs:
           BACKUP_PATH="$test_dir/backup.db" node -e "const Database=require('better-sqlite3');const db=new Database(process.env.BACKUP_PATH,{readonly:true});if(db.pragma('integrity_check',{simple:true})!=='ok'||db.prepare('SELECT value FROM smoke').pluck().get()!=='ok')process.exit(1);db.close()"
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
+
+  browser-e2e:
+    name: Authenticated browser journeys
+    if: github.event_name != 'push'
+    # Browser installation and the optimized-bundle journey are independent of
+    # unit/type gates. Run them in parallel so full coverage is not release latency.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - name: Pin npm 10 and install
+        run: |
+          npm install --global npm@10
+          npm config set registry https://registry.npmjs.org
+          npm ci
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium webkit
+      - name: Exercise authenticated browser journeys
+        run: npm run test:e2e
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: playwright-report
+          path: playwright-report
+          retention-days: 7
 
   container:
     name: Container build, smoke test and scan
