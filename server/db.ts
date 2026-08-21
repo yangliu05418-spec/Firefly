@@ -21,6 +21,7 @@ export type TaskStatus = "queued" | "submitting" | "running" | "succeeded" | "fa
 export type MediaStatus = "none" | "archiving" | "ready" | "fallback" | "failed";
 export type StoredTask = {
   id: string;
+  sessionId?: string;
   ownerId?: string;
   visibility?: "private" | "shared";
   providerId?: string;
@@ -70,6 +71,7 @@ export type MediaObject = {
 
 export type ImageGenerationTask = {
   id: string;
+  sessionId?: string;
   ownerId: string;
   model: string;
   modelName: string;
@@ -81,6 +83,15 @@ export type ImageGenerationTask = {
   items: { mediaId: string; width?: number; height?: number }[];
   failures: string[];
   error?: string;
+  createdAt: number;
+  updatedAt: number;
+  deletedAt?: number;
+};
+
+export type CreationSession = {
+  id: string;
+  ownerId: string;
+  title: string;
   createdAt: number;
   updatedAt: number;
   deletedAt?: number;
@@ -209,7 +220,7 @@ type UserRow = {
 };
 
 type TaskRow = {
-  id: string; owner_id: string | null; visibility: "private" | "shared"; provider_id: string | null;
+  id: string; session_id: string | null; owner_id: string | null; visibility: "private" | "shared"; provider_id: string | null;
   status: TaskStatus; media_status: MediaStatus; media_revision: number; prompt: string; model: string; mode: string;
   ratio: string; resolution: string; duration: number; request_json: string; source_video_url: string | null;
   source_video_expires_at: number | null; error: string | null; created_at: number; updated_at: number; deleted_at: number | null;
@@ -223,9 +234,13 @@ type MediaRow = {
 };
 
 type ImageGenerationRow = {
-  id: string; owner_id: string; model: string; model_name: string; ratio: string; resolution: string;
+  id: string; session_id: string | null; owner_id: string; model: string; model_name: string; ratio: string; resolution: string;
   prompt: string; requested_count: number; status: ImageGenerationTask["status"]; items_json: string;
   failures_json: string; error: string | null; created_at: number; updated_at: number; deleted_at: number | null;
+};
+
+type CreationSessionRow = {
+  id: string; owner_id: string; title: string; created_at: number; updated_at: number; deleted_at: number | null;
 };
 
 type UserAssetRow = {
@@ -276,7 +291,7 @@ const mapUser = (row?: UserRow): User | null => row ? ({
 }) : null;
 
 const mapTask = (row?: TaskRow): StoredTask | null => row ? ({
-  id: row.id, ownerId: row.owner_id ?? undefined, visibility: row.visibility, providerId: row.provider_id ?? undefined,
+  id: row.id, sessionId: row.session_id ?? undefined, ownerId: row.owner_id ?? undefined, visibility: row.visibility, providerId: row.provider_id ?? undefined,
   status: row.status, mediaStatus: row.media_status, mediaRevision: row.media_revision, prompt: row.prompt, model: row.model,
   mode: row.mode, ratio: row.ratio, resolution: row.resolution, duration: row.duration,
   request: JSON.parse(row.request_json), sourceVideoUrl: row.source_video_url ?? undefined,
@@ -294,11 +309,16 @@ const mapMedia = (row?: MediaRow): MediaObject | null => row ? ({
 }) : null;
 
 const mapImageGeneration = (row?: ImageGenerationRow): ImageGenerationTask | null => row ? ({
-  id: row.id, ownerId: row.owner_id, model: row.model, modelName: row.model_name,
+  id: row.id, sessionId: row.session_id ?? undefined, ownerId: row.owner_id, model: row.model, modelName: row.model_name,
   ratio: row.ratio, resolution: row.resolution, prompt: row.prompt, requestedCount: row.requested_count,
   status: row.status, items: JSON.parse(row.items_json), failures: JSON.parse(row.failures_json),
   error: row.error ?? undefined, createdAt: row.created_at, updatedAt: row.updated_at,
   deletedAt: row.deleted_at ?? undefined,
+}) : null;
+
+const mapCreationSession = (row?: CreationSessionRow): CreationSession | null => row ? ({
+  id: row.id, ownerId: row.owner_id, title: row.title, createdAt: row.created_at,
+  updatedAt: row.updated_at, deletedAt: row.deleted_at ?? undefined,
 }) : null;
 
 const mapUserAsset = (row?: UserAssetRow): UserAsset | null => row ? ({
@@ -394,16 +414,16 @@ export class UserStore {
 
   saveTask(task: StoredTask) {
     this.database.prepare(`
-      INSERT INTO generation_tasks (id, owner_id, visibility, provider_id, status, media_status, media_revision, prompt, model, mode, ratio, resolution, duration, request_json, source_video_url, source_video_expires_at, error, fetch_task_id, media_attempts, media_last_error, created_at, updated_at, deleted_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET owner_id=excluded.owner_id, visibility=excluded.visibility, provider_id=excluded.provider_id,
+      INSERT INTO generation_tasks (id, session_id, owner_id, visibility, provider_id, status, media_status, media_revision, prompt, model, mode, ratio, resolution, duration, request_json, source_video_url, source_video_expires_at, error, fetch_task_id, media_attempts, media_last_error, created_at, updated_at, deleted_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id, owner_id=excluded.owner_id, visibility=excluded.visibility, provider_id=excluded.provider_id,
         status=excluded.status, media_status=excluded.media_status, media_revision=excluded.media_revision, prompt=excluded.prompt,
         model=excluded.model, mode=excluded.mode, ratio=excluded.ratio, resolution=excluded.resolution, duration=excluded.duration,
         request_json=excluded.request_json, source_video_url=excluded.source_video_url, source_video_expires_at=excluded.source_video_expires_at,
         error=excluded.error, fetch_task_id=excluded.fetch_task_id, media_attempts=excluded.media_attempts, media_last_error=excluded.media_last_error,
         updated_at=excluded.updated_at, deleted_at=excluded.deleted_at
     `).run(
-      task.id, task.ownerId ?? null, task.visibility ?? (task.ownerId ? "private" : "shared"), task.providerId ?? null,
+      task.id, task.sessionId ?? null, task.ownerId ?? null, task.visibility ?? (task.ownerId ? "private" : "shared"), task.providerId ?? null,
       task.status, task.mediaStatus ?? "none", task.mediaRevision ?? 0, task.prompt, task.model, task.mode, task.ratio,
       task.resolution, task.duration, JSON.stringify(task.request ?? {}), task.sourceVideoUrl ?? null,
       task.sourceVideoExpiresAt ?? null, task.error ?? null, task.fetchTaskId ?? null,
@@ -420,6 +440,46 @@ export class UserStore {
   listTasksForUser(userId: string, limit = 50) {
     const rows = this.database.prepare(`SELECT * FROM generation_tasks WHERE deleted_at IS NULL AND (owner_id = ? OR visibility = 'shared') ORDER BY created_at DESC LIMIT ?`).all(userId, limit) as TaskRow[];
     return rows.map((row) => mapTask(row)!);
+  }
+
+  listTasksForSession(userId: string, sessionId: string, limit = 50) {
+    const rows = this.database.prepare(`SELECT * FROM generation_tasks WHERE owner_id = ? AND session_id = ? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?`).all(userId, sessionId, limit) as TaskRow[];
+    return rows.map((row) => mapTask(row)!);
+  }
+
+  createCreationSession(session: CreationSession) {
+    this.database.prepare("INSERT INTO creation_sessions (id, owner_id, title, created_at, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(session.id, session.ownerId, session.title, session.createdAt, session.updatedAt, session.deletedAt ?? null);
+    return session;
+  }
+
+  readCreationSession(id: string, includeDeleted = false) {
+    return mapCreationSession(this.database.prepare(`SELECT * FROM creation_sessions WHERE id = ?${includeDeleted ? "" : " AND deleted_at IS NULL"}`).get(id) as CreationSessionRow | undefined);
+  }
+
+  listCreationSessions(ownerId: string, limit = 100) {
+    return (this.database.prepare("SELECT * FROM creation_sessions WHERE owner_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT ?").all(ownerId, limit) as CreationSessionRow[])
+      .map((row) => mapCreationSession(row)!);
+  }
+
+  renameCreationSession(id: string, ownerId: string, title: string) {
+    const now = Date.now();
+    const result = this.database.prepare("UPDATE creation_sessions SET title = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").run(title, now, id, ownerId);
+    return result.changes ? this.readCreationSession(id) : null;
+  }
+
+  touchCreationSession(id: string, ownerId: string, prompt?: string) {
+    const now = Date.now();
+    const autoTitle = prompt?.trim().slice(0, 40);
+    const result = autoTitle
+      ? this.database.prepare("UPDATE creation_sessions SET title = CASE WHEN title = '新创作' THEN ? ELSE title END, updated_at = ? WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").run(autoTitle, now, id, ownerId)
+      : this.database.prepare("UPDATE creation_sessions SET updated_at = ? WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").run(now, id, ownerId);
+    return result.changes ? this.readCreationSession(id) : null;
+  }
+
+  softDeleteCreationSession(id: string, ownerId: string) {
+    const now = Date.now();
+    return this.database.prepare("UPDATE creation_sessions SET deleted_at = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").run(now, now, id, ownerId).changes > 0;
   }
 
   countActiveTasksForUser(userId: string) {
@@ -504,10 +564,10 @@ export class UserStore {
   createImageGeneration(task: ImageGenerationTask) {
     this.database.prepare(`
       INSERT INTO image_generation_tasks
-        (id, owner_id, model, model_name, ratio, resolution, prompt, requested_count, status, items_json, failures_json, error, created_at, updated_at, deleted_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (id, session_id, owner_id, model, model_name, ratio, resolution, prompt, requested_count, status, items_json, failures_json, error, created_at, updated_at, deleted_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      task.id, task.ownerId, task.model, task.modelName, task.ratio, task.resolution, task.prompt,
+      task.id, task.sessionId ?? null, task.ownerId, task.model, task.modelName, task.ratio, task.resolution, task.prompt,
       task.requestedCount, task.status, JSON.stringify(task.items), JSON.stringify(task.failures),
       task.error ?? null, task.createdAt, task.updatedAt, task.deletedAt ?? null,
     );
@@ -521,6 +581,20 @@ export class UserStore {
   listImageGenerations(ownerId: string, limit = 50) {
     return (this.database.prepare("SELECT * FROM image_generation_tasks WHERE owner_id = ? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?").all(ownerId, limit) as ImageGenerationRow[])
       .map((row) => mapImageGeneration(row)!);
+  }
+
+  listImageGenerationsForSession(ownerId: string, sessionId: string, limit = 50) {
+    return (this.database.prepare("SELECT * FROM image_generation_tasks WHERE owner_id = ? AND session_id = ? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?").all(ownerId, sessionId, limit) as ImageGenerationRow[])
+      .map((row) => mapImageGeneration(row)!);
+  }
+
+  createImageGenerationWithinLimit(task: ImageGenerationTask, limit: number) {
+    return this.database.transaction(() => {
+      const count = (this.database.prepare("SELECT COUNT(*) AS count FROM image_generation_tasks WHERE owner_id = ? AND status = 'running' AND deleted_at IS NULL").get(task.ownerId) as { count: number }).count;
+      if (count >= limit) return false;
+      this.createImageGeneration(task);
+      return true;
+    })();
   }
 
   updateImageGeneration(id: string, ownerId: string, patch: Pick<ImageGenerationTask, "status" | "items" | "failures"> & { error?: string }) {

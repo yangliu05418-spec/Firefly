@@ -23,11 +23,12 @@ describe("versioned database migrations", () => {
     const database = new Database(target, { readonly: true });
     expect(schemaVersion(database)).toBe(CURRENT_SCHEMA_VERSION);
     expect(assertSchemaVersion(database)).toBe(CURRENT_SCHEMA_VERSION);
-    expect((database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number }).count).toBe(5);
+    expect((database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number }).count).toBe(6);
     const assetColumns = (database.prepare("PRAGMA table_info(user_assets)").all() as { name: string }[]).map((column) => column.name);
     expect(assetColumns).toEqual(expect.arrayContaining(["category", "provider_asset_id", "last_error"]));
     expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='canvas_project_assets'").get() as { name: string }).name).toBe("canvas_project_assets");
     expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='image_generation_tasks'").get() as { name: string }).name).toBe("image_generation_tasks");
+    expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='creation_sessions'").get() as { name: string }).name).toBe("creation_sessions");
     database.close();
   });
 
@@ -63,7 +64,7 @@ describe("versioned database migrations", () => {
     const target = databasePath();
     migrateDatabase(target);
     const database = new Database(target);
-    database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (6, 'future-incompatible', ?)").run(Date.now());
+    database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (7, 'future-incompatible', ?)").run(Date.now());
     database.close();
     expect(() => migrateDatabase(target)).toThrow("newer than this release");
     const incompatible = new Database(target, { readonly: true });
@@ -89,16 +90,17 @@ describe("versioned database migrations", () => {
     const target = databasePath();
     migrateDatabase(target);
     const database = new Database(target);
-    database.exec("DELETE FROM schema_migrations WHERE version = 5; DROP TABLE image_generation_tasks");
+    database.exec("DELETE FROM schema_migrations WHERE version >= 5; DROP TABLE image_generation_tasks; DROP TABLE creation_sessions");
     database.prepare(`INSERT INTO users (id, feishu_open_id, feishu_union_id, tenant_key, email, name, avatar_url, status, created_at, last_login_at) VALUES ('owner-1', 'open-1', 'union-1', 'tenant-1', 'owner@dokuai.tv', 'Owner', '', 'active', 1, 1)`).run();
     database.prepare(`INSERT INTO media_objects (id, owner_id, kind, object_key, status, file_name, content_type, size, etag, created_at, updated_at) VALUES ('gen-old', 'owner-1', 'generated', 'generated/old.png', 'ready', 'old.png', 'image/png', 100, 'etag', 2, 2)`).run();
     database.close();
 
-    expect(migrateDatabase(target)).toBe(5);
+    expect(migrateDatabase(target)).toBe(CURRENT_SCHEMA_VERSION);
     const migrated = new Database(target, { readonly: true });
     expect(migrated.prepare("SELECT id, owner_id, status, items_json FROM image_generation_tasks").get()).toMatchObject({
       id: "legacy-gen-old", owner_id: "owner-1", status: "succeeded", items_json: '[{"mediaId":"gen-old"}]',
     });
+    expect(migrated.prepare("SELECT id, owner_id FROM creation_sessions WHERE id = 'legacy-image-legacy-gen-old'").get()).toMatchObject({ id: "legacy-image-legacy-gen-old", owner_id: "owner-1" });
     migrated.close();
   });
 });

@@ -76,24 +76,6 @@ const pool = new OpenRouterKeyPool(config.openrouterApiKeys);
 
 export const openRouterPool = () => pool;
 
-/** 每用户图片生成并发上限（成本防护；单实例部署，内存计数即可） */
-export const MAX_USER_IMAGE_INFLIGHT = 2;
-
-const userInflight = new Map<string, number>();
-
-export const acquireImageSlot = (userId: string): boolean => {
-  const current = userInflight.get(userId) ?? 0;
-  if (current >= MAX_USER_IMAGE_INFLIGHT) return false;
-  userInflight.set(userId, current + 1);
-  return true;
-};
-
-export const releaseImageSlot = (userId: string) => {
-  const current = userInflight.get(userId) ?? 0;
-  if (current <= 1) userInflight.delete(userId);
-  else userInflight.set(userId, current - 1);
-};
-
 const chatCompletionsUrl = () => config.openrouterBaseUrl.replace(/\/$/, "") + "/chat/completions";
 const imagesUrl = () => config.openrouterBaseUrl.replace(/\/$/, "") + "/images";
 
@@ -109,9 +91,19 @@ type ImageRequestBody = {
   model: string;
   prompt: string;
   n: number;
-  size?: string;
+  resolution?: "512" | "1K" | "2K" | "4K";
+  aspect_ratio?: string;
   input_references?: { type: "image_url"; image_url: { url: string } }[];
 };
+
+export const buildImageRequestBody = (input: { model: string; prompt: string; references: string[]; ratio: string; resolution: "512" | "1K" | "2K" | "4K" }): ImageRequestBody => ({
+  model: input.model,
+  prompt: input.prompt,
+  n: 1,
+  resolution: input.resolution,
+  aspect_ratio: input.ratio,
+  ...(input.references.length ? { input_references: input.references.map((url) => ({ type: "image_url" as const, image_url: { url } })) } : {}),
+});
 
 const callWithRetry = async (body: ChatRequestBody | ImageRequestBody, url = chatCompletionsUrl()): Promise<{ data: unknown; key: string }> => {
   const lastError: OpenRouterError = new OpenRouterError("没有可用的 OpenRouter API Key", 503);
@@ -321,21 +313,9 @@ export const generateCanvasText = async (input: { instruction: string; currentTe
 const isDataUrl = (url: string) => url.startsWith("data:");
 
 /** 生成单张图片：返回图片 URL（data: 或 https:），由调用方落盘 */
-export const generateSingleImage = async (input: { model: string; prompt: string; references: string[]; size: string }): Promise<string> => {
-  const base: ImageRequestBody = {
-    model: input.model,
-    prompt: input.prompt,
-    n: 1,
-    ...(input.references.length ? { input_references: input.references.map((url) => ({ type: "image_url" as const, image_url: { url } })) } : {}),
-  };
-  let data: unknown;
-  try {
-    ({ data } = await callWithRetry({ ...base, size: input.size }, imagesUrl()));
-  } catch (error) {
-    // 某些上游端点不接受显式像素尺寸，保留模型默认尺寸作为兼容回退。
-    if (!(error instanceof OpenRouterError) || error.status !== 400) throw error;
-    ({ data } = await callWithRetry(base, imagesUrl()));
-  }
+export const generateSingleImage = async (input: { model: string; prompt: string; references: string[]; ratio: string; resolution: "512" | "1K" | "2K" | "4K" }): Promise<string> => {
+  const base = buildImageRequestBody(input);
+  const { data } = await callWithRetry(base, imagesUrl());
   const images = parseOpenRouterImages(data);
   if (!images.length) throw new OpenRouterError("OpenRouter 未返回图片内容（模型可能不支持当前参数）", 400);
   return images[0];

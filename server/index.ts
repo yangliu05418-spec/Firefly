@@ -10,13 +10,13 @@ import { z } from "zod";
 import { config } from "./config.js";
 import { MODELS } from "./capabilities.js";
 import { clearSession, createSession, getSessionUser, publicUser, requireAuth, type SessionUser } from "./auth.js";
-import type { AssetCategory, CanvasJob, CanvasProject, CanvasProjectAsset, ImageGenerationTask, UserAsset } from "./db.js";
+import type { AssetCategory, CanvasJob, CanvasProject, CanvasProjectAsset, CreationSession, ImageGenerationTask, UserAsset } from "./db.js";
 import { users } from "./store.js";
 import { canvasDocumentSchema, DEFAULT_CANVAS_DOCUMENT, DEFAULT_CANVAS_DOCUMENT_V1, parseCanvasDocumentSafe, toCanvasDocumentV2 } from "./canvas-document.js";
 import { resolveCanvasContext } from "./canvas-context.js";
 import { publicCanvasProject, publicCanvasProjectDetail } from "./canvas-public.js";
 import { consumeFeishuAuthorization, createFeishuAuthorization, exchangeFeishuCode } from "./feishu.js";
-import { assetQueue, canvasQueue, generationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, previewQueue, readTask, redis, saveTask, type StoredTask } from "./redis.js";
+import { assetQueue, canvasQueue, generationQueue, imageGenerationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, previewQueue, readTask, redis, saveTask, type StoredTask } from "./redis.js";
 import { canAccessTask } from "./task-access.js";
 import { publicTask } from "./task-public.js";
 import { validateGeneration } from "./provider.js";
@@ -24,7 +24,7 @@ import { callAssetApi } from "./asset-api.js";
 import { ensureAutoReferenceGroup } from "./asset-registration.js";
 import { previewRedirectCacheControl } from "./media-cache.js";
 import { stablePreviewUrl } from "./preview-url-cache.js";
-import { abortMultipartUpload, canvasExportObjectKey, completeMultipartUpload, createMultipartUpload, deleteObject, headObject, inputObjectKey, inspectMediaObject, signUploadPart, signedObjectUrl, signedProviderObjectUrl, tosConfigured, tosEnabled, tosHealth, verifyStoredObject } from "./tos.js";
+import { abortMultipartUpload, canvasExportObjectKey, completeMultipartUpload, createMultipartUpload, deleteObject, headObject, inputObjectKey, inspectMediaObject, signUploadPart, signedObjectUrl, tosConfigured, tosEnabled, tosHealth, verifyStoredObject } from "./tos.js";
 import { DependencyHealthGate } from "./dependency-health.js";
 import { canonicalUploadContentType, tosMediaInfoViolation, uploadKindFromContentType } from "./upload-policy.js";
 import { acquireUploadCompletionLock, claimUploadSlot, releaseUploadCompletionLock, releaseUploadSlot, renewUploadSlot, UPLOAD_SESSION_TTL_SECONDS } from "./upload-slots.js";
@@ -32,9 +32,8 @@ import { createCanvasAssetFromUpload, prepareCanvasAssetFromUpload } from "./can
 import { createCanvasMediaHandler } from "./canvas-media-route.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
 import { publicUserAsset } from "./user-asset-public.js";
-import { IMAGE_MODELS, IMAGE_RATIOS, imageModelById, computeImageSize, DEFAULT_IMAGE_MODEL } from "./image-models.js";
-import { acquireImageSlot, downloadImageBuffer, generateSingleImage, openRouterPool, OpenRouterError, releaseImageSlot } from "./openrouter.js";
-import { storeGeneratedImage } from "./generated-media.js";
+import { IMAGE_MODELS, IMAGE_RATIOS, imageModelById, DEFAULT_IMAGE_MODEL } from "./image-models.js";
+import { openRouterPool } from "./openrouter.js";
 import { publicImageGeneration } from "./image-generation-public.js";
 import { providerAssetName } from "./asset-name.js";
 import { acquireCanvasLease, releaseCanvasLease, renewCanvasLease, validateCanvasLease } from "./canvas-lease.js";
@@ -78,6 +77,11 @@ const publicGenerationTask = (task: StoredTask) => {
         ? Boolean(users.readTaskMedia(task.id, "preview"))
         : Boolean(users.readTaskMedia(task.id, "output"));
   return publicTask(task, { stableMediaReady });
+};
+const publicCreationSession = ({ ownerId: _ownerId, deletedAt: _deletedAt, ...session }: CreationSession) => session;
+const createCreationSession = (ownerId: string, title = "新创作") => {
+  const now = Date.now();
+  return users.createCreationSession({ id: crypto.randomUUID(), ownerId, title, createdAt: now, updatedAt: now });
 };
 
 /** 全局素材校验并发闸：批量上传时避免 N 个 ffprobe 同时拉取 TOS 对象压垮容器网络 */
@@ -441,10 +445,43 @@ app.get("/media/:id/:name", async (req, res) => {
   res.sendFile(path.join(config.uploadDir, uploadId, meta.name));
 });
 
+const creationSessionTitleSchema = z.object({ title: z.string().trim().min(1, "会话名称不能为空").max(64, "会话名称不能超过 64 个字符") });
+
+app.get("/api/creation-sessions", requireAuth, (_req, res) => {
+  const user = res.locals.user as SessionUser;
+  res.json(users.listCreationSessions(user.id).map(publicCreationSession));
+});
+
+app.post("/api/creation-sessions", requireAuth, (req, res) => {
+  try {
+    const user = res.locals.user as SessionUser;
+    const title = req.body?.title === undefined ? "新创作" : creationSessionTitleSchema.parse(req.body).title;
+    res.status(201).json(publicCreationSession(createCreationSession(user.id, title)));
+  } catch (error) { respondError(res, error); }
+});
+
+app.patch("/api/creation-sessions/:id", requireAuth, (req, res) => {
+  try {
+    const user = res.locals.user as SessionUser;
+    const { title } = creationSessionTitleSchema.parse(req.body);
+    const session = users.renameCreationSession(param(req.params.id), user.id, title);
+    session ? res.json(publicCreationSession(session)) : res.status(404).json({ error: "创作会话不存在" });
+  } catch (error) { respondError(res, error); }
+});
+
+app.delete("/api/creation-sessions/:id", requireAuth, (req, res) => {
+  const user = res.locals.user as SessionUser;
+  users.softDeleteCreationSession(param(req.params.id), user.id) ? res.status(204).end() : res.status(404).json({ error: "创作会话不存在" });
+});
+
 app.post("/api/generations", requireAuth, async (req, res) => {
   try {
+    const requestedSessionId = z.string().min(1).max(200).optional().parse(req.body?.sessionId);
     const requestedInput = validateGeneration(req.body);
     const owner = res.locals.user as SessionUser;
+    const session = requestedSessionId ? users.readCreationSession(requestedSessionId) : null;
+    if (requestedSessionId && (!session || session.ownerId !== owner.id)) return res.status(404).json({ error: "创作会话不存在" });
+    const activeSession = session ?? createCreationSession(owner.id);
     const assets = [];
     for (const asset of requestedInput.assets) {
       if (asset.uploadId) {
@@ -472,7 +509,7 @@ app.post("/api/generations", requireAuth, async (req, res) => {
     const input = validateGeneration({ ...requestedInput, assets });
     const id = crypto.randomUUID();
     const now = Date.now();
-    const task: StoredTask = { id, ownerId: owner.id, visibility: "private", status: "queued", mediaStatus: "none", mediaRevision: 0, prompt: input.prompt, model: input.model, mode: input.mode, ratio: input.ratio, resolution: input.resolution, duration: input.duration, request: requestedInput, createdAt: now, updatedAt: now };
+    const task: StoredTask = { id, sessionId: activeSession.id, ownerId: owner.id, visibility: "private", status: "queued", mediaStatus: "none", mediaRevision: 0, prompt: input.prompt, model: input.model, mode: input.mode, ratio: input.ratio, resolution: input.resolution, duration: input.duration, request: requestedInput, createdAt: now, updatedAt: now };
     if (!users.createTaskWithinLimit(task, config.maxActiveGenerationsPerUser)) return res.status(429).json({ error: `你已有 ${config.maxActiveGenerationsPerUser} 个任务正在生成，请等待其中一个完成`, requestId: res.locals.requestId });
     await saveTask(task);
     try {
@@ -483,13 +520,21 @@ app.post("/api/generations", requireAuth, async (req, res) => {
       console.error(JSON.stringify({ type: "generation_enqueue_failed", at: new Date().toISOString(), taskId: id, userId: owner.id, code: (error as { code?: string }).code ?? "unknown" }));
       return res.status(503).json({ error: `${failed.error}（Case ID: ${id}）`, caseId: id });
     }
+    users.touchCreationSession(activeSession.id, owner.id, input.prompt);
     console.info(JSON.stringify({ type: "generation_queued", at: new Date().toISOString(), requestId: res.locals.requestId, taskId: id, userId: owner.id, model: input.model, mode: input.mode, assetCount: input.assets.length }));
     res.status(202).json(publicGenerationTask(task));
   } catch (error) { respondError(res, error); }
 });
 
-app.get("/api/generations", requireAuth, async (_req, res) => {
-  res.json((await listTasksForUser((res.locals.user as SessionUser).id)).map(publicGenerationTask));
+app.get("/api/generations", requireAuth, async (req, res) => {
+  const user = res.locals.user as SessionUser;
+  const sessionId = typeof req.query.sessionId === "string" ? req.query.sessionId : "";
+  if (sessionId) {
+    const session = users.readCreationSession(sessionId);
+    if (!session || session.ownerId !== user.id) return res.status(404).json({ error: "创作会话不存在" });
+    return res.json(users.listTasksForSession(user.id, sessionId).map(publicGenerationTask));
+  }
+  res.json((await listTasksForUser(user.id)).map(publicGenerationTask));
 });
 app.get("/api/generations/:id", requireAuth, async (req, res) => {
   const task = await readTask(param(req.params.id));
@@ -703,6 +748,7 @@ app.delete("/api/assets/:id", requireAuth, async (req, res) => {
 // ---- OpenRouter 图片生成 ----
 const imageGenerationSchema = z.object({
   requestId: z.string().uuid().optional(),
+  sessionId: z.string().min(1).max(200).optional(),
   model: z.string().min(1).max(120),
   ratio: z.enum(IMAGE_RATIOS),
   resolution: z.string().min(1).max(20),
@@ -717,8 +763,14 @@ app.get("/api/image-models", requireAuth, async (_req, res) => {
 
 app.get("/api/image-generations", requireAuth, (req, res) => {
   const user = res.locals.user as SessionUser;
-  users.failStaleImageGenerations(Date.now() - 15 * 60_000);
+  users.failStaleImageGenerations(Date.now() - 6 * 60 * 60_000);
   const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+  const sessionId = typeof req.query.sessionId === "string" ? req.query.sessionId : "";
+  if (sessionId) {
+    const session = users.readCreationSession(sessionId);
+    if (!session || session.ownerId !== user.id) return res.status(404).json({ error: "创作会话不存在" });
+    return res.json(users.listImageGenerationsForSession(user.id, sessionId, limit).map(publicImageGeneration));
+  }
   res.json(users.listImageGenerations(user.id, limit).map(publicImageGeneration));
 });
 
@@ -729,8 +781,6 @@ app.delete("/api/image-generations/:id", requireAuth, (req, res) => {
 });
 
 app.post("/api/image-generation", requireAuth, async (req, res) => {
-  let activeTask: ImageGenerationTask | undefined;
-  let slotOwnerId: string | undefined;
   try {
     const body = imageGenerationSchema.parse(req.body);
     const user = res.locals.user as SessionUser;
@@ -739,65 +789,46 @@ app.post("/api/image-generation", requireAuth, async (req, res) => {
     if (existing) {
       if (existing.ownerId !== user.id) return res.status(409).json({ error: "请求标识已被使用" });
       if (existing.status === "succeeded") return res.json({ Id: existing.id, Items: existing.items, Model: existing.model, Ratio: existing.ratio, Resolution: existing.resolution, Failed: existing.failures });
-      return res.status(409).json({ error: existing.status === "running" ? "图片正在生成，请稍候" : existing.error ?? "该请求未生成成功" });
+      if (existing.status === "running") return res.status(202).json({ Id: existing.id, Items: existing.items, Model: existing.model, Ratio: existing.ratio, Resolution: existing.resolution, Failed: existing.failures, Status: "generating" });
+      return res.status(409).json({ error: existing.error ?? "该请求未生成成功" });
     }
     const spec = imageModelById(body.model);
     if (!spec) return res.status(400).json({ error: "未知的图片模型" });
     if (body.count > spec.maxCount) return res.status(400).json({ error: "该模型单次最多生成 " + spec.maxCount + " 张" });
     if (!spec.resolutions.includes(body.resolution)) return res.status(400).json({ error: "该模型不支持此分辨率档位" });
-    const size = computeImageSize(body.ratio, Number(body.resolution), spec.maxSize);
-    // 参考图（图生图）：uploadId → 签名地址（临时，仅供本次请求）
-    const references: string[] = [];
+    const session = body.sessionId ? users.readCreationSession(body.sessionId) : null;
+    if (body.sessionId && (!session || session.ownerId !== user.id)) return res.status(404).json({ error: "创作会话不存在" });
+    const activeSession = session ?? createCreationSession(user.id);
+    // Only persist opaque upload ids in BullMQ. The worker signs fresh URLs
+    // immediately before the provider call, so queue delays cannot expire them.
     for (const uploadId of body.references) {
       const media = users.readUpload(uploadId);
       if (!media || media.ownerId !== user.id) return res.status(404).json({ error: "参考素材不存在或已过期" });
-      references.push(signedProviderObjectUrl(media.objectKey));
     }
     if (!openRouterPool().size) return res.status(503).json({ error: "服务端尚未配置 OpenRouter API Key" });
-    if (!acquireImageSlot(user.id)) return res.status(429).json({ error: "图片生成繁忙，请等当前生成完成后再试（每用户同时最多 2 组）" });
-    slotOwnerId = user.id;
     const startedAt = Date.now();
-    activeTask = {
-      id: requestId, ownerId: user.id, model: body.model, modelName: spec.name, ratio: body.ratio,
+    const activeTask: ImageGenerationTask = {
+      id: requestId, sessionId: activeSession.id, ownerId: user.id, model: body.model, modelName: spec.name, ratio: body.ratio,
       resolution: body.resolution, prompt: body.prompt, requestedCount: body.count, status: "running",
       items: [], failures: [], createdAt: startedAt, updatedAt: startedAt,
     };
-    users.createImageGeneration(activeTask);
-    console.info(JSON.stringify({ type: "image_generation_started", at: new Date().toISOString(), userId: user.id, model: body.model, ratio: body.ratio, resolution: body.resolution, size, count: body.count, references: references.length, healthyKeys: openRouterPool().healthyCount() }));
-    // 并发生成（上限 2），逐个落盘
-    let cursor = 0;
-    const items: { mediaId: string; width?: number; height?: number }[] = [];
-    const failures: string[] = [];
-    const worker = async () => {
-      while (cursor < body.count) {
-        const index = cursor++;
-        try {
-          const url = await generateSingleImage({ model: body.model, prompt: body.prompt, references, size });
-          const buffer = await downloadImageBuffer(url);
-          const contentType = url.startsWith("data:image/png") ? "image/png" : url.startsWith("data:image/webp") ? "image/webp" : url.startsWith("data:image/jpeg") ? "image/jpeg" : "image/png";
-          const media = await storeGeneratedImage({ ownerId: user.id, body: buffer, contentType, fileName: "nano-image-" + (index + 1) + ".png" });
-          items.push({ mediaId: media.id });
-          console.info(JSON.stringify({ type: "image_generation_completed", at: new Date().toISOString(), userId: user.id, mediaId: media.id, index, bytes: buffer.length }));
-        } catch (error) {
-          failures.push(error instanceof Error ? error.message : "生成失败");
-          console.warn(JSON.stringify({ type: "image_generation_failed", at: new Date().toISOString(), userId: user.id, index, code: (error as { code?: string }).code ?? "unknown", message: error instanceof Error ? error.message : undefined }));
-        }
-      }
-    };
-    await Promise.all(Array.from({ length: Math.min(2, body.count) }, worker));
-    if (!items.length) {
-      const message = failures[0] ?? "图片生成失败";
-      users.updateImageGeneration(activeTask.id, user.id, { status: "failed", items, failures, error: message });
-      return res.status(502).json({ error: message, requestId: res.locals.requestId });
+    if (!users.createImageGenerationWithinLimit(activeTask, 2)) return res.status(429).json({ error: "图片生成繁忙，请等当前生成完成后再试（每用户同时最多 2 组）" });
+    try {
+      await imageGenerationQueue.add("generate-image", {
+        ownerId: user.id, model: body.model, prompt: body.prompt, ratio: body.ratio,
+        resolution: body.resolution, count: body.count, referenceUploadIds: body.references,
+      }, { jobId: requestId, attempts: 1, removeOnComplete: { age: 7 * 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } });
+    } catch (error) {
+      users.updateImageGeneration(activeTask.id, user.id, { status: "failed", items: [], failures: [], error: "任务进入生成队列失败，请重新提交" });
+      console.error(JSON.stringify({ type: "image_generation_enqueue_failed", at: new Date().toISOString(), taskId: activeTask.id, userId: user.id, code: (error as { code?: string }).code ?? "unknown" }));
+      return res.status(503).json({ error: "任务进入生成队列失败，请重新提交", requestId: res.locals.requestId });
     }
-    users.updateImageGeneration(activeTask.id, user.id, { status: "succeeded", items, failures });
-    console.info(JSON.stringify({ type: "image_generation_done", at: new Date().toISOString(), userId: user.id, model: body.model, requested: body.count, ok: items.length, failed: failures.length, elapsedMs: Date.now() - startedAt }));
-    res.json({ Id: activeTask.id, Items: items, Model: body.model, Ratio: body.ratio, Resolution: body.resolution, Failed: failures });
+    users.touchCreationSession(activeSession.id, user.id, body.prompt);
+    console.info(JSON.stringify({ type: "image_generation_queued", at: new Date().toISOString(), taskId: activeTask.id, userId: user.id, model: body.model, ratio: body.ratio, resolution: body.resolution, count: body.count, references: body.references.length, healthyKeys: openRouterPool().healthyCount() }));
+    res.status(202).json({ Id: activeTask.id, Items: [], Model: body.model, Ratio: body.ratio, Resolution: body.resolution, Failed: [], Status: "generating" });
   } catch (error) {
-    if (activeTask) users.updateImageGeneration(activeTask.id, activeTask.ownerId, { status: "failed", items: [], failures: [], error: error instanceof Error ? error.message : "图片生成失败" });
-    if (error instanceof OpenRouterError) console.warn(JSON.stringify({ type: "image_generation_error", at: new Date().toISOString(), status: error.status, message: error.message }));
-    respondError(res, error, error instanceof OpenRouterError ? (error.status === "network" ? 502 : 502) : 400);
-  } finally { if (slotOwnerId) releaseImageSlot(slotOwnerId); }
+    respondError(res, error, 400);
+  }
 });
 
 app.get("/api/image-media/:id", requireAuth, async (req, res) => {
@@ -1404,7 +1435,7 @@ app.get("/api/health/ready", async (_req, res) => {
     dependency = "database";
     if (!users.healthCheck()) throw new Error("database unavailable");
     dependency = "queues";
-    await Promise.all([generationQueue.getJobCounts("wait", "active"), mediaQueue.getJobCounts("wait", "active"), previewQueue.getJobCounts("wait", "active"), assetQueue.getJobCounts("wait", "active"), canvasQueue.getJobCounts("wait", "active")]);
+    await Promise.all([generationQueue.getJobCounts("wait", "active"), imageGenerationQueue.getJobCounts("wait", "active"), mediaQueue.getJobCounts("wait", "active"), previewQueue.getJobCounts("wait", "active"), assetQueue.getJobCounts("wait", "active"), canvasQueue.getJobCounts("wait", "active")]);
     if (tosEnabled()) {
       dependency = "tos";
       const health = tosHealthGate.snapshot();
@@ -1467,7 +1498,7 @@ const shutdown = async () => {
   // then close remaining streams so a blue/green retirement cannot hang indefinitely.
   const forceClose = setTimeout(() => server.closeAllConnections(), Math.min(config.shutdownGraceMs, 10_000));
   await httpClosed; clearTimeout(forceClose);
-  await Promise.all([generationQueue.close(), mediaQueue.close(), previewQueue.close(), assetQueue.close(), canvasQueue.close()]);
+  await Promise.all([generationQueue.close(), imageGenerationQueue.close(), mediaQueue.close(), previewQueue.close(), assetQueue.close(), canvasQueue.close()]);
   await redis.quit(); users.close(); process.exit(0);
 };
 process.on("SIGTERM", shutdown);

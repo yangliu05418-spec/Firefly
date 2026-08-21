@@ -2,6 +2,7 @@ import type { ImageGenerationTask } from "./db.js";
 
 export const publicImageGeneration = ({ ownerId: _ownerId, deletedAt: _deletedAt, ...task }: ImageGenerationTask) => ({
   id: task.id,
+  sessionId: task.sessionId,
   model: task.model,
   modelName: task.modelName,
   ratio: task.ratio,

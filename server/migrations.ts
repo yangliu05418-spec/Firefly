@@ -2,11 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 // Compatibility bridge: deploy this reader before the Canvas V2 migration so
 // this image remains a valid blue/green rollback target after the next
 // expand-only migration is applied.
-export const MAX_SUPPORTED_SCHEMA_VERSION = 5;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 6;
 
 const baseSchema = `
   CREATE TABLE IF NOT EXISTS users (
@@ -299,6 +299,57 @@ const addImageGenerationHistory = (database: Database.Database) => {
   `);
 };
 
+const addCreationSessions = (database: Database.Database) => {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS creation_sessions (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      deleted_at INTEGER,
+      FOREIGN KEY (owner_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS creation_sessions_owner_updated_idx
+      ON creation_sessions(owner_id, updated_at DESC);
+  `);
+
+  // Before sessions existed, every sidebar item behaved like an independent
+  // conversation. Preserve that mental model instead of merging unrelated work.
+  // The guards also keep adoption of sparse legacy schemas non-destructive.
+  const canBackfill = tableExists(database, "users");
+  if (tableExists(database, "generation_tasks")) {
+    const taskColumns = new Set((database.prepare("PRAGMA table_info(generation_tasks)").all() as { name: string }[]).map((column) => column.name));
+    if (!taskColumns.has("session_id")) database.exec("ALTER TABLE generation_tasks ADD COLUMN session_id TEXT");
+    if (canBackfill) database.exec(`
+      INSERT OR IGNORE INTO creation_sessions (id, owner_id, title, created_at, updated_at)
+      SELECT 'legacy-video-' || id, owner_id,
+        CASE WHEN trim(prompt) = '' THEN '历史视频创作' ELSE substr(trim(prompt), 1, 40) END,
+        created_at, updated_at
+      FROM generation_tasks
+      WHERE owner_id IS NOT NULL AND session_id IS NULL;
+      UPDATE generation_tasks SET session_id = 'legacy-video-' || id
+      WHERE owner_id IS NOT NULL AND session_id IS NULL;
+    `);
+    database.exec("CREATE INDEX IF NOT EXISTS generation_tasks_session_created_idx ON generation_tasks(session_id, created_at DESC)");
+  }
+  if (tableExists(database, "image_generation_tasks")) {
+    const imageColumns = new Set((database.prepare("PRAGMA table_info(image_generation_tasks)").all() as { name: string }[]).map((column) => column.name));
+    if (!imageColumns.has("session_id")) database.exec("ALTER TABLE image_generation_tasks ADD COLUMN session_id TEXT");
+    if (canBackfill) database.exec(`
+      INSERT OR IGNORE INTO creation_sessions (id, owner_id, title, created_at, updated_at)
+      SELECT 'legacy-image-' || id, owner_id,
+        CASE WHEN trim(prompt) = '' THEN '历史图片创作' ELSE substr(trim(prompt), 1, 40) END,
+        created_at, updated_at
+      FROM image_generation_tasks
+      WHERE session_id IS NULL;
+      UPDATE image_generation_tasks SET session_id = 'legacy-image-' || id
+      WHERE session_id IS NULL;
+    `);
+    database.exec("CREATE INDEX IF NOT EXISTS image_generation_tasks_session_created_idx ON image_generation_tasks(session_id, created_at DESC)");
+  }
+};
+
 export const migrateDatabase = (databasePath: string) => {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const database = new Database(databasePath);
@@ -329,6 +380,10 @@ export const migrateDatabase = (databasePath: string) => {
       if (version < 5) {
         addImageGenerationHistory(database);
         database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(5, "add-image-generation-history", Date.now());
+      }
+      if (version < 6) {
+        addCreationSessions(database);
+        database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(6, "add-creation-sessions", Date.now());
       }
       assertSchemaVersion(database);
     }).exclusive();

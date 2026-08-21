@@ -89,6 +89,26 @@ describe("enterprise identity and isolation", () => {
     store.close();
   });
 
+  it("isolates creation sessions while leaving archived tasks globally discoverable", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-sessions-")); directories.push(directory);
+    const store = openStore(path.join(directory, "firefly.db"));
+    const owner = store.upsertFromFeishu({ openId: "ou_session", unionId: "on_session", tenantKey: "tenant-dokuai", email: "session@dokuai.tv", name: "Session", avatarUrl: "" });
+    const other = store.upsertFromFeishu({ openId: "ou_session_other", unionId: "on_session_other", tenantKey: "tenant-dokuai", email: "session-other@dokuai.tv", name: "Other", avatarUrl: "" });
+    const first = store.createCreationSession({ id: "session-1", ownerId: owner.id, title: "新创作", createdAt: 1, updatedAt: 1 });
+    const second = store.createCreationSession({ id: "session-2", ownerId: owner.id, title: "第二幕", createdAt: 2, updatedAt: 2 });
+    store.saveTask(task({ id: "session-task-1", sessionId: first.id, ownerId: owner.id }));
+    store.saveTask(task({ id: "session-task-2", sessionId: second.id, ownerId: owner.id }));
+    expect(store.listTasksForSession(owner.id, first.id).map((item) => item.id)).toEqual(["session-task-1"]);
+    expect(store.listTasksForSession(other.id, first.id)).toEqual([]);
+    expect(store.listTasksForUser(owner.id).map((item) => item.id)).toEqual(expect.arrayContaining(["session-task-1", "session-task-2"]));
+    expect(store.touchCreationSession(first.id, owner.id, "雨夜列车")?.title).toBe("雨夜列车");
+    expect(store.renameCreationSession(first.id, other.id, "越权")).toBeNull();
+    expect(store.softDeleteCreationSession(first.id, owner.id)).toBe(true);
+    expect(store.readCreationSession(first.id)).toBeNull();
+    expect(store.readTask("session-task-1")).not.toBeNull();
+    store.close();
+  });
+
   it("refuses a legacy media-table rebuild during an online migration", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-preview-migration-")); directories.push(directory);
     const databasePath = path.join(directory, "legacy.db");

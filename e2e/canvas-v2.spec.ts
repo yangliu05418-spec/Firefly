@@ -29,7 +29,7 @@ const projectImageAsset: CanvasProjectAsset = {
   mediaUrl: "/api/canvas-project-assets/project-library-image/media", downloadUrl: "/api/canvas-project-assets/project-library-image/media?download=1",
 };
 const videoModels = [{ id: "dreamina-seedance-2-5-260628", name: "Seedance 2.5", note: "旗舰模型", modes: ["omni", "text"], resolutions: ["720p", "1080p"], ratios: ["adaptive", "16:9", "9:16"], duration: [4, 30], imageLimit: 30, videoLimit: 10, audioLimit: 10, audioOnly: true, supportsAudio: true, outputFormats: ["mp4"] }];
-const imageModels = [{ id: "google/gemini-3.1-flash-lite-image", name: "Nano Banana 2 Lite", resolutions: ["512", "1024"], defaultResolution: "1024", maxCount: 4 }];
+const imageModels = [{ id: "google/gemini-3.1-flash-lite-image", name: "Nano Banana 2 Lite", resolutions: ["1024"], defaultResolution: "1024", maxCount: 4 }];
 
 const json = (route: Route, body: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
@@ -38,6 +38,7 @@ async function mockAuthenticatedApi(page: Page, options: { leaseHeld?: boolean; 
   let storedDocument = structuredClone(options.document ?? documentV2);
   let leaseReleaseCount = 0;
   let imageHistory: unknown[] = [];
+  let creationSessions = [{ id: "session-e2e", title: "新创作", createdAt: Date.now(), updatedAt: Date.now() }];
   let leasePostCount = 0;
   let leaseRenewCount = 0;
   const saveLeaseTokens: string[] = [];
@@ -51,12 +52,27 @@ async function mockAuthenticatedApi(page: Page, options: { leaseHeld?: boolean; 
     if (path === "/api/auth/session") return json(route, { authenticated: true, user: { id: "user-e2e", email: "artist@dokuai.tv", name: "Artist", avatarUrl: "" } });
     if (path === "/api/models") return json(route, videoModels);
     if (path === "/api/image-models") return json(route, { Items: imageModels, Ratios: ["16:9", "1:1", "9:16"], DefaultModel: imageModels[0].id });
+    if (path === "/api/creation-sessions" && request.method() === "GET") return json(route, creationSessions);
+    if (path === "/api/creation-sessions" && request.method() === "POST") {
+      const session = { id: `session-e2e-${creationSessions.length + 1}`, title: "新创作", createdAt: Date.now(), updatedAt: Date.now() };
+      creationSessions = [session, ...creationSessions]; return json(route, session, 201);
+    }
+    if (path.startsWith("/api/creation-sessions/") && request.method() === "PATCH") {
+      const id = decodeURIComponent(path.slice("/api/creation-sessions/".length)); const title = (request.postDataJSON() as { title: string }).title;
+      creationSessions = creationSessions.map((session) => session.id === id ? { ...session, title, updatedAt: Date.now() } : session);
+      return json(route, creationSessions.find((session) => session.id === id));
+    }
+    if (path.startsWith("/api/creation-sessions/") && request.method() === "DELETE") {
+      const id = decodeURIComponent(path.slice("/api/creation-sessions/".length)); creationSessions = creationSessions.filter((session) => session.id !== id);
+      return route.fulfill({ status: 204 });
+    }
     if (path === "/api/image-generations" && request.method() === "GET") return json(route, imageHistory);
     if (path === "/api/image-generation" && request.method() === "POST") {
-      const body = request.postDataJSON() as { requestId: string; prompt: string; ratio: string; resolution: string; count: number };
-      await new Promise((resolve) => setTimeout(resolve, options.imageGenerationDelayMs ?? 0));
-      imageHistory = [{ id: body.requestId, modelName: imageModels[0].name, ratio: body.ratio, resolution: body.resolution, prompt: body.prompt, requestedCount: body.count, status: "succeeded", items: [{ mediaId: "image-e2e" }], failed: [], createdAt: Date.now() }];
-      return json(route, { Id: body.requestId, Items: [{ mediaId: "image-e2e" }], Model: imageModels[0].id, Ratio: body.ratio, Resolution: body.resolution, Failed: [] });
+      const body = request.postDataJSON() as { requestId: string; sessionId: string; prompt: string; ratio: string; resolution: string; count: number };
+      const pending = { id: body.requestId, sessionId: body.sessionId, modelName: imageModels[0].name, ratio: body.ratio, resolution: body.resolution, prompt: body.prompt, requestedCount: body.count, status: "generating", items: [], failed: [], createdAt: Date.now() };
+      imageHistory = [pending];
+      setTimeout(() => { imageHistory = [{ ...pending, status: "succeeded", items: [{ mediaId: "image-e2e" }] }]; }, options.imageGenerationDelayMs ?? 0);
+      return json(route, { Id: body.requestId, Items: [], Model: imageModels[0].id, Ratio: body.ratio, Resolution: body.resolution, Failed: [], Status: "generating" }, 202);
     }
     if (path === "/api/image-media/image-e2e") return route.fulfill({ status: 200, contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><path fill="#b8d9cf" d="M0 0h8v8H0z"/></svg>' });
     if (path === "/api/generations") return json(route, []);
@@ -325,17 +341,43 @@ test("image generation confirms immediately and moves provider waiting into the 
   await page.goto("/studio");
   await page.getByRole("button", { name: "视频生成", exact: true }).click();
   await page.getByRole("button", { name: "图片生成 支持文生图与图生图" }).click();
+  await page.locator(".control").filter({ hasText: "1:1" }).click();
+  await page.locator(".image-format-pop").getByRole("button", { name: "16:9", exact: true }).click();
+  await page.keyboard.press("Escape");
   const prompt = "一盏放在雨夜窗边的暖色台灯";
   await page.getByRole("textbox", { name: "创作提示词" }).fill(prompt);
   const send = page.locator(".send-button");
   await send.click();
-  await expect(page.getByText("已提交，正在生成")).toBeVisible({ timeout: 500 });
-  await expect(send.locator(".spin")).toHaveCount(0);
+  await expect(page.locator(".composer-dock")).toBeVisible({ timeout: 500 });
   await expect(page.locator(".image-result--generating")).toBeVisible();
+  const pendingBox = await page.locator(".image-result--generating").boundingBox();
+  const dockBox = await page.locator(".composer-dock").boundingBox();
+  expect(pendingBox).not.toBeNull(); expect(dockBox).not.toBeNull(); expect(pendingBox!.y + pendingBox!.height).toBeLessThanOrEqual(dockBox!.y + 2);
   await expect(page.getByRole("img", { name: prompt })).toBeVisible({ timeout: 15_000 });
   await expect(page.locator(".image-result--generating")).toHaveCount(0);
+  const resultBox = await page.locator(".image-result__grid figure").boundingBox();
+  expect(resultBox).not.toBeNull(); expect(resultBox!.width / resultBox!.height).toBeGreaterThan(1.7);
   await page.reload();
   await expect(page.getByRole("img", { name: prompt })).toBeVisible();
+});
+
+test("new creation sessions isolate the stage and can be renamed or removed without deleting assets", async ({ page }) => {
+  await mockAuthenticatedApi(page);
+  await page.goto("/studio");
+  await expect(page.getByText("新创作", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "新创作", exact: true }).click();
+  await expect.poll(() => new URL(page.url()).pathname).toContain("/studio/sessions/session-e2e-2");
+  const active = page.locator(".session-item.is-active");
+  await active.hover();
+  await active.getByRole("button", { name: /重命名/ }).click();
+  const title = active.getByRole("textbox", { name: "会话名称" });
+  await title.fill("雨夜分镜"); await title.press("Enter");
+  await expect(active.getByText("雨夜分镜", { exact: true })).toBeVisible();
+  await active.hover(); await active.getByRole("button", { name: /删除/ }).click();
+  await expect(page.getByRole("heading", { name: "删除“雨夜分镜”？" })).toBeVisible();
+  await page.getByRole("button", { name: "删除会话" }).click();
+  await expect(page.getByText("雨夜分镜", { exact: true })).toHaveCount(0);
+  await expect.poll(() => new URL(page.url()).pathname).toBe("/studio/sessions/session-e2e");
 });
 
 test("a fast text edit is committed to the browser draft before the page leaves", async ({ page }) => {
