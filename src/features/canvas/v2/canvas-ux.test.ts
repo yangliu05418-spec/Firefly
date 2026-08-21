@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { CanvasNodeV2 } from "../canvas-v2-types";
-import { hasCanvasConnection, incomingCanvasReferences, placeCanvasMenu, withoutEphemeralCanvasElements } from "./canvas-ux";
+import { CANVAS_INITIAL_FIT_VIEW_OPTIONS, hasCanvasConnection, incomingCanvasReferences, placeCanvasMenu, withoutEphemeralCanvasElements } from "./canvas-ux";
+
+describe("initial canvas viewport", () => {
+  it("fits content without magnifying a single node beyond 100%", () => {
+    expect(CANVAS_INITIAL_FIT_VIEW_OPTIONS).toEqual({ padding: .18, maxZoom: 1 });
+  });
+});
 
 describe("placeCanvasMenu", () => {
   it("anchors a right-side menu beside the clicked plus and vertically centers it", () => {

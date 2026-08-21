@@ -24,7 +24,7 @@ import { deleteCanvasDraft, readCanvasDraft, writeCanvasDraft } from "./canvas-d
 import { CanvasV2Node, type CanvasFlowData, type CanvasFlowNode } from "./CanvasV2Node";
 import { canvasAssetDownloadName } from "./canvas-download";
 import { canvasVideoModeForReferences, canvasVideoModelsForReferences, type CanvasVideoReferenceKind } from "./canvas-video-capability";
-import { hasCanvasConnection, incomingCanvasReferences, placeCanvasMenu, withoutEphemeralCanvasElements, type CanvasMenuAnchor } from "./canvas-ux";
+import { CANVAS_INITIAL_FIT_VIEW_OPTIONS, hasCanvasConnection, incomingCanvasReferences, placeCanvasMenu, withoutEphemeralCanvasElements, type CanvasMenuAnchor } from "./canvas-ux";
 
 const CanvasMontage = lazy(() => import("./CanvasMontage").then((module) => ({ default: module.CanvasMontage })));
 
@@ -133,6 +133,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   const [helpOpen, setHelpOpen] = useState(false);
   const [shortcutOpen, setShortcutOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [expandedTextNodeId, setExpandedTextNodeId] = useState<string | null>(null);
   const [edgesHidden, setEdgesHidden] = useState(false);
   const [snapToGrid, setSnapToGrid] = useState(true);
   const [minimapOpen, setMinimapOpen] = useState(true);
@@ -315,7 +316,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     setCreateMenu({ sourceId: id, side, position, anchor, focusOnOpen: true });
   }, [flow]);
 
-  const attachCallbacks = useCallback((domain: CanvasNodeV2): CanvasFlowData => ({ domain, readOnly: readOnly || mobile, references: [], onChange: patchNode, onCreateFrom: openCreateFrom, onFocusReference: focusReference, onRemoveReference: removeReference, onGenerate: openComposer, onInspect: inspectNode, onCancel: cancelNodeJob, onExtractFrame: (id) => extractFrameRef.current(id), onCrop: (id) => setCropNodeId(id), onRotate: (id) => deriveImageRef.current(id, { rotation: 90 }), onUpload: (id, file) => uploadNodeFileRef.current(id, file), onPickAsset: (id) => openNodeAssetPickerRef.current(id), onSelection: (id, text) => { if (text) textSelections.current.set(id, text); else textSelections.current.delete(id); } }), [cancelNodeJob, focusReference, inspectNode, mobile, openComposer, openCreateFrom, patchNode, readOnly, removeReference]);
+  const attachCallbacks = useCallback((domain: CanvasNodeV2): CanvasFlowData => ({ domain, readOnly: readOnly || mobile, references: [], expandedText: false, onChange: patchNode, onCreateFrom: openCreateFrom, onFocusReference: focusReference, onRemoveReference: removeReference, onGenerate: openComposer, onInspect: inspectNode, onCancel: cancelNodeJob, onExtractFrame: (id) => extractFrameRef.current(id), onCrop: (id) => setCropNodeId(id), onRotate: (id) => deriveImageRef.current(id, { rotation: 90 }), onUpload: (id, file) => uploadNodeFileRef.current(id, file), onPickAsset: (id) => openNodeAssetPickerRef.current(id), onSelection: (id, text) => { if (text) textSelections.current.set(id, text); else textSelections.current.delete(id); }, onExpandText: (id, expanded) => setExpandedTextNodeId(expanded ? id : null) }), [cancelNodeJob, focusReference, inspectNode, mobile, openComposer, openCreateFrom, patchNode, readOnly, removeReference]);
   const makeFlowNode = useCallback((domain: CanvasNodeV2): CanvasFlowNode => ({ id: domain.id, type: domain.type, position: domain.position, parentId: domain.parentId, extent: domain.parentId ? "parent" : undefined, width: domain.width, height: domain.height, dragHandle: ".canvas-v2-node", data: attachCallbacks(domain) }), [attachCallbacks]);
 
   useEffect(() => {
@@ -631,9 +632,13 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
     const domains = nodes.map((node) => node.data.domain);
     return nodes.map((node) => ({
       ...node,
-      data: { ...node.data, references: incomingCanvasReferences(node.id, domains, edges), localPreviewUrl: localPreviews[node.id] ?? (node.data.domain.data.projectAssetId ? localAssetPreviews[node.data.domain.data.projectAssetId] : undefined) },
+      data: { ...node.data, references: incomingCanvasReferences(node.id, domains, edges), expandedText: expandedTextNodeId === node.id, localPreviewUrl: localPreviews[node.id] ?? (node.data.domain.data.projectAssetId ? localAssetPreviews[node.data.domain.data.projectAssetId] : undefined) },
     }));
-  }, [edges, localAssetPreviews, localPreviews, nodes]);
+  }, [edges, expandedTextNodeId, localAssetPreviews, localPreviews, nodes]);
+
+  useEffect(() => {
+    if (expandedTextNodeId && !nodes.some((node) => node.id === expandedTextNodeId)) setExpandedTextNodeId(null);
+  }, [expandedTextNodeId, nodes]);
   const renderedEdges = useMemo(() => edges.map((edge) => ({ ...edge, hidden: edgesHidden })), [edges, edgesHidden]);
 
   const createMenuStyle = useMemo<CreateMenuStyle | undefined>(() => {
@@ -1143,7 +1148,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
         onNodeDragStart={beginNodeDrag} onNodeDragStop={finishNodeDrag} onMoveStart={() => setCreateMenu(null)}
         onPaneContextMenu={(event) => { event.preventDefault(); if (!readOnly) setCreateMenu({ screen: { x: event.clientX, y: event.clientY }, position: flow.screenToFlowPosition({ x: event.clientX, y: event.clientY }), focusOnOpen: true }); }}
         onPaneClick={() => setCreateMenu(null)} snapToGrid={snapToGrid} snapGrid={[20, 20]} panOnDrag={panMode ? true : [1, 2]} selectionOnDrag={!panMode} nodesDraggable={!readOnly && !mobile}
-        minZoom={.08} maxZoom={3} onlyRenderVisibleElements fitView deleteKeyCode={null} proOptions={{ hideAttribution: true }}>
+        minZoom={.08} maxZoom={3} onlyRenderVisibleElements fitView fitViewOptions={CANVAS_INITIAL_FIT_VIEW_OPTIONS} deleteKeyCode={null} proOptions={{ hideAttribution: true }}>
         <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="rgba(214,224,220,.14)" />
         {minimapOpen && <MiniMap className="canvas-v2-minimap" pannable zoomable nodeColor={(node) => node.selected ? "#d9e5df" : "#4b5554"} maskColor="rgba(6,8,9,.68)" />}
       </ReactFlow>

@@ -4,6 +4,10 @@ export type CanvasMenuAnchor = { left: number; right: number; top: number; botto
 export type CanvasMenuPlacement = { left: number; top: number; arrowTop: number; placement: "left" | "right" };
 export type CanvasReferenceSummary = { sourceId: string; title: string; type: CanvasNodeTypeV2 };
 
+// Keep the first fit-to-view from turning a lone node into a full-screen panel.
+// Explicit user zoom remains available up to the workspace's normal maximum.
+export const CANVAS_INITIAL_FIT_VIEW_OPTIONS = { padding: .18, maxZoom: 1 } as const;
+
 const clamp = (value: number, minimum: number, maximum: number) => Math.min(Math.max(value, minimum), maximum);
 
 export const placeCanvasMenu = (

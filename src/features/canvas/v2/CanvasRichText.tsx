@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
 import { LexicalComposer } from "@lexical/react/LexicalComposer";
 import { ContentEditable } from "@lexical/react/LexicalContentEditable";
@@ -53,15 +53,14 @@ function RichTextToolbar({ closeExpanded }: { closeExpanded?: () => void }) {
   </div>;
 }
 
-export function CanvasRichText({ value, richText, readOnly, onChange, onSelection }: { value: string; richText?: Record<string, unknown>; readOnly: boolean; onChange: (markdown: string, json: Record<string, unknown>) => void; onSelection?: (text: string) => void }) {
+export function CanvasRichText({ value, richText, readOnly, expanded, onExpandedChange, onChange, onSelection }: { value: string; richText?: Record<string, unknown>; readOnly: boolean; expanded: boolean; onExpandedChange: (expanded: boolean) => void; onChange: (markdown: string, json: Record<string, unknown>) => void; onSelection?: (text: string) => void }) {
   const latestMarkdown = useRef(value);
-  const [expanded, setExpanded] = useState(false);
   const expandButton = useRef<HTMLButtonElement>(null);
   const dialog = useRef<HTMLDivElement>(null);
   const closeExpanded = useCallback(() => {
-    setExpanded(false);
+    onExpandedChange(false);
     requestAnimationFrame(() => expandButton.current?.focus());
-  }, []);
+  }, [onExpandedChange]);
   useEffect(() => {
     if (!expanded) return;
     const frame = requestAnimationFrame(() => dialog.current?.querySelector<HTMLElement>("[contenteditable=true]")?.focus());
@@ -96,7 +95,7 @@ export function CanvasRichText({ value, richText, readOnly, onChange, onSelectio
       <SelectionPlugin onSelection={onSelection} />
       <RichTextPlugin contentEditable={<ContentEditable className="canvas-v2-richtext" aria-label="文本节点内容" />} placeholder={<span className="canvas-v2-richtext__placeholder">写下一段场景、对白或镜头说明…</span>} ErrorBoundary={LexicalErrorBoundary} />
       {!readOnly && <><HistoryPlugin /><HorizontalRulePlugin /><MarkdownShortcutPlugin transformers={TRANSFORMERS} /><OnChangePlugin onChange={handleChange} /></>}
-    {!readOnly && !expanded && <button ref={expandButton} type="button" className="canvas-v2-richtext__expand" title="放大编辑" aria-haspopup="dialog" onClick={() => setExpanded(true)}><Expand /></button>}
+    {!readOnly && !expanded && <button ref={expandButton} type="button" className="canvas-v2-richtext__expand nodrag nowheel" title="放大编辑" aria-haspopup="dialog" onClick={() => onExpandedChange(true)}><Expand /></button>}
   </div>;
   return <LexicalComposer initialConfig={config}>
     {expanded ? createPortal(<div ref={dialog} className="canvas-v2-richtext-dialog" role="dialog" aria-modal="true" aria-label="放大编辑文本" onMouseDown={(event) => { if (event.target === event.currentTarget) closeExpanded(); }}>{shell}</div>, document.body) : shell}
