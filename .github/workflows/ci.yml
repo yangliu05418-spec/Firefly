@@ -74,6 +74,7 @@ jobs:
           set -euo pipefail
           release_env=/etc/firefly/release.env
           backup_env=$(mktemp)
+          retire_lock=$(mktemp)
           had_release_env=0
           if sudo test -e "$release_env"; then
             sudo cp "$release_env" "$backup_env"
@@ -87,6 +88,7 @@ jobs:
               sudo rm -f "$release_env"
             fi
             rm -f "$backup_env"
+            rm -f "$retire_lock"
           }
           trap cleanup EXIT
           sudo install -d -m 0755 /etc/firefly
@@ -96,6 +98,11 @@ jobs:
           docker run -d --name firefly-web-blue \
             --label com.firefly.role=web --label com.firefly.slot=blue \
             alpine:3.20 sleep 300 >/dev/null
+          exec 7>"$retire_lock"
+          flock 7
+          env FIREFLY_DEPLOY_LOCK_FILE="$retire_lock" sh ops/firefly-retire-slot.sh blue
+          test "$(docker inspect --format '{{.State.Running}}' firefly-web-blue)" = true
+          flock -u 7
           sudo sh ops/firefly-retire-slot.sh blue
           ! docker inspect firefly-web-blue >/dev/null 2>&1
 

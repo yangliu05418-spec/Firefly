@@ -160,7 +160,7 @@ notify started
 
 cleanup_candidate
 if [ "$current_slot" != "legacy" ]; then
-  /usr/local/sbin/firefly-retire-slot legacy
+  FIREFLY_DEPLOY_LOCK_HELD=1 /usr/local/sbin/firefly-retire-slot legacy
 fi
 if /usr/bin/docker ps -q --filter "publish=$next_port" | grep -q .; then
   failure_event=failed_standby_port_busy
