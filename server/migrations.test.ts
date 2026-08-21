@@ -23,13 +23,14 @@ describe("versioned database migrations", () => {
     const database = new Database(target, { readonly: true });
     expect(schemaVersion(database)).toBe(CURRENT_SCHEMA_VERSION);
     expect(assertSchemaVersion(database)).toBe(CURRENT_SCHEMA_VERSION);
-    expect((database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number }).count).toBe(7);
+    expect((database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number }).count).toBe(8);
     const assetColumns = (database.prepare("PRAGMA table_info(user_assets)").all() as { name: string }[]).map((column) => column.name);
     expect(assetColumns).toEqual(expect.arrayContaining(["category", "provider_asset_id", "last_error"]));
     expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='canvas_project_assets'").get() as { name: string }).name).toBe("canvas_project_assets");
     expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='image_generation_tasks'").get() as { name: string }).name).toBe("image_generation_tasks");
     expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='creation_sessions'").get() as { name: string }).name).toBe("creation_sessions");
     expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='async_job_outbox'").get() as { name: string }).name).toBe("async_job_outbox");
+    expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='upload_sessions'").get() as { name: string }).name).toBe("upload_sessions");
     database.close();
   });
 
@@ -61,31 +62,32 @@ describe("versioned database migrations", () => {
     store.close();
   });
 
-  it("upgrades schema six by adding only the durable outbox", () => {
+  it("upgrades schema six with the durable outbox and upload sessions", () => {
     const target = databasePath();
     migrateDatabase(target);
     const database = new Database(target);
-    database.exec("DELETE FROM schema_migrations WHERE version = 7; DROP TABLE async_job_outbox");
+    database.exec("DELETE FROM schema_migrations WHERE version >= 7; DROP TABLE async_job_outbox; DROP TABLE upload_sessions");
     const taskSqlBefore = (database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'generation_tasks'").get() as { sql: string }).sql;
     database.close();
 
-    expect(migrateDatabase(target)).toBe(7);
+    expect(migrateDatabase(target)).toBe(CURRENT_SCHEMA_VERSION);
     const upgraded = new Database(target, { readonly: true });
     expect((upgraded.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'generation_tasks'").get() as { sql: string }).sql).toBe(taskSqlBefore);
     expect(upgraded.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'async_job_outbox'").get()).toMatchObject({ name: "async_job_outbox" });
+    expect(upgraded.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'upload_sessions'").get()).toMatchObject({ name: "upload_sessions" });
     upgraded.close();
   });
 
-  it("accepts the next expand-only schema for blue-green rollback compatibility", () => {
+  it("upgrades schema seven by adding only upload sessions", () => {
     const target = databasePath();
     migrateDatabase(target);
     const database = new Database(target);
-    database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (8, 'next-expand-only', ?)").run(Date.now());
+    database.exec("DELETE FROM schema_migrations WHERE version = 8; DROP TABLE upload_sessions");
     database.close();
-    expect(migrateDatabase(target)).toBe(8);
-    const compatible = new Database(target, { readonly: true });
-    expect(assertSchemaVersion(compatible)).toBe(8);
-    compatible.close();
+    expect(migrateDatabase(target)).toBe(CURRENT_SCHEMA_VERSION);
+    const upgraded = new Database(target, { readonly: true });
+    expect(upgraded.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='upload_sessions'").get()).toMatchObject({ name: "upload_sessions" });
+    upgraded.close();
   });
 
   it("rejects a database newer than the rollback compatibility ceiling", () => {

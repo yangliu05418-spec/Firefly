@@ -8,7 +8,7 @@ import { z } from "zod";
 import { config } from "./config.js";
 import { MODELS } from "./capabilities.js";
 import { clearSession, createSession, getSessionUser, publicUser, requireAuth, type SessionUser } from "./auth.js";
-import type { AssetCategory, CanvasJob, CanvasProject, CanvasProjectAsset, CreationSession, ImageGenerationTask, UserAsset } from "./db.js";
+import type { AssetCategory, CanvasJob, CanvasProject, CanvasProjectAsset, CreationSession, ImageGenerationTask, UploadSession, UserAsset } from "./db.js";
 import { users } from "./store.js";
 import { canvasDocumentSchema, DEFAULT_CANVAS_DOCUMENT, DEFAULT_CANVAS_DOCUMENT_V1, parseCanvasDocumentSafe, toCanvasDocumentV2 } from "./canvas-document.js";
 import { resolveCanvasContext } from "./canvas-context.js";
@@ -144,6 +144,26 @@ app.get("/api/models", requireAuth, (_req, res) => res.json(MODELS));
 
 const uploadMetaSchema = z.object({ name: z.string().min(1).max(180), size: z.number().int().positive().max(200 * 1024 * 1024), type: z.enum(["image", "video", "audio"]), mime: z.string().max(100) });
 const safeName = (name: string) => name.normalize("NFKC").replace(/[^\p{L}\p{N}._-]+/gu, "-").slice(-120) || "asset";
+type DirectUploadMeta = z.infer<typeof uploadMetaSchema> & {
+  mime: string; name: string; ownerId: string; objectKey: string; tosUploadId: string;
+  partSize: number; partCount: number; direct: true; createdAt: number; finalizing?: boolean;
+};
+type LegacyUploadMeta = z.infer<typeof uploadMetaSchema> & {
+  mime: string; name: string; ownerId: string; received: number; mediaExpiresAt: number;
+  direct: false; createdAt: number;
+};
+type UploadMeta = DirectUploadMeta | LegacyUploadMeta;
+const directUploadMeta = (session: UploadSession): DirectUploadMeta => ({
+  name: session.fileName, size: session.size, type: session.mediaKind, mime: session.contentType,
+  ownerId: session.ownerId, objectKey: session.objectKey, tosUploadId: session.tosUploadId,
+  partSize: session.partSize, partCount: session.partCount, direct: true, createdAt: session.createdAt,
+});
+const readUploadMeta = async (uploadId: string) => {
+  const durable = users.readUploadSession(uploadId);
+  if (durable) return durable.state === "uploading" && durable.expiresAt > Date.now() ? directUploadMeta(durable) : null;
+  const raw = await redis.get(`upload:${uploadId}`);
+  return raw ? JSON.parse(raw) as UploadMeta : null;
+};
 
 app.post("/api/uploads", requireAuth, async (req, res) => {
   try {
@@ -169,9 +189,14 @@ app.post("/api/uploads", requireAuth, async (req, res) => {
         const partSize = config.tosUploadPartSize;
         const partCount = Math.ceil(meta.size / partSize);
         const stored = { ...meta, mime, name, ownerId: owner.id, objectKey, tosUploadId, partSize, partCount, direct: true, createdAt: Date.now() };
-        await redis.set(`upload:${id}`, JSON.stringify(stored), "EX", UPLOAD_SESSION_TTL_SECONDS);
         const parts = Array.from({ length: partCount }, (_, index) => ({ partNumber: index + 1, url: signUploadPart(objectKey, tosUploadId, index + 1) }));
+        users.createUploadSession({
+          id, ownerId: owner.id, objectKey, tosUploadId, fileName: name, mediaKind: meta.type, contentType: mime,
+          size: meta.size, partSize, partCount, state: "uploading", createdAt: stored.createdAt,
+          updatedAt: stored.createdAt, expiresAt: stored.createdAt + UPLOAD_SESSION_TTL_SECONDS * 1000,
+        });
         pendingMultipart = undefined;
+        void redis.set(`upload:${id}`, JSON.stringify(stored), "EX", UPLOAD_SESSION_TTL_SECONDS).catch((error) => console.warn(JSON.stringify({ type: "upload_session_cache_failed", at: new Date().toISOString(), uploadId: id, userId: owner.id, code: (error as { code?: string }).code ?? "unknown" })));
         console.info(JSON.stringify({ type: "tos_upload_started", at: new Date().toISOString(), userId: owner.id, uploadId: id, size: meta.size, parts: partCount }));
         return res.status(201).json({ id, direct: true, chunkSize: partSize, concurrency: config.tosUploadConcurrency, parts });
       }
@@ -193,9 +218,8 @@ app.post("/api/uploads", requireAuth, async (req, res) => {
 app.post("/api/uploads/:id/parts/sign", requireAuth, async (req, res) => {
   try {
     const uploadId = param(req.params.id);
-    const raw = await redis.get(`upload:${uploadId}`);
-    if (!raw) return res.status(404).json({ error: "上传不存在或已过期" });
-    const meta = JSON.parse(raw);
+    const meta = await readUploadMeta(uploadId);
+    if (!meta) return res.status(404).json({ error: "上传不存在或已过期" });
     if (meta.ownerId !== (res.locals.user as SessionUser).id || !meta.direct) return res.status(404).json({ error: "上传不存在或已过期" });
     const body = z.object({ partNumbers: z.array(z.number().int().min(1)).min(1).max(100) }).parse(req.body);
     if (body.partNumbers.some((partNumber) => partNumber > meta.partCount)) throw new Error("分片编号超出范围");
@@ -207,11 +231,10 @@ app.post("/api/uploads/:id/heartbeat", requireAuth, async (req, res) => {
   try {
     const uploadId = param(req.params.id);
     const owner = res.locals.user as SessionUser;
-    const raw = await redis.get(`upload:${uploadId}`);
-    if (!raw) return users.readUpload(uploadId)?.ownerId === owner.id ? res.status(204).end() : res.status(404).json({ error: "上传不存在或已过期" });
-    const meta = JSON.parse(raw);
+    const meta = await readUploadMeta(uploadId);
+    if (!meta) return users.readUploadState(uploadId)?.ownerId === owner.id ? res.status(204).end() : res.status(404).json({ error: "上传不存在或已过期" });
     if (meta.ownerId !== owner.id) return res.status(404).json({ error: "上传不存在或已过期" });
-    if (meta.finalizing) return res.status(204).end();
+    if (meta.direct && meta.finalizing) return res.status(204).end();
     const active = await renewUploadSlot(redis, owner.id, uploadId) || await claimUploadSlot(redis, owner.id, uploadId, config.maxActiveUploadsPerUser);
     if (!active) return res.status(429).json({ error: "当前上传并发较高，素材传输仍可继续", code: "UPLOAD_HEARTBEAT_LIMIT" });
     return res.status(204).end();
@@ -247,9 +270,8 @@ app.get("/api/uploads/:id", requireAuth, async (req, res) => {
 app.post("/api/uploads/:id/chunks", requireAuth, express.raw({ type: "application/octet-stream", limit: "17mb" }), async (req, res) => {
   try {
     const uploadId = param(req.params.id);
-    const raw = await redis.get(`upload:${uploadId}`);
-    if (!raw) throw new Error("上传已过期，请重新选择文件");
-    const meta = JSON.parse(raw);
+    const meta = await readUploadMeta(uploadId);
+    if (!meta) throw new Error("上传已过期，请重新选择文件");
     if (meta.ownerId !== (res.locals.user as SessionUser).id) return res.status(404).json({ error: "上传不存在或已过期" });
     if (meta.direct) return res.status(409).json({ error: "当前上传使用 TOS 直传" });
     const lock = await acquireUploadCompletionLock(redis, uploadId, 60);
@@ -277,9 +299,8 @@ app.post("/api/uploads/:id/complete", requireAuth, async (req, res) => {
     const owner = res.locals.user as SessionUser;
     const completed = users.readUploadState(uploadId);
     if (completed) return await respondUploadState(res, uploadId, owner.id);
-    const raw = await redis.get(`upload:${uploadId}`);
-    if (!raw) return res.status(404).json({ error: "上传不存在或已过期", requestId: res.locals.requestId });
-    const meta = JSON.parse(raw);
+    const meta = await readUploadMeta(uploadId);
+    if (!meta) return res.status(404).json({ error: "上传不存在或已过期", requestId: res.locals.requestId });
     if (meta.ownerId !== owner.id) return res.status(404).json({ error: "上传不存在或已过期" });
     const lock = await acquireUploadCompletionLock(redis, uploadId);
     if (!lock) return res.status(409).json({ error: "素材正在完成校验，请稍后重试", code: "UPLOAD_FINALIZING", requestId: res.locals.requestId });
@@ -308,12 +329,13 @@ app.post("/api/uploads/:id/complete", requireAuth, async (req, res) => {
           stageLog("headed", { size });
           const now = Date.now();
           users.upsertMedia({ id: `input:${uploadId}`, ownerId: meta.ownerId, uploadId, kind: "input", objectKey: meta.objectKey, status: "uploading", fileName: meta.name, contentType: meta.mime, size, etag: String(head.headers.etag ?? "").replace(/^"|"$/g, ""), createdAt: now, updatedAt: now });
+          users.updateUploadSessionState(uploadId, owner.id, "finalizing");
           // Keep the original multipart metadata until validation commits. Besides
           // powering recovery, this lets the previous blue/green image finish the
           // upload synchronously after an emergency rollback.
           meta.finalizing = true;
-          await redis.set(`upload:${uploadId}`, JSON.stringify(meta), "EX", UPLOAD_SESSION_TTL_SECONDS);
-          await releaseUploadSlot(redis, owner.id, uploadId);
+          void redis.set(`upload:${uploadId}`, JSON.stringify(meta), "EX", UPLOAD_SESSION_TTL_SECONDS).catch(() => undefined);
+          void releaseUploadSlot(redis, owner.id, uploadId).catch(() => undefined);
           enqueueUploadFinalization(uploadId);
           stageLog("finalization_scheduled");
           console.info(JSON.stringify({ type: "tos_upload_transport_completed", at: new Date().toISOString(), userId: meta.ownerId, uploadId, size, requestId: head.requestId }));
@@ -322,6 +344,7 @@ app.post("/api/uploads/:id/complete", requireAuth, async (req, res) => {
           const destructive = error instanceof UploadIntegrityError;
           console.warn(JSON.stringify({ type: "tos_upload_failed", at: new Date().toISOString(), userId: meta.ownerId, uploadId, retryable: !destructive, errorCode: (error as { code?: string }).code ?? (destructive ? "validation_failed" : "transient_failure"), message: error instanceof Error ? error.message.slice(0, 400) : undefined }));
           if (destructive) {
+            users.updateUploadSessionState(uploadId, owner.id, "failed");
             await abortMultipartUpload(meta.objectKey, meta.tosUploadId).catch(() => undefined);
             await deleteObject(meta.objectKey).catch(() => undefined);
             await redis.del(`upload:${uploadId}`);
@@ -340,9 +363,7 @@ app.post("/api/uploads/:id/complete", requireAuth, async (req, res) => {
       await releaseUploadSlot(redis, owner.id, uploadId);
       const publicUrl = await resolveUploadMediaUrl({ objectKey: `legacy/${uploadId}/${meta.name}`, uploadId, fileName: meta.name });
       return res.json({ id: uploadId, uploadId, name: meta.name, type: meta.type, size: meta.size, url: publicUrl });
-    } finally {
-      await releaseUploadCompletionLock(redis, uploadId, lock).catch(() => undefined);
-    }
+    } finally { void releaseUploadCompletionLock(redis, uploadId, lock).catch(() => undefined); }
   } catch (error) { respondError(res, error, error instanceof RetryableUploadError ? 503 : 400); }
 });
 
@@ -353,9 +374,8 @@ app.delete("/api/uploads/:id", requireAuth, async (req, res) => {
     const completed = users.readUploadState(uploadId);
     if (completed && completed.status !== "deleted") return completed.ownerId === owner.id ? res.status(409).json({ error: "素材已完成上传或正在校验，不能取消" }) : res.status(404).json({ error: "上传不存在或已过期" });
     if (completed?.status === "deleted") return completed.ownerId === owner.id ? res.status(204).end() : res.status(404).json({ error: "上传不存在或已过期" });
-    const raw = await redis.get(`upload:${uploadId}`);
-    if (!raw) return res.status(204).end();
-    const meta = JSON.parse(raw);
+    const meta = await readUploadMeta(uploadId);
+    if (!meta) return res.status(204).end();
     if (meta.ownerId !== owner.id) return res.status(404).json({ error: "上传不存在或已过期" });
     const lock = await acquireUploadCompletionLock(redis, uploadId, 60);
     if (!lock) return res.status(409).json({ error: "素材正在完成校验，暂时不能取消", code: "UPLOAD_FINALIZING", requestId: res.locals.requestId });
@@ -363,6 +383,7 @@ app.delete("/api/uploads/:id", requireAuth, async (req, res) => {
       const reconciled = users.readUploadState(uploadId);
       if (reconciled) return res.status(409).json({ error: "素材已完成上传或正在校验，不能取消" });
       if (meta.direct) {
+        users.updateUploadSessionState(uploadId, owner.id, "cancelled");
         await abortMultipartUpload(meta.objectKey, meta.tosUploadId).catch(() => undefined);
         await deleteObject(meta.objectKey).catch(() => undefined);
       } else {
@@ -1497,6 +1518,7 @@ await fs.mkdir(config.uploadDir, { recursive: true });
 const migratedTasks = await migrateLegacyTasks();
 if (migratedTasks) console.info(JSON.stringify({ type: "legacy_task_migration", migratedTasks, at: new Date().toISOString() }));
 const cleanupUploads = async () => {
+  users.deleteExpiredUploadSessions();
   if (tosEnabled()) return;
   const entries = await fs.readdir(config.uploadDir, { withFileTypes: true });
   await Promise.all(entries.filter((entry) => entry.isDirectory()).map(async (entry) => {

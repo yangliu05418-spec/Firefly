@@ -69,6 +69,23 @@ export type MediaObject = {
   deletedAt?: number;
 };
 
+export type UploadSession = {
+  id: string;
+  ownerId: string;
+  objectKey: string;
+  tosUploadId: string;
+  fileName: string;
+  mediaKind: "image" | "video" | "audio";
+  contentType: string;
+  size: number;
+  partSize: number;
+  partCount: number;
+  state: "uploading" | "finalizing" | "completed" | "failed" | "cancelled";
+  createdAt: number;
+  updatedAt: number;
+  expiresAt: number;
+};
+
 export type ImageGenerationTask = {
   id: string;
   sessionId?: string;
@@ -250,6 +267,12 @@ type MediaRow = {
   etag: string; created_at: number; updated_at: number; deleted_at: number | null;
 };
 
+type UploadSessionRow = {
+  id: string; owner_id: string; object_key: string; tos_upload_id: string; file_name: string;
+  media_kind: UploadSession["mediaKind"]; content_type: string; size: number; part_size: number;
+  part_count: number; state: UploadSession["state"]; created_at: number; updated_at: number; expires_at: number;
+};
+
 type ImageGenerationRow = {
   id: string; session_id: string | null; owner_id: string; model: string; model_name: string; ratio: string; resolution: string;
   prompt: string; requested_count: number; status: ImageGenerationTask["status"]; items_json: string;
@@ -329,6 +352,13 @@ const mapMedia = (row?: MediaRow): MediaObject | null => row ? ({
   kind: row.kind, objectKey: row.object_key, status: row.status, fileName: row.file_name,
   contentType: row.content_type, size: row.size, etag: row.etag, createdAt: row.created_at,
   updatedAt: row.updated_at, deletedAt: row.deleted_at ?? undefined
+}) : null;
+
+const mapUploadSession = (row?: UploadSessionRow): UploadSession | null => row ? ({
+  id: row.id, ownerId: row.owner_id, objectKey: row.object_key, tosUploadId: row.tos_upload_id,
+  fileName: row.file_name, mediaKind: row.media_kind, contentType: row.content_type, size: row.size,
+  partSize: row.part_size, partCount: row.part_count, state: row.state, createdAt: row.created_at,
+  updatedAt: row.updated_at, expiresAt: row.expires_at,
 }) : null;
 
 const mapImageGeneration = (row?: ImageGenerationRow): ImageGenerationTask | null => row ? ({
@@ -681,8 +711,37 @@ export class UserStore {
     return (this.database.prepare("SELECT * FROM media_objects WHERE kind = 'input' AND status = 'uploading' ORDER BY updated_at ASC LIMIT ?").all(limit) as MediaRow[]).map((row) => mapMedia(row)!);
   }
   markUploadReady(id: string) {
-    const result = this.database.prepare("UPDATE media_objects SET status = 'ready', updated_at = ? WHERE id = ? AND kind = 'input' AND status = 'uploading'").run(Date.now(), id);
+    return this.database.transaction(() => {
+      const now = Date.now();
+      const media = this.readMedia(id);
+      const result = this.database.prepare("UPDATE media_objects SET status = 'ready', updated_at = ? WHERE id = ? AND kind = 'input' AND status = 'uploading'").run(now, id);
+      if (result.changes && media?.uploadId) this.database.prepare("UPDATE upload_sessions SET state = 'completed', updated_at = ? WHERE id = ? AND state = 'finalizing'").run(now, media.uploadId);
+      return result.changes > 0;
+    })();
+  }
+
+  createUploadSession(session: UploadSession) {
+    this.database.prepare(`
+      INSERT INTO upload_sessions
+        (id, owner_id, object_key, tos_upload_id, file_name, media_kind, content_type, size, part_size, part_count, state, created_at, updated_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(session.id, session.ownerId, session.objectKey, session.tosUploadId, session.fileName, session.mediaKind,
+      session.contentType, session.size, session.partSize, session.partCount, session.state,
+      session.createdAt, session.updatedAt, session.expiresAt);
+    return session;
+  }
+
+  readUploadSession(id: string) {
+    return mapUploadSession(this.database.prepare("SELECT * FROM upload_sessions WHERE id = ?").get(id) as UploadSessionRow | undefined);
+  }
+
+  updateUploadSessionState(id: string, ownerId: string, state: UploadSession["state"]) {
+    const result = this.database.prepare("UPDATE upload_sessions SET state = ?, updated_at = ? WHERE id = ? AND owner_id = ?").run(state, Date.now(), id, ownerId);
     return result.changes > 0;
+  }
+
+  deleteExpiredUploadSessions(now = Date.now()) {
+    return this.database.prepare("DELETE FROM upload_sessions WHERE expires_at < ?").run(now).changes;
   }
   readTaskMedia(taskId: string, kind: "output" | "preview" | "poster") { return mapMedia(this.database.prepare("SELECT * FROM media_objects WHERE task_id = ? AND kind = ? AND status = 'ready' ORDER BY created_at DESC LIMIT 1").get(taskId, kind) as MediaRow | undefined); }
 
@@ -794,8 +853,12 @@ export class UserStore {
   }
 
   markMediaDeleted(id: string) {
-    const now = Date.now();
-    this.database.prepare("UPDATE media_objects SET status = 'deleted', deleted_at = ?, updated_at = ? WHERE id = ?").run(now, now, id);
+    this.database.transaction(() => {
+      const now = Date.now();
+      const media = this.readMedia(id);
+      this.database.prepare("UPDATE media_objects SET status = 'deleted', deleted_at = ?, updated_at = ? WHERE id = ?").run(now, now, id);
+      if (media?.kind === "input" && media.uploadId) this.database.prepare("UPDATE upload_sessions SET state = 'failed', updated_at = ? WHERE id = ? AND state != 'completed'").run(now, media.uploadId);
+    })();
   }
 
   upsertUserAsset(asset: UserAsset) {
