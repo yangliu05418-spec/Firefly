@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { config } from "./config.js";
-import type { CanvasAsset } from "./db.js";
+import type { CanvasAsset, MediaObject } from "./db.js";
 import { users } from "./store.js";
 import { headObject, tos, tosConfigured } from "./tos.js";
 
@@ -17,19 +17,29 @@ export const canvasAssetObjectKey = (ownerId: string, canvasId: string, assetId:
 /** 源对象：uploadId（inputs/ 上传）或直接指定 TOS 对象（如 generated/ 生成图） */
 export type CanvasAssetSource = { kind: "upload"; uploadId: string } | { kind: "object"; objectKey: string; fileName: string; contentType: string; ownerId: string };
 
+export class CanvasAssetUploadPendingError extends Error {
+  readonly code = "CANVAS_ASSET_UPLOAD_PENDING";
+  constructor() { super("画布素材已上传，正在完成内容校验"); this.name = "CanvasAssetUploadPendingError"; }
+}
+
+/** A completed multipart upload is durable before deep media validation finishes. */
+export const isAdmissibleCanvasUpload = (media: MediaObject | null, ownerId: string) => Boolean(
+  media && media.ownerId === ownerId && media.kind === "input" && ["uploading", "ready"].includes(media.status),
+);
+
 /** 解析源对象并做归属校验 */
-const resolveCanvasAssetSource = (source: CanvasAssetSource, requesterId: string): { objectKey: string; fileName: string; contentType: string } => {
+const resolveCanvasAssetSource = (source: CanvasAssetSource, requesterId: string, acceptPendingUpload = false): { objectKey: string; fileName: string; contentType: string } => {
   if (source.kind === "upload") {
-    const media = users.readUpload(source.uploadId);
-    if (!media || media.ownerId !== requesterId || media.status !== "ready") throw new Error("引用素材不存在、尚未完成或已过期");
+    const media = acceptPendingUpload ? users.readUploadState(source.uploadId) : users.readUpload(source.uploadId);
+    if (!media || media.ownerId !== requesterId || media.status !== "ready" && !(acceptPendingUpload && isAdmissibleCanvasUpload(media, requesterId))) throw new Error("引用素材不存在、尚未完成或已过期");
     return { objectKey: media.objectKey, fileName: media.fileName, contentType: media.contentType };
   }
   if (source.ownerId !== requesterId) throw new Error("引用素材不存在或已过期");
   return { objectKey: source.objectKey, fileName: source.fileName, contentType: source.contentType };
 };
 
-const createCanvasAssetRecord = (input: { source: CanvasAssetSource; ownerId: string; canvasId: string }) => {
-  const source = resolveCanvasAssetSource(input.source, input.ownerId);
+const createCanvasAssetRecord = (input: { source: CanvasAssetSource; ownerId: string; canvasId: string }, acceptPendingUpload = false) => {
+  const source = resolveCanvasAssetSource(input.source, input.ownerId, acceptPendingUpload);
   const now = Date.now();
   const assetId = `canvas-asset-${crypto.randomUUID()}`;
   const asset: CanvasAsset = {
@@ -43,25 +53,32 @@ const createCanvasAssetRecord = (input: { source: CanvasAssetSource; ownerId: st
 };
 
 const copyCanvasAssetObject = async (asset: CanvasAsset, sourceObjectKey: string) => {
-  try {
-    await tos.copyObject({ bucket: config.tosBucket, key: asset.objectKey, srcBucket: config.tosBucket, srcKey: sourceObjectKey, forbidOverwrite: true });
+  const commitReadyObject = async () => {
     const head = await headObject(asset.objectKey);
     const data = head.data as unknown as { contentLength?: number; etag?: string };
     const headers = head.headers as Record<string, string | undefined> | undefined;
     const size = Number(data.contentLength ?? headers?.["content-length"] ?? 0) || 0;
+    if (size <= 0) throw new Error("画布素材复制结果为空");
     const etag = String(data.etag ?? headers?.etag ?? "").replace(/^"|"$/g, "");
     const ready = users.updateCanvasAsset(asset.id, { status: "ready", size, etag })!;
     users.updateCanvasProjectAssetByCanvasAsset(asset.id, { status: "ready", size, contentType: ready.contentType });
     return ready;
-  } catch (error) {
-    throw error;
+  };
+  try {
+    await tos.copyObject({ bucket: config.tosBucket, key: asset.objectKey, srcBucket: config.tosBucket, srcKey: sourceObjectKey, forbidOverwrite: true });
+  } catch (copyError) {
+    // The copy may have committed even if its response was lost. Reconcile the
+    // deterministic destination before allowing BullMQ to replay the job.
+    try { return await commitReadyObject(); }
+    catch { throw copyError; }
   }
+  return commitReadyObject();
 };
 
 /** Creates the durable record immediately; Media Worker performs the server-side TOS copy. */
 export const prepareCanvasAssetFromUpload = (input: { uploadId: string; ownerId: string; canvasId: string }) => {
   if (!tosConfigured()) throw new Error("媒体存储尚未配置，无法插入画布");
-  return createCanvasAssetRecord({ source: { kind: "upload", uploadId: input.uploadId }, ownerId: input.ownerId, canvasId: input.canvasId }).asset;
+  return createCanvasAssetRecord({ source: { kind: "upload", uploadId: input.uploadId }, ownerId: input.ownerId, canvasId: input.canvasId }, true).asset;
 };
 
 export const copyPreparedCanvasAsset = async (assetId: string) => {
@@ -70,7 +87,12 @@ export const copyPreparedCanvasAsset = async (assetId: string) => {
   if (asset.status === "ready") return asset;
   if (!asset.sourceUploadId) throw new Error("画布素材缺少可恢复的上传来源");
   const source = users.readUpload(asset.sourceUploadId);
-  if (!source || source.ownerId !== asset.ownerId || source.status !== "ready") throw new Error("画布素材的上传来源不存在或尚未就绪");
+  if (!source) {
+    const pending = users.readUploadState(asset.sourceUploadId);
+    if (isAdmissibleCanvasUpload(pending, asset.ownerId) && pending?.status === "uploading") throw new CanvasAssetUploadPendingError();
+    throw new Error("画布素材的上传来源不存在或未通过校验");
+  }
+  if (source.ownerId !== asset.ownerId || source.status !== "ready") throw new Error("画布素材的上传来源不存在或未通过校验");
   return copyCanvasAssetObject(asset, source.objectKey);
 };
 
