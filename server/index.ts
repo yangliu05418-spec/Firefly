@@ -854,7 +854,15 @@ app.post("/api/image-generation", requireAuth, async (req, res) => {
       resolution: body.resolution, count: body.count, referenceUploadIds: body.references,
     };
     const intent = { queueName: "image-generation" as const, jobId: requestId, jobName: "generate-image", payload };
-    if (!users.createImageGenerationWithinLimit(activeTask, 2, intent)) return res.status(429).json({ error: "图片生成繁忙，请等当前生成完成后再试（每用户同时最多 2 组）" });
+    const admission = users.admitImageGenerationWithinLimit(activeTask, 2, intent);
+    if (admission.status === "limit") return res.status(429).json({ error: "图片生成繁忙，请等当前生成完成后再试（每用户同时最多 2 组）" });
+    if (admission.status === "existing") {
+      const admitted = admission.task;
+      if (admitted.ownerId !== user.id || admitted.deletedAt) return res.status(409).json({ error: "请求标识已被使用" });
+      if (admitted.status === "succeeded") return res.json({ Id: admitted.id, Items: admitted.items, Model: admitted.model, Ratio: admitted.ratio, Resolution: admitted.resolution, Failed: admitted.failures });
+      if (admitted.status === "running") return res.status(202).json({ Id: admitted.id, Items: admitted.items, Model: admitted.model, Ratio: admitted.ratio, Resolution: admitted.resolution, Failed: admitted.failures, Status: "generating" });
+      return res.status(409).json({ error: admitted.error ?? "该请求未生成成功" });
+    }
     users.touchCreationSession(activeSession.id, user.id, body.prompt);
     console.info(JSON.stringify({ type: "image_generation_admitted", at: new Date().toISOString(), taskId: activeTask.id, userId: user.id, model: body.model, ratio: body.ratio, resolution: body.resolution, count: body.count, references: body.references.length, healthyKeys: openRouterPool().healthyCount() }));
     res.status(202).json({ Id: activeTask.id, Items: [], Model: body.model, Ratio: body.ratio, Resolution: body.resolution, Failed: [], Status: "generating" });

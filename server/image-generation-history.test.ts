@@ -39,6 +39,34 @@ describe("image generation history", () => {
     store.close();
   });
 
+  it("atomically reuses a client request id without consuming another slot or duplicating its outbox intent", () => {
+    const store = freshStore();
+    const owner = store.upsertFromFeishu({ openId: "ou_admit", unionId: "on_admit", tenantKey: "tenant", email: "admit@dokuai.tv", name: "Admit", avatarUrl: "" });
+    const first = makeTask("image-task-idempotent", owner.id, 10);
+    const intent = { queueName: "image-generation" as const, jobId: first.id, jobName: "generate-image", payload: { ownerId: owner.id } };
+
+    expect(store.admitImageGenerationWithinLimit(first, 1, intent)).toMatchObject({ status: "created", task: { prompt: "雨夜窗边的台灯" } });
+    expect(store.admitImageGenerationWithinLimit({ ...first, prompt: "不应覆盖第一次请求", updatedAt: 20 }, 1, intent)).toMatchObject({
+      status: "existing", task: { prompt: "雨夜窗边的台灯" },
+    });
+    expect(store.asyncJobOutboxStats()).toMatchObject({ pending: 1, dispatched: 0 });
+    expect(store.admitImageGenerationWithinLimit(makeTask("image-task-over-limit", owner.id, 30), 1)).toMatchObject({ status: "limit" });
+    store.close();
+  });
+
+  it("does not resurrect a soft-deleted request id", () => {
+    const store = freshStore();
+    const owner = store.upsertFromFeishu({ openId: "ou_deleted", unionId: "on_deleted", tenantKey: "tenant", email: "deleted@dokuai.tv", name: "Deleted", avatarUrl: "" });
+    const task = makeTask("image-task-deleted-id", owner.id, 10);
+    store.createImageGeneration(task);
+    expect(store.softDeleteImageGeneration(task.id, owner.id)).toBe(true);
+
+    expect(store.admitImageGenerationWithinLimit({ ...task, createdAt: 20, updatedAt: 20 }, 1)).toMatchObject({
+      status: "existing", task: { id: task.id, deletedAt: expect.any(Number) },
+    });
+    store.close();
+  });
+
   it("soft deletes the bundle and schedules its generated media for deletion", () => {
     const store = freshStore();
     const owner = store.upsertFromFeishu({ openId: "ou_owner_2", unionId: "on_owner_2", tenantKey: "tenant", email: "owner2@dokuai.tv", name: "Owner", avatarUrl: "" });
