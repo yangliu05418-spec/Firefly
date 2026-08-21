@@ -9,7 +9,7 @@ describe("placeCanvasMenu", () => {
       { width: 224, height: 248 },
       { width: 1280, height: 800 },
       "right",
-    )).toEqual({ left: 434, top: 148, placement: "right" });
+    )).toEqual({ left: 434, top: 148, arrowTop: 124, placement: "right" });
   });
 
   it("flips at the viewport edge and clamps tall menus inside the viewport", () => {
@@ -18,7 +18,7 @@ describe("placeCanvasMenu", () => {
       { width: 224, height: 620 },
       { width: 1280, height: 640 },
       "right",
-    )).toEqual({ left: 956, top: 12, placement: "left" });
+    )).toEqual({ left: 956, top: 12, arrowTop: 30, placement: "left" });
   });
 });
 
