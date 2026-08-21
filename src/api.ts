@@ -26,33 +26,63 @@ export class ApiError extends Error {
   constructor(message: string, readonly status: number, readonly code?: string, readonly requestId?: string) { super(message); this.name = "ApiError"; }
 }
 
-const request = async <T>(url: string, options?: RequestInit): Promise<T> => {
-  let response: Response;
-  try { response = await fetch(url, { credentials: "same-origin", ...options, headers: { ...(options?.body instanceof Blob ? {} : { "Content-Type": "application/json" }), ...options?.headers } }); }
-  catch (error) { if (error instanceof DOMException && error.name === "AbortError") throw error; throw new ApiError(error instanceof Error ? error.message : "网络连接失败", 0); }
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({})) as { error?: string; requestId?: string; code?: string };
-    if (response.status === 401) notifySignedOut();
-    const requestId = body.requestId ?? response.headers.get("x-request-id") ?? undefined;
-    throw new ApiError(`${body.error ?? `请求失败 (${response.status})`}${requestId ? ` · 请求编号 ${requestId.slice(0, 8)}` : ""}`, response.status, body.code, requestId);
-  }
-  return response.status === 204 ? undefined as T : response.json();
-};
-export const api = { get: <T>(url: string) => request<T>(url), post: <T>(url: string, body?: unknown) => request<T>(url, { method: "POST", body: body instanceof Blob ? body : JSON.stringify(body ?? {}) }), patch: <T>(url: string, body: unknown) => request<T>(url, { method: "PATCH", body: JSON.stringify(body) }), delete: <T>(url: string) => request<T>(url, { method: "DELETE" }) };
-
 const wait = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve, reject) => {
-  if (signal?.aborted) return reject(new DOMException("已取消上传", "AbortError"));
-  const timer = globalThis.setTimeout(resolve, ms);
-  signal?.addEventListener("abort", () => { globalThis.clearTimeout(timer); reject(new DOMException("已取消上传", "AbortError")); }, { once: true });
+  const finish = () => { signal?.removeEventListener("abort", abort); resolve(); };
+  const timer = globalThis.setTimeout(finish, ms);
+  const abort = () => { globalThis.clearTimeout(timer); signal?.removeEventListener("abort", abort); reject(new DOMException("已取消上传", "AbortError")); };
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
 });
 
-const fetchWithTimeout = async (url: string, options: RequestInit, timeoutMs: number, signal?: AbortSignal) => {
+const fetchWithTimeout = async <T = Response>(url: string, options: RequestInit, timeoutMs: number, signal?: AbortSignal, consume?: (response: Response) => Promise<T>) => {
   const controller = new AbortController();
+  let timedOut = false;
   const abort = () => controller.abort(signal?.reason);
   if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, { once: true });
-  const timer = globalThis.setTimeout(() => controller.abort(new DOMException("请求超时", "TimeoutError")), timeoutMs);
-  try { return await fetch(url, { ...options, signal: controller.signal }); }
+  const timer = globalThis.setTimeout(() => {
+    timedOut = true;
+    controller.abort(new DOMException("请求超时", "TimeoutError"));
+  }, timeoutMs);
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    return consume ? await consume(response) : response as T;
+  }
+  catch (error) { if (timedOut) throw new DOMException("请求超时", "TimeoutError"); throw error; }
   finally { globalThis.clearTimeout(timer); signal?.removeEventListener("abort", abort); }
+};
+
+type ApiRequestInit = RequestInit & { timeoutMs?: number };
+export type ApiCallOptions = Omit<ApiRequestInit, "method" | "body">;
+const readMethod = (method?: string) => !method || ["GET", "HEAD"].includes(method.toUpperCase());
+
+const request = async <T>(url: string, options: ApiRequestInit = {}): Promise<T> => {
+  const { timeoutMs = readMethod(options.method) ? 20_000 : 30_000, signal, ...fetchOptions } = options;
+  try {
+    return await fetchWithTimeout<T>(url, { credentials: "same-origin", ...fetchOptions, headers: { ...(options.body instanceof Blob ? {} : { "Content-Type": "application/json" }), ...options.headers } }, timeoutMs, signal ?? undefined, async (response) => {
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { error?: string; requestId?: string; code?: string };
+        if (response.status === 401) notifySignedOut();
+        const requestId = body.requestId ?? response.headers.get("x-request-id") ?? undefined;
+        throw new ApiError(`${body.error ?? `请求失败 (${response.status})`}${requestId ? ` · 请求编号 ${requestId.slice(0, 8)}` : ""}`, response.status, body.code, requestId);
+      }
+      return response.status === 204 ? undefined as T : await response.json() as T;
+    });
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new DOMException("请求已取消", "AbortError");
+    if (error instanceof DOMException && error.name === "TimeoutError") {
+      throw new ApiError(readMethod(options.method) ? "网络响应超时，请重试" : "响应超时，操作可能已完成，请刷新确认", 0, "CLIENT_TIMEOUT");
+    }
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    if (error instanceof SyntaxError) throw new ApiError("服务器响应格式异常，请稍后重试", 0, "INVALID_RESPONSE");
+    throw new ApiError(error instanceof Error ? error.message : "网络连接失败", 0, "NETWORK_ERROR");
+  }
+};
+export const api = {
+  get: <T>(url: string, options?: ApiCallOptions) => request<T>(url, options),
+  post: <T>(url: string, body?: unknown, options?: ApiCallOptions) => request<T>(url, { ...options, method: "POST", body: body instanceof Blob ? body : JSON.stringify(body ?? {}) }),
+  patch: <T>(url: string, body: unknown, options?: ApiCallOptions) => request<T>(url, { ...options, method: "PATCH", body: JSON.stringify(body) }),
+  delete: <T>(url: string, options?: ApiCallOptions) => request<T>(url, { ...options, method: "DELETE" }),
 };
 
 class UploadSemaphore {
@@ -91,20 +121,25 @@ async function uploadChunk(uploadId: string, file: File, offset: number, chunkSi
   for (let attempt = 0; attempt < 4; attempt++) {
     if (attempt) await wait([1000, 2000, 4000][attempt - 1], signal);
     let response: Response;
+    let responseBody: { error?: string; expectedOffset?: number } = {};
     try {
-      response = await fetchWithTimeout(`/api/uploads/${uploadId}/chunks`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/octet-stream", "X-Upload-Offset": String(offset) }, body: chunk }, 120_000, signal);
+      const received = await fetchWithTimeout(`/api/uploads/${uploadId}/chunks`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/octet-stream", "X-Upload-Offset": String(offset) }, body: chunk }, 120_000, signal, async (result) => ({
+        response: result,
+        body: result.ok ? {} : await result.json().catch(() => ({})) as { error?: string; expectedOffset?: number },
+      }));
+      response = received.response;
+      responseBody = received.body;
     } catch (error) {
       lastError = error instanceof Error ? error : new Error("素材上传失败");
       if (attempt === 3) throw lastError;
       continue;
     }
     if (response.ok) return offset + chunk.size;
-    const body = await response.json().catch(() => ({})) as { error?: string; expectedOffset?: number };
-    if (response.status === 409 && typeof body.expectedOffset === "number") {
-      if (body.expectedOffset > offset) return body.expectedOffset;
-      if (body.expectedOffset === offset && attempt < 3) { lastError = new Error(body.error ?? "上一分片仍在写入"); continue; }
+    if (response.status === 409 && typeof responseBody.expectedOffset === "number") {
+      if (responseBody.expectedOffset > offset) return responseBody.expectedOffset;
+      if (responseBody.expectedOffset === offset && attempt < 3) { lastError = new Error(responseBody.error ?? "上一分片仍在写入"); continue; }
     }
-    lastError = new Error(body.error ?? "素材上传失败");
+    lastError = new Error(responseBody.error ?? "素材上传失败");
     if (response.status < 500 && response.status !== 429) throw lastError;
     if (attempt === 3) throw lastError;
   }
@@ -158,8 +193,8 @@ const finalizeUpload = async (uploadId: string, body: unknown, signal?: AbortSig
     const timer = globalThis.setTimeout(() => controller.abort(new DOMException("素材校验超时", "TimeoutError")), timeout);
     try {
       const result = accepted
-        ? await request<UploadCompletionResponse>(`/api/uploads/${uploadId}`, { signal: controller.signal })
-        : await request<UploadCompletionResponse>(`/api/uploads/${uploadId}/complete`, { method: "POST", body: JSON.stringify(body ?? {}), signal: controller.signal });
+        ? await request<UploadCompletionResponse>(`/api/uploads/${uploadId}`, { signal: controller.signal, timeoutMs: timeout })
+        : await request<UploadCompletionResponse>(`/api/uploads/${uploadId}/complete`, { method: "POST", body: JSON.stringify(body ?? {}), signal: controller.signal, timeoutMs: timeout });
       if (result.state !== "processing") return result;
       accepted = true;
       if (!transportReported) { transportReported = true; onTransportComplete?.(result); }
@@ -228,7 +263,7 @@ export async function uploadFile(file: File, type: UploadKind, onProgress: (valu
   } catch (error) {
     // Cancellation is completion-lock-aware: it cannot delete an object that the server is finalizing
     // or has already committed to the durable media database.
-    await api.delete(`/api/uploads/${init.id}`).catch(() => undefined);
+    await api.delete(`/api/uploads/${init.id}`, { timeoutMs: 5_000 }).catch(() => undefined);
     throw error;
   } finally { globalThis.clearInterval(heartbeat); }
 }
