@@ -1474,14 +1474,16 @@ app.get("/api/health", async (_req, res) => {
   } catch { res.status(503).json({ status: "degraded", redis: "unavailable", database: "unavailable", tosConfigured: tosHealthSnapshot.configured, tosReachable: tosHealthSnapshot.effectiveReachable, tosLastProbeReachable: tosHealthSnapshot.lastProbeReachable, tosCheckedAt: tosHealthSnapshot.checkedAt, tosLastSuccessfulAt: tosHealthSnapshot.lastSuccessfulAt, tosConsecutiveFailures: tosHealthSnapshot.consecutiveFailures, previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, ...runtimeIdentity }); }
 });
 
+const webDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist-web");
+app.get("/api/firefly-media-sw.js", createServiceWorkerHandler(webDir));
+app.get("/firefly-media-sw.js", createServiceWorkerHandler(webDir));
+
 app.use((error: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (!req.path.startsWith("/api/") || res.headersSent) return next(error);
   console.error(JSON.stringify({ type: "api_unhandled_error", at: new Date().toISOString(), requestId: res.locals.requestId, path: req.path, method: req.method, code: (error as { code?: string }).code ?? "unknown" }));
   res.status(500).json({ error: "服务暂时不可用，请稍后重试", requestId: res.locals.requestId });
 });
 
-const webDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist-web");
-app.get("/firefly-media-sw.js", createServiceWorkerHandler(webDir));
 app.use(express.static(webDir, { maxAge: "1y", immutable: true, index: false }));
 app.use((req, res, next) => {
   if (req.method !== "GET" || req.path.startsWith("/api/") || req.path.startsWith("/media/")) return next();

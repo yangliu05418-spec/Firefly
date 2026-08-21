@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PRIVATE_MEDIA_CACHE_NAME, forgetPrivateMediaCacheUser, scopePrivateMediaCacheToUser } from "./private-media-cache";
+import { PRIVATE_MEDIA_CACHE_NAME, PRIVATE_MEDIA_SERVICE_WORKER_URL, forgetPrivateMediaCacheUser, scopePrivateMediaCacheToUser } from "./private-media-cache";
 
 const browser = () => {
   const values = new Map<string, string>();
@@ -20,6 +20,10 @@ const browser = () => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("private media cache account scope", () => {
+  it("loads its bootstrap through the non-static API route", () => {
+    expect(PRIVATE_MEDIA_SERVICE_WORKER_URL).toBe("/api/firefly-media-sw.js");
+  });
+
   it("keeps one user's cache and clears it before switching users", async () => {
     const state = browser();
     await scopePrivateMediaCacheToUser("user-a");
