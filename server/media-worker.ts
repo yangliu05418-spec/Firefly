@@ -316,7 +316,8 @@ const deprioritizeExistingPreviewBacklog = async () => {
 };
 const previewReconcile = setInterval(() => void reconcilePreviews().catch((error) => console.warn(JSON.stringify({ type: "tos_preview_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }))), 15 * 60 * 1000);
 const reconcileAssets = async () => {
-  for (const asset of users.listProcessingUserAssets(100)) {
+  const assets = [...users.listProcessingUserAssets(100), ...users.listUserAssetsNeedingMediaPromotion(100)];
+  for (const asset of new Map(assets.map((item) => [item.id, item])).values()) {
     await assetQueue.add("register", { assetId: asset.id }, { jobId: asset.id, attempts: 3, backoff: { type: "exponential", delay: 15_000 }, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } });
   }
 };

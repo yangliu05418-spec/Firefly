@@ -31,6 +31,7 @@ import { acquireUploadCompletionLock, claimUploadSlot, releaseUploadCompletionLo
 import { createCanvasAssetFromUpload, prepareCanvasAssetFromUpload } from "./canvas-assets.js";
 import { createCanvasMediaHandler } from "./canvas-media-route.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
+import { publicUserAsset } from "./user-asset-public.js";
 import { IMAGE_MODELS, IMAGE_RATIOS, imageModelById, computeImageSize, DEFAULT_IMAGE_MODEL } from "./image-models.js";
 import { acquireImageSlot, downloadImageBuffer, generateSingleImage, openRouterPool, OpenRouterError, releaseImageSlot } from "./openrouter.js";
 import { storeGeneratedImage } from "./generated-media.js";
@@ -580,7 +581,6 @@ app.post("/api/media-events", requireAuth, async (req, res) => {
 type ProviderAssetRecord = { Id: string; Name?: string; AssetType?: UserAsset["assetType"]; Status?: UserAsset["status"]; URL?: string; GroupId?: string };
 const assetCategories = ["character", "scene", "prop", "material"] as const satisfies readonly AssetCategory[];
 const assetCategorySchema = z.enum(assetCategories);
-const publicUserAsset = (asset: UserAsset) => ({ Id: asset.id, Name: asset.name, AssetType: asset.assetType, Status: asset.status, URL: asset.url ?? (asset.uploadId ? `/api/assets/${asset.id}/source` : undefined), GroupId: asset.groupId, UploadId: asset.uploadId, Category: asset.category, Error: asset.lastError });
 const ownedUserAsset = (assetId: string, ownerId: string) => { const asset = users.readUserAsset(assetId); return asset?.ownerId === ownerId ? asset : null; };
 
 app.get("/api/assets/groups", requireAuth, async (_req, res) => {
@@ -671,8 +671,11 @@ app.get("/api/assets/:id/source", requireAuth, async (req, res) => {
     if (!asset?.uploadId) return res.status(404).json({ error: "素材源文件不存在" });
     const media = users.readUpload(asset.uploadId);
     if (!media || media.ownerId !== user.id || media.status !== "ready") return res.status(404).json({ error: "素材源文件不存在" });
-    res.setHeader("Cache-Control", "private, no-store");
-    res.redirect(302, signedObjectUrl(media.objectKey, { expires: 3600, fileName: media.fileName }));
+    res.setHeader("Cache-Control", previewRedirectCacheHeader);
+    res.setHeader("Vary", "Cookie");
+    const target = await stablePreviewUrl({ objectKey: media.objectKey, fileName: media.fileName });
+    console.info(JSON.stringify({ type: "tos_asset_redirect", at: new Date().toISOString(), assetId: asset.id, userId: user.id }));
+    res.redirect(302, target);
   } catch (error) { respondError(res, error, 502); }
 });
 app.get("/api/assets/:id", requireAuth, async (req, res) => {

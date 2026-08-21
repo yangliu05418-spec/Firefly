@@ -22,6 +22,7 @@ const setup = (asset = pending()) => {
     callAsset: callAsset as never,
     ensureGroup: vi.fn(async () => "group-1"),
     resolveMediaUrl: vi.fn(async () => "https://tos.example/actor.png"),
+    promoteMedia: vi.fn(async (media) => media),
     sleep: vi.fn(async () => undefined),
     now: vi.fn(() => 2)
   };
@@ -49,5 +50,20 @@ describe("background asset ingestion", () => {
     await registerQueuedAsset("asset-local-1", context.deps);
     expect(context.callAsset.mock.calls.map(([action]) => action)).toEqual(["GetAsset"]);
     expect(context.stored()).toMatchObject({ status: "Active" });
+  });
+
+  it("promotes an already active uploaded asset without recreating the provider asset", async () => {
+    const context = setup({ ...pending(), providerAssetId: "asset-provider-1", status: "Active" });
+    await registerQueuedAsset("asset-local-1", context.deps);
+    expect(context.deps.promoteMedia).toHaveBeenCalledTimes(1);
+    expect(context.callAsset).not.toHaveBeenCalled();
+  });
+
+  it("does not regress an active provider asset when durable copying is temporarily unavailable", async () => {
+    const context = setup({ ...pending(), providerAssetId: "asset-provider-1", status: "Active" });
+    context.deps.promoteMedia = vi.fn(async () => { throw new Error("TOS timeout"); });
+    await expect(registerQueuedAsset("asset-local-1", context.deps)).resolves.toBeUndefined();
+    expect(context.stored()).toMatchObject({ status: "Active" });
+    expect(context.callAsset).not.toHaveBeenCalled();
   });
 });

@@ -4,6 +4,7 @@ import type { UserAsset } from "./db.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
 import { users } from "./store.js";
 import { providerAssetName } from "./asset-name.js";
+import { promoteUserAssetMedia } from "./asset-media.js";
 
 const ACTIVE_DEADLINE_MS = 3 * 60 * 1000;
 const POLL_INTERVAL_MS = 5000;
@@ -24,6 +25,7 @@ export type AssetIngestDependencies = {
   callAsset: typeof callAssetApi;
   ensureGroup: () => Promise<string>;
   resolveMediaUrl: (media: { objectKey: string; uploadId?: string; fileName: string }) => Promise<string>;
+  promoteMedia: typeof promoteUserAssetMedia;
   sleep: (ms: number) => Promise<unknown>;
   now: () => number;
 };
@@ -36,6 +38,7 @@ const defaultDependencies = () => productionDependencies ??= {
   callAsset: callAssetApi,
   ensureGroup: ensureAutoReferenceGroup,
   resolveMediaUrl: (media) => resolveUploadMediaUrl(media),
+  promoteMedia: (media) => promoteUserAssetMedia(media),
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now: Date.now
 };
@@ -55,15 +58,28 @@ export const markAssetIngestFailed = (assetId: string, message: string, deps: As
 export const registerQueuedAsset = async (assetId: string, deps: AssetIngestDependencies = defaultDependencies()) => {
   let asset = deps.readAsset(assetId);
   if (!asset) return;
-  if (asset.status === "Active" && asset.providerAssetId) return;
   if (!asset.uploadId) return markAssetIngestFailed(asset.id, "素材缺少上传记录", deps);
+
+  const uploaded = deps.readUpload(asset.uploadId);
+  if (!uploaded || uploaded.ownerId !== asset.ownerId || uploaded.status !== "ready") {
+    return markAssetIngestFailed(asset.id, "已上传文件不存在或尚未完成校验", deps);
+  }
+  let media = uploaded;
+  try {
+    media = await deps.promoteMedia(uploaded);
+  } catch (error) {
+    // An already registered provider asset remains usable while the background
+    // scanner retries the durable TOS copy. Do not regress it to Failed.
+    if (asset.status === "Active" && asset.providerAssetId) {
+      console.warn(JSON.stringify({ type: "tos_asset_promotion_failed", at: new Date().toISOString(), assetId: asset.id, ownerId: asset.ownerId, code: (error as { code?: string }).code ?? "unknown" }));
+      return;
+    }
+    throw error;
+  }
+  if (asset.status === "Active" && asset.providerAssetId) return;
 
   let providerAssetId = asset.providerAssetId;
   if (!providerAssetId) {
-    const media = deps.readUpload(asset.uploadId);
-    if (!media || media.ownerId !== asset.ownerId || media.status !== "ready") {
-      return markAssetIngestFailed(asset.id, "已上传文件不存在或尚未完成校验", deps);
-    }
     const groupId = asset.groupId || await deps.ensureGroup();
     let created: ProviderAssetRecord;
     try {
