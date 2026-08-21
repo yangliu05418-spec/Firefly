@@ -43,6 +43,7 @@ import { readWorkerHealth, type WorkerHealthSnapshot } from "./worker-heartbeat.
 import { canvasGeneratedMediaId } from "./canvas-job-media.js";
 import { MediaValidationError, validateMedia } from "./media-validation.js";
 import { withinDeadline } from "./deadline.js";
+import { startAsyncJobControlPlane } from "./async-job-control-plane.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -1561,6 +1562,7 @@ app.use((req, res, next) => {
 await fs.mkdir(config.uploadDir, { recursive: true });
 const migratedTasks = await migrateLegacyTasks();
 if (migratedTasks) console.info(JSON.stringify({ type: "legacy_task_migration", migratedTasks, at: new Date().toISOString() }));
+const stopAsyncJobControlPlane = startAsyncJobControlPlane();
 const cleanupUploads = async () => {
   users.deleteExpiredUploadSessions();
   if (tosEnabled()) return;
@@ -1580,11 +1582,12 @@ const shutdown = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
   clearInterval(cleanupTimer); clearInterval(tosProbeTimer);
+  const outboxStopped = stopAsyncJobControlPlane();
   const httpClosed = new Promise<void>((resolve) => server.close(() => resolve()));
   // SSE connections are intentionally long-lived. Give ordinary requests time to finish,
   // then close remaining streams so a blue/green retirement cannot hang indefinitely.
   const forceClose = setTimeout(() => server.closeAllConnections(), Math.min(config.shutdownGraceMs, 10_000));
-  await httpClosed; clearTimeout(forceClose);
+  await Promise.all([httpClosed, outboxStopped]); clearTimeout(forceClose);
   await Promise.all([generationQueue.close(), imageGenerationQueue.close(), mediaQueue.close(), previewQueue.close(), assetQueue.close(), canvasQueue.close(), uploadFinalizationQueue.close()]);
   await Promise.allSettled([redis.quit(), queueConnection.quit()]); users.close(); process.exit(0);
 };
