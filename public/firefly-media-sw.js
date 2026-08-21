@@ -3,6 +3,8 @@ const PRIVATE_MEDIA_LEGACY_CACHE = "firefly-private-thumbnails-v1";
 const PRIVATE_MEDIA_CACHE_PREFIX = "firefly-private-thumbnails-v2-";
 const MAX_PRIVATE_THUMBNAILS = 300;
 const clientScopes = new Map();
+const pendingScopeRequests = new Map();
+const SCOPE_RECOVERY_TIMEOUT_MS = 250;
 
 const isPrivateThumbnail = (request) => {
   if (request.method !== "GET" || request.destination !== "image") return false;
@@ -29,8 +31,31 @@ const canonicalCacheRequest = (request) => {
   return { key: new Request(url.toString(), request), isRetry: true };
 };
 
+const recoverPrivateMediaScope = async (clientId) => {
+  if (!clientId) return null;
+  const current = clientScopes.get(clientId);
+  if (current) return current;
+  const pending = pendingScopeRequests.get(clientId);
+  if (pending) return pending.promise;
+  const client = await self.clients.get(clientId);
+  if (!client) return null;
+  const restored = clientScopes.get(clientId);
+  if (restored) return restored;
+  const inFlight = pendingScopeRequests.get(clientId);
+  if (inFlight) return inFlight.promise;
+  let finish;
+  const promise = new Promise((resolve) => { finish = resolve; });
+  const timer = setTimeout(() => {
+    if (pendingScopeRequests.get(clientId)?.promise === promise) pendingScopeRequests.delete(clientId);
+    finish(null);
+  }, SCOPE_RECOVERY_TIMEOUT_MS);
+  pendingScopeRequests.set(clientId, { promise, finish, timer });
+  client.postMessage({ type: "REQUEST_PRIVATE_MEDIA_CACHE_SCOPE" });
+  return promise;
+};
+
 const cacheFirst = async (request, clientId) => {
-  const activeScope = clientId ? clientScopes.get(clientId) : null;
+  const activeScope = await recoverPrivateMediaScope(clientId);
   if (!activeScope) return fetch(request);
   const cache = await caches.open(`${PRIVATE_MEDIA_CACHE_PREFIX}${activeScope}`);
   const { key, isRetry } = canonicalCacheRequest(request);
@@ -61,11 +86,28 @@ self.addEventListener("message", (event) => {
     const valid = typeof clientId === "string" && clientId.length > 0 && typeof userId === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(userId);
     if (valid) clientScopes.set(clientId, userId);
     else if (clientId) clientScopes.delete(clientId);
+    const pending = clientId ? pendingScopeRequests.get(clientId) : null;
+    if (pending) {
+      clearTimeout(pending.timer);
+      pendingScopeRequests.delete(clientId);
+      pending.finish(valid ? userId : null);
+    }
     event.ports[0]?.postMessage({ ok: valid });
   }
-  if (event.data?.type === "CLEAR_PRIVATE_MEDIA_CACHE_SCOPE" && event.source?.id) clientScopes.delete(event.source.id);
+  if (event.data?.type === "CLEAR_PRIVATE_MEDIA_CACHE_SCOPE" && event.source?.id) {
+    const clientId = event.source.id;
+    clientScopes.delete(clientId);
+    const pending = pendingScopeRequests.get(clientId);
+    if (pending) {
+      clearTimeout(pending.timer);
+      pendingScopeRequests.delete(clientId);
+      pending.finish(null);
+    }
+  }
   if (event.data?.type === "CLEAR_PRIVATE_MEDIA_CACHE") {
     clientScopes.clear();
+    for (const pending of pendingScopeRequests.values()) { clearTimeout(pending.timer); pending.finish(null); }
+    pendingScopeRequests.clear();
     event.waitUntil(caches.keys().then((names) => Promise.all(names.filter((name) => name.startsWith(PRIVATE_MEDIA_CACHE_PREFIX) || name === PRIVATE_MEDIA_LEGACY_CACHE).map((name) => caches.delete(name)))));
   }
 });
