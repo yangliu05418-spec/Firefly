@@ -1,8 +1,19 @@
 export const PRIVATE_MEDIA_CACHE_NAME = "firefly-private-thumbnails-v1";
 export const PRIVATE_MEDIA_SERVICE_WORKER_URL = "/api/firefly-media-sw.js";
 const PRIVATE_MEDIA_CACHE_USER_KEY = "firefly-private-media-cache-user";
+let persistenceRequest: Promise<boolean> | undefined;
 
 const hasCacheStorage = () => typeof window !== "undefined" && "caches" in window;
+
+/** Ask the browser not to evict Firefly's IndexedDB and CacheStorage under storage pressure. */
+export function persistPrivateMediaStorage() {
+  if (persistenceRequest) return persistenceRequest;
+  if (typeof navigator === "undefined" || !navigator.storage?.persisted || !navigator.storage?.persist) return Promise.resolve(false);
+  persistenceRequest = navigator.storage.persisted()
+    .then((persisted) => persisted || navigator.storage.persist())
+    .catch(() => false);
+  return persistenceRequest;
+}
 
 export async function clearPrivateMediaCache() {
   if (hasCacheStorage()) {
@@ -27,6 +38,7 @@ export async function scopePrivateMediaCacheToUser(userId: string) {
   if (previous && previous !== userId) await clearPrivateMediaCache();
   try { window.localStorage.setItem(PRIVATE_MEDIA_CACHE_USER_KEY, userId); }
   catch { /* The native HTTP cache remains available when localStorage is blocked. */ }
+  await persistPrivateMediaStorage();
 }
 
 export async function forgetPrivateMediaCacheUser() {
