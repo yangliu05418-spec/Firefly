@@ -54,6 +54,33 @@ capture_candidate_diagnostics() {
   echo "candidate diagnostics stored at $diagnostics_file" >&2
 }
 failure_event=failed
+inspect_container_id() {
+  /usr/bin/docker inspect --format '{{.Id}}' "$1" 2>/dev/null || true
+}
+container_label() {
+  /usr/bin/docker inspect --format "{{index .Config.Labels \"$2\"}}" "$1" 2>/dev/null || true
+}
+assert_legacy_container() {
+  container=$1
+  expected_service=$2
+  container_project=$(container_label "$container" com.docker.compose.project)
+  container_service=$(container_label "$container" com.docker.compose.service)
+  [ "$container_project" = "$legacy_project" ] && [ "$container_service" = "$expected_service" ] || {
+    echo "refusing to manage container outside Firefly legacy service $expected_service: $container" >&2
+    exit 1
+  }
+}
+assert_slot_container() {
+  container=$1
+  expected_role=$2
+  expected_slot=$3
+  container_role=$(container_label "$container" com.firefly.role)
+  container_slot=$(container_label "$container" com.firefly.slot)
+  [ "$container_role" = "$expected_role" ] && [ "$container_slot" = "$expected_slot" ] || {
+    echo "refusing to manage container outside Firefly slot $expected_slot/$expected_role: $container" >&2
+    exit 1
+  }
+}
 restart_old_workers() {
   while IFS= read -r container; do
     [ -n "$container" ] || continue
@@ -79,8 +106,11 @@ on_exit() {
 trap on_exit EXIT
 cleanup_candidate() {
   for role in web worker media-worker canvas-worker; do
-    /usr/bin/docker stop --time 35 "firefly-$role-$next_slot" >/dev/null 2>&1 || true
-    /usr/bin/docker rm "firefly-$role-$next_slot" >/dev/null 2>&1 || true
+    container_id=$(inspect_container_id "firefly-$role-$next_slot")
+    [ -n "$container_id" ] || continue
+    assert_slot_container "$container_id" "$role" "$next_slot"
+    /usr/bin/docker stop --time 35 "$container_id" >/dev/null 2>&1 || true
+    /usr/bin/docker rm "$container_id" >/dev/null 2>&1 || true
   done
 }
 switch_upstream() {
@@ -103,21 +133,20 @@ stop_old_workers() {
       for container in $(/usr/bin/docker ps -q \
         --filter "label=com.docker.compose.project=$legacy_project" \
         --filter "label=com.docker.compose.service=$service"); do
+        assert_legacy_container "$container" "$service"
         printf '%s\n' "$container" >> "$old_workers_file"
+        /usr/bin/docker stop --time 35 "$container" >/dev/null 2>&1 || true
       done
     done
   else
     for role in worker media-worker canvas-worker; do
-      container="firefly-$role-$current_slot"
-      /usr/bin/docker inspect "$container" >/dev/null 2>&1 && printf '%s\n' "$container" >> "$old_workers_file"
+      container_id=$(inspect_container_id "firefly-$role-$current_slot")
+      [ -n "$container_id" ] || continue
+      assert_slot_container "$container_id" "$role" "$current_slot"
+      printf '%s\n' "$container_id" >> "$old_workers_file"
+      /usr/bin/docker stop --time 35 "$container_id" >/dev/null 2>&1 || true
     done
   fi
-  while IFS= read -r container; do
-    [ -n "$container" ] || continue
-    container_project=$(/usr/bin/docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$container" 2>/dev/null || true)
-    [ "$container_project" = "$legacy_project" ] || { echo "refusing to stop container outside Firefly project: $container" >&2; exit 1; }
-    /usr/bin/docker stop --time 35 "$container" >/dev/null 2>&1 || true
-  done < "$old_workers_file"
 }
 
 notify started
