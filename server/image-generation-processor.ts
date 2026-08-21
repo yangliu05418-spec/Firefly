@@ -2,7 +2,7 @@ import { UnrecoverableError } from "bullmq";
 import type { ImageGenerationTask, MediaObject } from "./db.js";
 import { storeGeneratedImage } from "./generated-media.js";
 import { openRouterResolution } from "./image-models.js";
-import { downloadImageBuffer, generateSingleImage, isRetryableOpenRouterFailure, OpenRouterError } from "./openrouter.js";
+import { downloadGeneratedImage, generateSingleImage, isRetryableOpenRouterFailure, OpenRouterError } from "./openrouter.js";
 import type { ImageGenerationQueuePayload } from "./redis.js";
 import { users } from "./store.js";
 import { signedProviderObjectUrl } from "./tos.js";
@@ -20,7 +20,7 @@ export type ImageGenerationProcessorDependencies = {
   updateTask: typeof users.updateImageGeneration;
   signReference: (objectKey: string) => string;
   generate: typeof generateSingleImage;
-  download: typeof downloadImageBuffer;
+  download: typeof downloadGeneratedImage;
   store: (input: { ownerId: string; body: Buffer; contentType: string; fileName: string }) => Promise<MediaObject>;
   discard: (media: MediaObject) => unknown;
 };
@@ -32,16 +32,10 @@ const defaultDependencies = () => productionDependencies ??= {
   updateTask: users.updateImageGeneration.bind(users),
   signReference: signedProviderObjectUrl,
   generate: generateSingleImage,
-  download: downloadImageBuffer,
+  download: downloadGeneratedImage,
   store: storeGeneratedImage,
   discard: (media) => users.upsertMedia({ ...media, status: "delete_pending", updatedAt: Date.now() }),
 };
-
-const imageContentType = (url: string) => url.startsWith("data:image/webp")
-  ? "image/webp"
-  : url.startsWith("data:image/jpeg")
-    ? "image/jpeg"
-    : "image/png";
 
 const extensionFor = (contentType: string) => contentType === "image/webp" ? "webp" : contentType === "image/jpeg" ? "jpg" : "png";
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : "生成失败").slice(0, 500);
@@ -84,16 +78,15 @@ export const processImageGenerationAttempt = async (
         ratio: job.data.ratio,
         resolution: openRouterResolution(job.data.resolution),
       });
-      const buffer = await deps.download(url);
-      const contentType = imageContentType(url);
+      const { body, contentType } = await deps.download(url);
       const extension = extensionFor(contentType);
-      const media = await deps.store({ ownerId: task.ownerId, body: buffer, contentType, fileName: `firefly-${index + 1}.${extension}` });
+      const media = await deps.store({ ownerId: task.ownerId, body, contentType, fileName: `firefly-${index + 1}.${extension}` });
       items.push({ mediaId: media.id });
       if (!deps.updateTask(task.id, task.ownerId, { status: "running", items, failures })) {
         deps.discard(media);
         return;
       }
-      console.info(JSON.stringify({ type: "image_generation_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, mediaId: media.id, index, bytes: buffer.length }));
+      console.info(JSON.stringify({ type: "image_generation_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, mediaId: media.id, index, bytes: body.length, contentType }));
     } catch (error) {
       const message = errorMessage(error);
       const retryable = isRetryableOpenRouterFailure(error);

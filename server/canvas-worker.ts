@@ -4,7 +4,7 @@ import { config } from "./config.js";
 import { users } from "./store.js";
 import { mediaQueue } from "./redis.js";
 import { imageModelById, openRouterResolution } from "./image-models.js";
-import { downloadImageBuffer, generateCanvasText, generateSingleImage, isRetryableOpenRouterFailure } from "./openrouter.js";
+import { downloadGeneratedImage, generateCanvasText, generateSingleImage, isRetryableOpenRouterFailure } from "./openrouter.js";
 import { storeGeneratedImage } from "./generated-media.js";
 import { canvasProjectAssetProviderUrl } from "./canvas-project-assets.js";
 import { closeWorkersWithin } from "./shutdown.js";
@@ -68,10 +68,10 @@ const processCanvasJob = async (bullJob: Job<CanvasQueuePayload>) => {
       });
       const url = await generateSingleImage({ model: payload.model, prompt: payload.prompt, references, ratio: payload.ratio, resolution: openRouterResolution(payload.resolution) });
       if (users.readCanvasJob(record.id)?.status === "cancelled") return;
-      const buffer = await downloadImageBuffer(url);
+      const { body, contentType } = await downloadGeneratedImage(url);
       if (users.readCanvasJob(record.id)?.status === "cancelled") return;
-      const contentType = url.startsWith("data:image/webp") ? "image/webp" : url.startsWith("data:image/jpeg") ? "image/jpeg" : "image/png";
-      media = await storeGeneratedImage({ ownerId: record.ownerId, body: buffer, contentType, fileName: `canvas-${record.nodeId}.png`, mediaId });
+      const extension = contentType === "image/jpeg" ? "jpg" : contentType === "image/webp" ? "webp" : "png";
+      media = await storeGeneratedImage({ ownerId: record.ownerId, body, contentType, fileName: `canvas-${record.nodeId}.${extension}`, mediaId });
     }
     if (users.readCanvasJob(record.id)?.status === "cancelled") {
       await discardUncommittedMedia(media.id, record.ownerId);

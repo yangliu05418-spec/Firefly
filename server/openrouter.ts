@@ -331,6 +331,32 @@ export const generateCanvasText = async (input: { instruction: string; currentTe
 
 const isDataUrl = (url: string) => url.startsWith("data:");
 
+export type DownloadedGeneratedImage = {
+  body: Buffer;
+  contentType: "image/png" | "image/jpeg" | "image/webp";
+};
+
+const MAX_GENERATED_IMAGE_BYTES = 20 * 1024 * 1024;
+
+/** Trust image bytes rather than provider URLs or response headers. */
+export const generatedImageContentType = (body: Uint8Array): DownloadedGeneratedImage["contentType"] | null => {
+  if (body.length >= 8
+    && body[0] === 0x89 && body[1] === 0x50 && body[2] === 0x4e && body[3] === 0x47
+    && body[4] === 0x0d && body[5] === 0x0a && body[6] === 0x1a && body[7] === 0x0a) return "image/png";
+  if (body.length >= 3 && body[0] === 0xff && body[1] === 0xd8 && body[2] === 0xff) return "image/jpeg";
+  if (body.length >= 12
+    && body[0] === 0x52 && body[1] === 0x49 && body[2] === 0x46 && body[3] === 0x46
+    && body[8] === 0x57 && body[9] === 0x45 && body[10] === 0x42 && body[11] === 0x50) return "image/webp";
+  return null;
+};
+
+const validateGeneratedImage = (body: Buffer): DownloadedGeneratedImage => {
+  if (body.length > MAX_GENERATED_IMAGE_BYTES) throw new OpenRouterError("生成的图片超过 20MB 限制", 400);
+  const contentType = generatedImageContentType(body);
+  if (!contentType) throw new OpenRouterError("OpenRouter 返回的内容不是受支持的 PNG、JPEG 或 WebP 图片", 502);
+  return { body, contentType };
+};
+
 /** 生成单张图片：返回图片 URL（data: 或 https:），由调用方落盘 */
 export const generateSingleImage = async (input: { model: string; prompt: string; references: string[]; ratio: string; resolution: "512" | "1K" | "2K" | "4K" }): Promise<string> => {
   const base = buildImageRequestBody(input);
@@ -340,16 +366,17 @@ export const generateSingleImage = async (input: { model: string; prompt: string
   return images[0];
 };
 
-/** 下载图片字节（data: 解码 / https: 拉取，20MB 上限） */
-export const downloadImageBuffer = async (url: string): Promise<Buffer> => {
+/** 下载并验证图片（data: 解码 / https: 拉取，20MB 上限）。 */
+export const downloadGeneratedImage = async (url: string): Promise<DownloadedGeneratedImage> => {
   if (isDataUrl(url)) {
     const comma = url.indexOf(",");
     if (comma < 0) throw new OpenRouterError("OpenRouter 返回了无效的图片数据", 400);
     const meta = url.slice(0, comma);
     const payload = url.slice(comma + 1);
-    const buffer = Buffer.from(payload, meta.includes(";base64") ? "base64" : "utf8");
-    if (buffer.length > 20 * 1024 * 1024) throw new OpenRouterError("生成的图片超过 20MB 限制", 400);
-    return buffer;
+    let body: Buffer;
+    try { body = Buffer.from(meta.includes(";base64") ? payload : decodeURIComponent(payload), meta.includes(";base64") ? "base64" : "utf8"); }
+    catch { throw new OpenRouterError("OpenRouter 返回了无效的图片数据", 400); }
+    return validateGeneratedImage(body);
   }
   if (!url.startsWith("http://") && !url.startsWith("https://")) throw new OpenRouterError("OpenRouter 返回了无法下载的图片地址", 400);
   const controller = new AbortController();
@@ -357,9 +384,9 @@ export const downloadImageBuffer = async (url: string): Promise<Buffer> => {
   try {
     const response = await fetch(url, { signal: controller.signal });
     if (!response.ok) throw new OpenRouterError("下载生成图片失败 (" + response.status + ")", 502);
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.length > 20 * 1024 * 1024) throw new OpenRouterError("生成的图片超过 20MB 限制", 400);
-    return buffer;
+    const declaredSize = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declaredSize) && declaredSize > MAX_GENERATED_IMAGE_BYTES) throw new OpenRouterError("生成的图片超过 20MB 限制", 400);
+    return validateGeneratedImage(Buffer.from(await response.arrayBuffer()));
   } finally {
     clearTimeout(timer);
   }

@@ -51,7 +51,7 @@ const harness = (initialTask = taskFixture()) => {
     }) as ImageGenerationProcessorDependencies["updateTask"],
     signReference: (objectKey) => `https://tos.example/${objectKey}`,
     generate,
-    download: vi.fn(async () => Buffer.from("png")),
+    download: vi.fn(async () => ({ body: Buffer.from("png"), contentType: "image/png" as const })),
     store,
     discard,
   };
