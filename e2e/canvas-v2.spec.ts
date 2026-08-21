@@ -150,6 +150,27 @@ test("landing keeps the restrained Firefly entrance", async ({ page }) => {
   await expect(page.locator("body")).not.toHaveCSS("overflow-x", "scroll");
 });
 
+test("studio restores an unsent composer draft and isolates it between creation sessions", async ({ page }) => {
+  await mockAuthenticatedApi(page);
+  await page.goto("/studio");
+  const editor = page.locator(".prompt-editor");
+  await expect(editor).toBeVisible({ timeout: 30_000 });
+  await editor.fill("雨夜里缓慢推进的长镜头");
+  await page.waitForTimeout(500);
+
+  await page.reload();
+  await expect(page.locator(".prompt-editor")).toHaveText("雨夜里缓慢推进的长镜头", { timeout: 30_000 });
+  await expect(page.getByText("已恢复上次未发送的内容")).toBeVisible();
+
+  await page.getByRole("button", { name: "新创作", exact: true }).click();
+  await expect(page.locator(".prompt-editor")).toHaveText("");
+  await page.locator(".prompt-editor").fill("第二个会话的独立草稿");
+  await page.waitForTimeout(500);
+
+  await page.locator(".session-item").nth(1).locator(".session-item__main").click();
+  await expect(page.locator(".prompt-editor")).toHaveText("雨夜里缓慢推进的长镜头");
+});
+
 test("authenticated Canvas V2 opens, creates a node and preserves the app shell", async ({ page }) => {
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => {

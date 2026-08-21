@@ -56,8 +56,12 @@ const indexedDbStore = (): AssetMetadataStore => {
     const db = await open();
     return new Promise<T>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, mode);
-      run(tx.objectStore(STORE_NAME), resolve, reject);
+      let value: T;
+      let failed = false;
+      run(tx.objectStore(STORE_NAME), (result) => { value = result; }, (reason) => { failed = true; reject(reason); });
+      tx.oncomplete = () => { if (!failed) resolve(value!); };
       tx.onabort = () => reject(tx.error ?? new Error("Asset cache transaction aborted"));
+      tx.onerror = () => { /* onabort supplies the authoritative transaction error. */ };
     });
   };
   return {
