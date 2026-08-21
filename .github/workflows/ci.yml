@@ -68,7 +68,7 @@ jobs:
             fi
           done < <(git ls-files '*.sh')
 
-      - name: Verify legacy Nginx configuration is archived
+      - name: Verify co-hosted Nginx configuration is preserved
         shell: bash
         run: |
           set -euo pipefail
@@ -89,10 +89,11 @@ jobs:
           SYSTEMCTL_BIN="$test_root/bin/systemctl" \
             sudo --preserve-env=NGINX_ENABLED_DIR,NGINX_AVAILABLE_DIR,NGINX_ARCHIVE_DIR,NGINX_RUNTIME_DIR,NGINX_BIN,SYSTEMCTL_BIN \
               sh ops/install-nginx-config.sh "$test_root/firefly.conf"
-          test ! -e "$test_root/sites-enabled/internal-image-studio.conf"
-          test ! -e "$test_root/sites-available/internal-image-studio.conf"
-          test -f "$test_root/sites-archive/internal-image-studio.conf"
-          ! grep -R 'listen 443 ssl http2' "$test_root/sites-enabled"
+          test -L "$test_root/sites-enabled/internal-image-studio.conf"
+          test "$(readlink "$test_root/sites-enabled/internal-image-studio.conf")" = "$test_root/sites-available/internal-image-studio.conf"
+          grep -q 'listen 443 ssl http2' "$test_root/sites-available/internal-image-studio.conf"
+          test ! -e "$test_root/sites-archive/internal-image-studio.conf"
+          ! grep -q 'listen 443 ssl http2' "$test_root/sites-enabled/firefly.conf"
 
       - name: Reject oversized tracked files
         shell: bash

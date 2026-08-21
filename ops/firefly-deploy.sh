@@ -17,7 +17,7 @@ app_env=/opt/firefly/.env
 feishu_env=/opt/firefly/.env.feishu
 alerts_env=/etc/firefly/alerts.env
 network=${FIREFLY_DOCKER_NETWORK:-firefly_default}
-legacy_project=${FIREFLY_LEGACY_COMPOSE_PROJECT:-firefly}
+legacy_project=firefly
 current_slot=legacy
 current_port=8090
 switched=0
@@ -114,6 +114,8 @@ stop_old_workers() {
   fi
   while IFS= read -r container; do
     [ -n "$container" ] || continue
+    container_project=$(/usr/bin/docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$container" 2>/dev/null || true)
+    [ "$container_project" = "$legacy_project" ] || { echo "refusing to stop container outside Firefly project: $container" >&2; exit 1; }
     /usr/bin/docker stop --time 35 "$container" >/dev/null 2>&1 || true
   done < "$old_workers_file"
 }
@@ -129,7 +131,7 @@ notify started
 
 cleanup_candidate
 if [ "$current_slot" != "legacy" ]; then
-  FIREFLY_LEGACY_COMPOSE_PROJECT="$legacy_project" /usr/local/sbin/firefly-retire-slot legacy
+  /usr/local/sbin/firefly-retire-slot legacy
 fi
 if /usr/bin/docker ps -q --filter "publish=$next_port" | grep -q .; then
   failure_event=failed_standby_port_busy
