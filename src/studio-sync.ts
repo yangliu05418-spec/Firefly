@@ -31,3 +31,12 @@ export const isAmbiguousSubmissionFailure = (error: unknown) => {
   return candidate?.status === 0 || (candidate?.status !== undefined && candidate.status >= 500)
     || candidate?.code === "CLIENT_TIMEOUT" || candidate?.code === "NETWORK_ERROR";
 };
+
+/** Reconciles a response-loss after a durable session create without reposting it. */
+export const createSessionRecoverably = async <T>(create: () => Promise<T>, read: () => Promise<T>) => {
+  try { return await create(); }
+  catch (error) {
+    if (!isAmbiguousSubmissionFailure(error)) throw error;
+    return read();
+  }
+};

@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { buildImageRequestBody, OpenRouterError, OpenRouterKeyPool, parseOpenRouterImages, parseOpenRouterTextDelta } from "./openrouter.js";
+import { describe, expect, it, vi } from "vitest";
+import { buildImageRequestBody, fetchOpenRouterJsonWithinDeadline, OpenRouterError, OpenRouterKeyPool, parseOpenRouterImages, parseOpenRouterTextDelta } from "./openrouter.js";
 import { computeImageSize, IMAGE_MODELS, imageModelById, openRouterResolution } from "./image-models.js";
 
 describe("OpenRouterKeyPool", () => {
@@ -56,6 +56,28 @@ describe("OpenRouterKeyPool", () => {
 
   it("returns null when no keys are configured", () => {
     expect(new OpenRouterKeyPool([]).next()).toBeNull();
+  });
+});
+
+describe("OpenRouter transport deadline", () => {
+  it("keeps the timeout active while a successful response body is still streaming", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        const signal = init?.signal as AbortSignal;
+        return {
+          ok: true,
+          status: 200,
+          json: () => new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true })),
+        } as Response;
+      }) as typeof fetch;
+      const pending = fetchOpenRouterJsonWithinDeadline("https://openrouter.test/images", { method: "POST" }, 100, fetchImpl);
+      const assertion = expect(pending).rejects.toMatchObject({ name: "TimeoutError" });
+      await vi.advanceTimersByTimeAsync(100);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

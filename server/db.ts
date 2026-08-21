@@ -599,6 +599,15 @@ export class UserStore {
     return session;
   }
 
+  /** Reuses a client-generated session id without resurrecting deleted sessions. */
+  admitCreationSession(session: CreationSession) {
+    return this.database.transaction(() => {
+      const existing = this.readCreationSession(session.id, true);
+      if (existing) return { status: "existing" as const, session: existing };
+      return { status: "created" as const, session: this.createCreationSession(session) };
+    })();
+  }
+
   readCreationSession(id: string, includeDeleted = false) {
     return mapCreationSession(this.database.prepare(`SELECT * FROM creation_sessions WHERE id = ?${includeDeleted ? "" : " AND deleted_at IS NULL"}`).get(id) as CreationSessionRow | undefined);
   }

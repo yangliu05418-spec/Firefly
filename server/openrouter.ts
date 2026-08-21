@@ -105,17 +105,33 @@ export const buildImageRequestBody = (input: { model: string; prompt: string; re
   ...(input.references.length ? { input_references: input.references.map((url) => ({ type: "image_url" as const, image_url: { url } })) } : {}),
 });
 
+type OpenRouterTransportResult = { response: Response; data?: unknown; errorText?: string };
+
+/** Keep the deadline active through response-body consumption, not only headers. */
+export const fetchOpenRouterJsonWithinDeadline = async (
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  fetchImpl: typeof fetch = fetch,
+): Promise<OpenRouterTransportResult> => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new DOMException("OpenRouter 请求超时", "TimeoutError")), timeoutMs);
+  try {
+    const response = await fetchImpl(url, { ...init, signal: controller.signal });
+    if (response.ok) return { response, data: await response.json() };
+    return { response, errorText: (await response.text()).slice(0, 500) };
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 const callWithRetry = async (body: ChatRequestBody | ImageRequestBody, url = chatCompletionsUrl()): Promise<{ data: unknown; key: string }> => {
   const lastError: OpenRouterError = new OpenRouterError("没有可用的 OpenRouter API Key", 503);
   for (let attempt = 0; attempt < Math.max(1, pool.size); attempt++) {
     const key = pool.next();
     if (!key) throw new OpenRouterError("OpenRouter 全部 API Key 暂时不可用（限流或密钥失效），请稍后重试", 503);
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), config.openrouterRequestTimeoutMs);
-      let response: Response;
-      try {
-        response = await fetch(url, {
+      const result = await fetchOpenRouterJsonWithinDeadline(url, {
           method: "POST",
           headers: {
             Authorization: "Bearer " + key,
@@ -124,16 +140,13 @@ const callWithRetry = async (body: ChatRequestBody | ImageRequestBody, url = cha
             "X-Title": "Firefly Studio",
           },
           body: JSON.stringify(body),
-          signal: controller.signal,
-        });
-      } finally {
-        clearTimeout(timer);
-      }
+        }, config.openrouterRequestTimeoutMs);
+      const response = result.response;
       if (response.ok) {
         pool.reportSuccess(key);
-        return { data: await response.json(), key };
+        return { data: result.data, key };
       }
-      const text = (await response.text()).slice(0, 500);
+      const text = result.errorText ?? "";
       pool.reportFailure(key, response.status);
       if (response.status === 401) {
         // 密钥失效：标记 1h 冷却并轮换下一个 Key

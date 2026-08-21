@@ -96,6 +96,7 @@ describe("enterprise identity and isolation", () => {
     const other = store.upsertFromFeishu({ openId: "ou_session_other", unionId: "on_session_other", tenantKey: "tenant-dokuai", email: "session-other@dokuai.tv", name: "Other", avatarUrl: "" });
     const first = store.createCreationSession({ id: "session-1", ownerId: owner.id, title: "新创作", createdAt: 1, updatedAt: 1 });
     const second = store.createCreationSession({ id: "session-2", ownerId: owner.id, title: "第二幕", createdAt: 2, updatedAt: 2 });
+    expect(store.admitCreationSession({ ...first, title: "响应丢失后的重复请求", updatedAt: 3 })).toMatchObject({ status: "existing", session: { title: "新创作" } });
     store.saveTask(task({ id: "session-task-1", sessionId: first.id, ownerId: owner.id }));
     store.saveTask(task({ id: "session-task-2", sessionId: second.id, ownerId: owner.id }));
     expect(store.listTasksForSession(owner.id, first.id).map((item) => item.id)).toEqual(["session-task-1"]);
@@ -105,6 +106,7 @@ describe("enterprise identity and isolation", () => {
     expect(store.renameCreationSession(first.id, other.id, "越权")).toBeNull();
     expect(store.softDeleteCreationSession(first.id, owner.id)).toBe(true);
     expect(store.readCreationSession(first.id)).toBeNull();
+    expect(store.admitCreationSession({ ...first, title: "不能复活", updatedAt: 4 })).toMatchObject({ status: "existing", session: { deletedAt: expect.any(Number) } });
     expect(store.readTask("session-task-1")).not.toBeNull();
     store.close();
   });

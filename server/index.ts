@@ -415,6 +415,10 @@ app.get("/media/:id/:name", async (req, res) => {
 });
 
 const creationSessionTitleSchema = z.object({ title: z.string().trim().min(1, "会话名称不能为空").max(64, "会话名称不能超过 64 个字符") });
+const creationSessionCreateSchema = z.object({
+  requestId: z.string().uuid().optional(),
+  title: z.string().trim().min(1, "会话名称不能为空").max(64, "会话名称不能超过 64 个字符").optional(),
+});
 
 app.get("/api/creation-sessions", requireAuth, (_req, res) => {
   const user = res.locals.user as SessionUser;
@@ -424,9 +428,20 @@ app.get("/api/creation-sessions", requireAuth, (_req, res) => {
 app.post("/api/creation-sessions", requireAuth, (req, res) => {
   try {
     const user = res.locals.user as SessionUser;
-    const title = req.body?.title === undefined ? "新创作" : creationSessionTitleSchema.parse(req.body).title;
-    res.status(201).json(publicCreationSession(createCreationSession(user.id, title)));
+    const body = creationSessionCreateSchema.parse(req.body ?? {});
+    const now = Date.now();
+    const admission = users.admitCreationSession({ id: body.requestId ?? crypto.randomUUID(), ownerId: user.id, title: body.title ?? "新创作", createdAt: now, updatedAt: now });
+    if (admission.status === "existing" && (admission.session.ownerId !== user.id || admission.session.deletedAt)) {
+      return res.status(409).json({ error: "请求标识已被使用", requestId: res.locals.requestId });
+    }
+    res.status(admission.status === "created" ? 201 : 200).json(publicCreationSession(admission.session));
   } catch (error) { respondError(res, error); }
+});
+
+app.get("/api/creation-sessions/:id", requireAuth, (req, res) => {
+  const user = res.locals.user as SessionUser;
+  const session = users.readCreationSession(param(req.params.id));
+  session && session.ownerId === user.id ? res.json(publicCreationSession(session)) : res.status(404).json({ error: "创作会话不存在" });
 });
 
 app.patch("/api/creation-sessions/:id", requireAuth, (req, res) => {

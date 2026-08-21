@@ -12,7 +12,7 @@ import { CanvasInsertPicker } from "./features/canvas/CanvasInsertPicker";
 import { AssetCacheScope, useAssetCacheUserId } from "./asset-cache-context";
 import { assetMetadataCache, filterCachedAssets } from "./asset-metadata-cache";
 import { areAttachedUploadsReady } from "./upload-state";
-import { hasActiveStudioWork, isAmbiguousSubmissionFailure, replaceSessionSnapshot, selectSessionSnapshot, upsertStudioItem } from "./studio-sync";
+import { createSessionRecoverably, hasActiveStudioWork, isAmbiguousSubmissionFailure, replaceSessionSnapshot, selectSessionSnapshot, upsertStudioItem } from "./studio-sync";
 import { loadStudioBootstrap } from "./studio-bootstrap";
 import { useAdaptiveRefresh } from "./use-adaptive-refresh";
 import { composerDraftCache, type ComposerDraftState } from "./composer-draft-cache";
@@ -951,6 +951,7 @@ function Studio({ user, route, navigate, logout }: { user: SessionUser; route: s
   const routedSessionId = route.startsWith("/studio/sessions/") ? decodeURIComponent(route.slice("/studio/sessions/".length)) : "";
   const [models, setModels] = useState<ModelCapability[]>([]); const [tasks, setTasks] = useState<Task[]>([]); const [assetTasks, setAssetTasks] = useState<Task[]>([]); const [sessions, setSessions] = useState<CreationSession[]>([]); const [sidebar, setSidebar] = useState(() => window.innerWidth > 760); const [loading, setLoading] = useState(true); const [loadError, setLoadError] = useState(""); const [syncIssue, setSyncIssue] = useState(false); const [creatingNew, setCreatingNew] = useState(false); const [creatingSession, setCreatingSession] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Task | null>(null); const [deleting, setDeleting] = useState(false); const [deleteError, setDeleteError] = useState(""); const [sessionDeleteTarget, setSessionDeleteTarget] = useState<CreationSession | null>(null); const [editingSessionId, setEditingSessionId] = useState<string | null>(null); const [sessionTitleDraft, setSessionTitleDraft] = useState(""); const [sessionBusy, setSessionBusy] = useState(false); const [profileOpen, setProfileOpen] = useState(false); const [featureNotice, setFeatureNotice] = useState<{ kind: "atlas"; nonce: number; leaving?: boolean } | null>(null); const [pendingCanvasCreate, setPendingCanvasCreate] = useState(false); const [canvasInsertTarget, setCanvasInsertTarget] = useState<{ kind: "video"; task: Task } | { kind: "image"; asset: LibraryAsset } | { kind: "generated"; mediaId: string; title: string } | null>(null); const [imageResults, setImageResults] = useState<ImageResultBundle[]>([]); const [assetImageResults, setAssetImageResults] = useState<ImageResultBundle[]>([]); const [selectedSessionId, setSelectedSessionId] = useState(""); const profileRef = useRef<HTMLDivElement>(null); const sessionRequestSequence = useRef(0); const atlasExitTimer = useRef<number | undefined>(undefined); const atlasAutoTimer = useRef<number | undefined>(undefined);
+  const sessionCreateIntent = useRef<string | null>(null);
   const activeSessionId = routedSessionId || selectedSessionId || sessions[0]?.id || "";
   const markSessionUsed = (prompt: string) => setSessions((current) => current.map((session) => session.id === activeSessionId ? { ...session, title: session.title === "新创作" && prompt.trim() ? prompt.trim().slice(0, 40) : session.title, updatedAt: Date.now() } : session).sort((a, b) => b.updatedAt - a.updatedAt));
   const mergeImageResult = (current: ImageResultBundle[], bundle: ImageResultBundle) => upsertStudioItem(current, bundle);
@@ -982,6 +983,20 @@ function Studio({ user, route, navigate, logout }: { user: SessionUser; route: s
     setSyncIssue(taskResult.status === "rejected" || imageResult.status === "rejected");
     setLoading(false);
   };
+  const admitNewSession = async () => {
+    const requestId = sessionCreateIntent.current ?? crypto.randomUUID(); sessionCreateIntent.current = requestId;
+    try {
+      const session = await createSessionRecoverably(
+        () => api.post<CreationSession>("/api/creation-sessions", { requestId }, { timeoutMs: 8_000 }),
+        () => api.get<CreationSession>(`/api/creation-sessions/${encodeURIComponent(requestId)}`, { timeoutMs: 8_000 }),
+      );
+      sessionCreateIntent.current = null;
+      return session;
+    } catch (error) {
+      if (!isAmbiguousSubmissionFailure(error)) sessionCreateIntent.current = null;
+      throw error;
+    }
+  };
   const initialLoad = async () => {
     setLoading(true); setLoadError("");
     try {
@@ -990,7 +1005,7 @@ function Studio({ user, route, navigate, logout }: { user: SessionUser; route: s
         readTasks: () => api.get<Task[]>("/api/generations"),
         readImages: () => api.get<ImageResultBundle[]>("/api/image-generations"),
         readSessions: () => api.get<CreationSession[]>("/api/creation-sessions"),
-        createSession: () => api.post<CreationSession>("/api/creation-sessions", {}),
+        createSession: admitNewSession,
       });
       const target = loaded.sessions.some((session) => session.id === routedSessionId) ? routedSessionId : loaded.sessions[0].id;
       const snapshot = selectSessionSnapshot(loaded.tasks, loaded.images, target);
@@ -1019,7 +1034,10 @@ function Studio({ user, route, navigate, logout }: { user: SessionUser; route: s
   };
   const createSession = async () => {
     if (creatingSession) return; setCreatingSession(true);
-    try { const session = await api.post<CreationSession>("/api/creation-sessions", {}); sessionRequestSequence.current += 1; setSessions((current) => [session, ...current]); setSelectedSessionId(session.id); setTasks([]); setImageResults([]); setCreatingNew(true); navigate(`/studio/sessions/${encodeURIComponent(session.id)}`); setSyncIssue(false); }
+    try {
+      const session = await admitNewSession();
+      sessionRequestSequence.current += 1; setSessions((current) => [session, ...current.filter((item) => item.id !== session.id)]); setSelectedSessionId(session.id); setTasks([]); setImageResults([]); setCreatingNew(true); navigate(`/studio/sessions/${encodeURIComponent(session.id)}`); setSyncIssue(false);
+    }
     catch { setSyncIssue(true); }
     finally { setCreatingSession(false); if (window.innerWidth <= 760) setSidebar(false); }
   };

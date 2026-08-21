@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ImageResultBundle, Task } from "./types";
-import { hasActiveStudioWork, isAmbiguousSubmissionFailure, replaceSessionSnapshot, selectSessionSnapshot, upsertStudioItem } from "./studio-sync";
+import { createSessionRecoverably, hasActiveStudioWork, isAmbiguousSubmissionFailure, replaceSessionSnapshot, selectSessionSnapshot, upsertStudioItem } from "./studio-sync";
 
 const task = (patch: Partial<Task> = {}): Task => ({
   id: "task-1", sessionId: "session-a", caseId: "task-1", status: "succeeded", mediaStatus: "ready",
@@ -48,5 +48,18 @@ describe("studio synchronization", () => {
     expect(isAmbiguousSubmissionFailure({ status: 503 })).toBe(true);
     expect(isAmbiguousSubmissionFailure({ status: 400 })).toBe(false);
     expect(isAmbiguousSubmissionFailure({ status: 429 })).toBe(false);
+  });
+
+  it("recovers a committed session after its create response is lost", async () => {
+    const recovered = { id: "session-recovered" };
+    const read = vi.fn(async () => recovered);
+    await expect(createSessionRecoverably(async () => { throw { status: 503 }; }, read)).resolves.toBe(recovered);
+    expect(read).toHaveBeenCalledOnce();
+  });
+
+  it("does not reconcile a deterministic session rejection", async () => {
+    const read = vi.fn();
+    await expect(createSessionRecoverably(async () => { throw { status: 400 }; }, read)).rejects.toMatchObject({ status: 400 });
+    expect(read).not.toHaveBeenCalled();
   });
 });
