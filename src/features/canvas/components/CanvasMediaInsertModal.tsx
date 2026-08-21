@@ -5,6 +5,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Film, ImageIcon, LoaderCircle, RefreshCw, Search, X } from "lucide-react";
 import { api } from "../../../api";
+import { useAssetCacheUserId } from "../../../asset-cache-context";
+import { assetMetadataCache, filterCachedAssets, loadAssetsCacheFirst } from "../../../asset-metadata-cache";
 import type { LibraryAsset, Task } from "../../../types";
 import { importCanvasMedia } from "../canvas-api";
 import { createMediaNode } from "../canvas-media";
@@ -20,6 +22,7 @@ type CanvasMediaInsertModalProps = {
 };
 
 export function CanvasMediaInsertModal({ open, canvasId, onClose, onInserted }: CanvasMediaInsertModalProps) {
+  const userId = useAssetCacheUserId();
   const [tab, setTab] = useState<"videos" | "images">("videos");
   const [videos, setVideos] = useState<Task[] | null>(null);
   const [images, setImages] = useState<LibraryAsset[] | null>(null);
@@ -29,6 +32,7 @@ export function CanvasMediaInsertModal({ open, canvasId, onClose, onInserted }: 
 
   useEffect(() => {
     if (!open) return;
+    let active = true;
     setError("");
     setImporting(null);
     setQuery("");
@@ -39,11 +43,16 @@ export function CanvasMediaInsertModal({ open, canvasId, onClose, onInserted }: 
       .get<Task[]>("/api/generations")
       .then((tasks) => setVideos(tasks.filter((task) => task.status === "succeeded" && task.mediaStatus === "ready" && task.videoUrl)))
       .catch((loadError) => setError(loadError instanceof Error ? loadError.message : "视频资产载入失败"));
-    void api
-      .get<{ Items?: LibraryAsset[] }>("/api/assets?type=Image&page=1&pageSize=60")
-      .then((result) => setImages(result.Items ?? []))
-      .catch((loadError) => setError(loadError instanceof Error ? loadError.message : "图片资产载入失败"));
-  }, [open]);
+    void loadAssetsCacheFirst({
+      userId,
+      loadFresh: () => api.get<{ Items?: LibraryAsset[] }>("/api/assets?type=Image&page=1&pageSize=60").then((result) => result.Items ?? []),
+      selectCached: (assets) => filterCachedAssets(assets, { type: "Image" }).slice(0, 60),
+      onCached: (assets) => { if (active) setImages(assets); },
+    })
+      .then((result) => { if (active) setImages(result.assets); })
+      .catch((loadError) => { if (active) setError(loadError instanceof Error ? loadError.message : "图片资产载入失败"); });
+    return () => { active = false; };
+  }, [open, userId]);
 
   useEffect(() => {
     if (!open) return;
@@ -134,7 +143,7 @@ export function CanvasMediaInsertModal({ open, canvasId, onClose, onInserted }: 
             </ul>
           )}
         </div>
-        <footer className="canvas-insert__foot"><span>图片插入时会复制到长期存储，素材删除不影响画布</span><button type="button" className="canvas-insert__refresh" onClick={() => { setVideos(null); setImages(null); void api.get<Task[]>("/api/generations").then((tasks) => setVideos(tasks.filter((t) => t.status === "succeeded" && t.mediaStatus === "ready" && t.videoUrl))).catch(() => undefined); void api.get<{ Items?: LibraryAsset[] }>("/api/assets?type=Image&page=1&pageSize=60").then((result) => setImages(result.Items ?? [])).catch(() => undefined); }}><RefreshCw /> 刷新</button></footer>
+        <footer className="canvas-insert__foot"><span>图片插入时会复制到长期存储，素材删除不影响画布</span><button type="button" className="canvas-insert__refresh" onClick={() => { setVideos(null); setImages(null); void api.get<Task[]>("/api/generations").then((tasks) => setVideos(tasks.filter((t) => t.status === "succeeded" && t.mediaStatus === "ready" && t.videoUrl))).catch(() => undefined); void api.get<{ Items?: LibraryAsset[] }>("/api/assets?type=Image&page=1&pageSize=60").then((result) => { const assets = result.Items ?? []; setImages(assets); void assetMetadataCache.merge(userId, assets); }).catch(() => undefined); }}><RefreshCw /> 刷新</button></footer>
       </div>
     </div>
   );
