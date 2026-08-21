@@ -45,7 +45,7 @@ capture_candidate_diagnostics() {
     printf '\nWORKERS\n'
     curl --silent --show-error --max-time 5 --write-out '\nhttp_status=%{http_code}\n' \
       "http://127.0.0.1:$next_port/api/health/workers" || true
-    for role in web worker media-worker canvas-worker; do
+    for role in web worker image-worker media-worker canvas-worker; do
       container="firefly-$role-$next_slot"
       printf '\nCONTAINER %s\n' "$container"
       /usr/bin/docker inspect --format '{{json .State}}' "$container" 2>&1 || true
@@ -108,7 +108,7 @@ on_exit() {
 }
 trap on_exit EXIT
 cleanup_candidate() {
-  for role in web worker media-worker canvas-worker; do
+  for role in web worker image-worker media-worker canvas-worker; do
     container_id=$(inspect_container_id "firefly-$role-$next_slot")
     [ -n "$container_id" ] || continue
     assert_slot_container "$container_id" "$role" "$next_slot"
@@ -132,7 +132,7 @@ switch_upstream() {
 }
 stop_old_workers() {
   if [ "$current_slot" = "legacy" ]; then
-    for service in worker media-worker canvas-worker; do
+    for service in worker image-worker media-worker canvas-worker; do
       for container in $(/usr/bin/docker ps -q \
         --filter "label=com.docker.compose.project=$legacy_project" \
         --filter "label=com.docker.compose.service=$service"); do
@@ -142,7 +142,7 @@ stop_old_workers() {
       done
     done
   else
-    for role in worker media-worker canvas-worker; do
+    for role in worker image-worker media-worker canvas-worker; do
       container_id=$(inspect_container_id "firefly-$role-$current_slot")
       [ -n "$container_id" ] || continue
       assert_slot_container "$container_id" "$role" "$current_slot"
@@ -185,10 +185,17 @@ while [ "$attempt" -lt 60 ] && [ "$ready_count" -lt 3 ]; do
 done
 if [ "$ready_count" -lt 3 ]; then failure_event=failed_readiness; cleanup_candidate; exit 1; fi
 
-for role_command in 'worker:dist-server/worker.js' 'media-worker:dist-server/media-worker.js' 'canvas-worker:dist-server/canvas-worker.js'; do
+worker_commands='worker:dist-server/worker.js media-worker:dist-server/media-worker.js canvas-worker:dist-server/canvas-worker.js'
+# Old immutable images remain valid rollback targets. Only add the dedicated
+# image process when that image contains the new entrypoint.
+if /usr/bin/docker run --rm --entrypoint /bin/sh "$image" -c 'test -f /app/dist-server/image-worker.js'; then
+  worker_commands='worker:dist-server/worker.js image-worker:dist-server/image-worker.js media-worker:dist-server/media-worker.js canvas-worker:dist-server/canvas-worker.js'
+fi
+for role_command in $worker_commands; do
   role=${role_command%%:*}; command=${role_command#*:}
   heartbeat_role=$role
   [ "$role" = "worker" ] && heartbeat_role=generation
+  [ "$role" = "image-worker" ] && heartbeat_role=image
   [ "$role" = "media-worker" ] && heartbeat_role=media
   [ "$role" = "canvas-worker" ] && heartbeat_role=canvas
   /usr/bin/docker run -d --name "firefly-$role-$next_slot" --restart unless-stopped --stop-timeout 35 \

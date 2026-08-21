@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import type { Redis } from "ioredis";
 import { config } from "./config.js";
 
-export const workerRoles = ["generation", "media", "canvas"] as const;
+export const workerRoles = ["generation", "image", "media", "canvas"] as const;
 export type WorkerRole = (typeof workerRoles)[number];
 
 const heartbeatIntervalMs = 10_000;

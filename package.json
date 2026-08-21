@@ -4,10 +4,11 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently \"vite\" \"tsx watch server/index.ts\" \"tsx watch server/worker.ts\"",
+    "dev": "concurrently \"vite\" \"tsx watch server/index.ts\" \"tsx watch server/worker.ts\" \"tsx watch server/image-worker.ts\"",
     "build": "vite build && tsc -p tsconfig.server.json",
     "start": "node dist-server/index.js",
     "worker": "node dist-server/worker.js",
+    "image-worker": "node dist-server/image-worker.js",
     "media-worker": "node dist-server/media-worker.js",
     "canvas-worker": "node dist-server/canvas-worker.js",
     "tos:configure": "node dist-server/tos-admin.js",

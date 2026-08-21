@@ -8,7 +8,6 @@ import { mediaQueue, readTask, saveTask } from "./redis.js";
 import { AssetRegistrationRejected, isRetryableAssetRejection, prepareProviderAssets } from "./asset-registration.js";
 import { users } from "./store.js";
 import { closeWorkersWithin } from "./shutdown.js";
-import { createImageGenerationWorker } from "./image-generation-worker.js";
 import { shouldFinalizeJobFailure } from "./job-failure.js";
 import { startWorkerHeartbeat } from "./worker-heartbeat.js";
 import { resolveCanvasGenerationReferences } from "./canvas-project-assets.js";
@@ -115,8 +114,7 @@ const worker = new Worker<{ input: unknown }>("generation", async (job) => {
   users.completeAsyncJobIntent("generation", job.id!);
 }, { connection, concurrency: config.generationConcurrency, lockDuration: 120000 });
 
-const imageWorker = createImageGenerationWorker(connection);
-await Promise.all([worker.waitUntilReady(), imageWorker.waitUntilReady()]);
+await worker.waitUntilReady();
 const heartbeat = await startWorkerHeartbeat(connection, "generation");
 
 worker.on("failed", async (job, error) => {
@@ -149,7 +147,7 @@ const shutdown = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
   await heartbeat.stop();
-  const graceful = await closeWorkersWithin([worker, imageWorker], config.shutdownGraceMs);
+  const graceful = await closeWorkersWithin([worker], config.shutdownGraceMs);
   console.info(JSON.stringify({ type: "worker_shutdown", at: new Date().toISOString(), worker: "generation", graceful }));
   await connection.quit(); users.close(); process.exit(0);
 };
