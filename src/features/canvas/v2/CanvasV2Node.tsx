@@ -13,6 +13,7 @@ export type CanvasFlowData = {
   readOnly: boolean;
   references: CanvasReferenceSummary[];
   localPreviewUrl?: string;
+  expandedText: boolean;
   onChange: (id: string, patch: Partial<CanvasNodeV2["data"]>) => void;
   onCreateFrom: (id: string, side: "left" | "right", anchor: CanvasMenuAnchor) => void;
   onFocusReference: (sourceId: string) => void;
@@ -22,6 +23,7 @@ export type CanvasFlowData = {
   onCancel: (id: string) => void;
   onExtractFrame: (id: string) => void;
   onSelection: (id: string, text: string) => void;
+  onExpandText: (id: string, expanded: boolean) => void;
   onCrop: (id: string) => void;
   onRotate: (id: string) => void;
   onUpload: (id: string, file: File) => void;
@@ -90,7 +92,7 @@ function CanvasV2NodeView({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       })}</div>
     </div>}
     <div className={`canvas-v2-node__body${bodyIsInteractive ? " nodrag nowheel" : ""}`}>
-      {domain.type === "text" ? <Suspense fallback={<div className="canvas-v2-node__empty" aria-busy="true"><LoaderCircle className="spin" /><span>正在载入文本编辑器</span></div>}><CanvasRichText value={domain.data.markdown ?? ""} richText={domain.data.richText} readOnly={readOnly} onChange={(markdown, richText) => data.onChange(id, { markdown, richText })} onSelection={(selectionText) => data.onSelection(id, selectionText)} /></Suspense> :
+      {domain.type === "text" ? <Suspense fallback={<div className="canvas-v2-node__empty" aria-busy="true"><LoaderCircle className="spin" /><span>正在载入文本编辑器</span></div>}><CanvasRichText value={domain.data.markdown ?? ""} richText={domain.data.richText} readOnly={readOnly} expanded={data.expandedText} onExpandedChange={(expanded) => data.onExpandText(id, expanded)} onChange={(markdown, richText) => data.onChange(id, { markdown, richText })} onSelection={(selectionText) => data.onSelection(id, selectionText)} /></Suspense> :
         domain.type === "group" ? <div className="canvas-v2-node__group"><Users /><span>内容分组</span><small>拖动节点到这里整理镜头关系</small></div> :
         domain.type === "legacy-audio" ? mediaUrl ? <audio className="canvas-v2-node__media canvas-v2-node__audio" src={mediaUrl} controls preload="metadata" /> : <div className="canvas-v2-node__empty"><Icon /><span>{emptyCopy[domain.type]}</span></div> :
         domain.type === "video" ? mediaUrl ? <LazyCanvasVideo src={mediaUrl} /> : emptyMedia :
