@@ -6,7 +6,7 @@ export const CURRENT_SCHEMA_VERSION = 6;
 // Compatibility bridge: deploy this reader before the Canvas V2 migration so
 // this image remains a valid blue/green rollback target after the next
 // expand-only migration is applied.
-export const MAX_SUPPORTED_SCHEMA_VERSION = 6;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 7;
 
 const baseSchema = `
   CREATE TABLE IF NOT EXISTS users (
