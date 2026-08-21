@@ -8,7 +8,10 @@ printf '%s\n' "$revision" | grep -Eq '^[0-9a-f]{40}$' || { echo "invalid revisio
 [ "$(id -u)" -eq 0 ] || { echo "must run as root" >&2; exit 1; }
 
 exec 9>/run/lock/firefly-deploy.lock
-flock -n 9 || { echo "another deployment is active" >&2; exit 1; }
+# Delayed slot retirement also uses this lock and normally holds it only for a
+# few milliseconds. Wait through that housekeeping race, but still reject a
+# genuinely concurrent deployment within a bounded interval.
+flock -w 30 9 || { echo "another deployment is active" >&2; exit 1; }
 
 started_at=$(date +%s)
 case_id="deploy-$(date -u +%Y%m%dT%H%M%SZ)-$$"
