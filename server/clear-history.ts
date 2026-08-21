@@ -1,5 +1,5 @@
 import { users } from "./store.js";
-import { generationQueue, mediaQueue, redis } from "./redis.js";
+import { generationQueue, mediaQueue, queueConnection, redis } from "./redis.js";
 
 if (process.env.CONFIRM_CLEAR_GENERATION_HISTORY !== "yes") throw new Error("Set CONFIRM_CLEAR_GENERATION_HISTORY=yes to clear generation history");
 
@@ -20,5 +20,5 @@ do {
 users.clearGenerationHistory();
 console.info(JSON.stringify({ type: "generation_history_cleared", redisKeys }));
 await Promise.all([generationQueue.close(), mediaQueue.close()]);
-await redis.quit();
+await Promise.allSettled([redis.quit(), queueConnection.quit()]);
 users.close();
