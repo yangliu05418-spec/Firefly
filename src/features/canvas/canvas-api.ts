@@ -66,7 +66,7 @@ export type CanvasLease = { acquired: true; token: string; ttlMs: number } | { a
 export type CanvasProjectAsset = {
   id: string; canvasId: string; kind: "image" | "video" | "audio"; title: string; contentType: string; size: number;
   width?: number; height?: number; durationMs?: number; status: "copying" | "ready" | "failed"; createdAt: number; updatedAt: number;
-  mediaUrl: string; downloadUrl: string;
+  mediaUrl: string; thumbnailUrl?: string; downloadUrl: string;
 };
 export type CanvasJob = {
   id: string; canvasId: string; nodeId: string; kind: "text" | "image" | "video" | "character_tool";

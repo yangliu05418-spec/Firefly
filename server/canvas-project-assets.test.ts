@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { resolveCanvasGenerationReferences } from "./canvas-project-assets.js";
+import { publicCanvasProjectAsset, resolveCanvasGenerationReferences } from "./canvas-project-assets.js";
 import type { CanvasProjectAsset } from "./db.js";
 import type { GenerationInput } from "./provider.js";
 
@@ -18,6 +18,13 @@ const input = (): GenerationInput => ({
 });
 
 describe("canvas generation references", () => {
+  it("publishes a cacheable thumbnail route without changing the original media route", () => {
+    expect(publicCanvasProjectAsset(projectAsset)).toMatchObject({
+      mediaUrl: "/api/canvas-project-assets/project-asset-1/media",
+      thumbnailUrl: "/api/canvas-project-assets/project-asset-1/media?variant=thumbnail",
+      downloadUrl: "/api/canvas-project-assets/project-asset-1/media?download=1",
+    });
+  });
   it("keeps a stable project id until the worker signs the provider URL", () => {
     const providerUrl = vi.fn(() => "https://tos.example/fresh-signature");
     const resolved = resolveCanvasGenerationReferences(input(), projectAsset.ownerId, { readAsset: () => projectAsset, providerUrl });

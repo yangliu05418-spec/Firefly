@@ -10,24 +10,31 @@ const asset = (status: CanvasProjectAsset["status"], ownerId = "owner-1"): Canva
 describe("GET /api/canvas-project-assets/:id/media", () => {
   const servers: ReturnType<express.Express["listen"]>[] = [];
   afterEach(async () => Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())))));
-  const request = async (stored: CanvasProjectAsset | null, userId = "owner-1", canvasOwner = "owner-1", download = false) => {
+  const request = async (stored: CanvasProjectAsset | null, userId = "owner-1", canvasOwner = "owner-1", query = "") => {
     const app = express();
     app.use((_req, res, next) => { res.locals.user = { id: userId }; next(); });
     app.get("/api/canvas-project-assets/:id/media", createCanvasProjectMediaHandler({
       readAsset: () => stored,
       canAccessCanvas: (_canvasId, requester) => requester === canvasOwner,
-      signedUrl: async (_asset, attachment) => `https://tos.example/video.mp4?download=${attachment ? 1 : 0}`,
+      signedUrl: async (_asset, attachment, thumbnail) => `https://tos.example/media?download=${attachment ? 1 : 0}&thumbnail=${thumbnail ? 1 : 0}`,
       cacheControl: "private, max-age=60",
     }));
     const server = app.listen(0, "127.0.0.1"); servers.push(server);
     await new Promise<void>((resolve) => server.once("listening", resolve));
     const { port } = server.address() as AddressInfo;
-    return fetch(`http://127.0.0.1:${port}/api/canvas-project-assets/project-asset-1/media${download ? "?download=1" : ""}`, { redirect: "manual" });
+    return fetch(`http://127.0.0.1:${port}/api/canvas-project-assets/project-asset-1/media${query}`, { redirect: "manual" });
   };
 
   it("redirects owned ready previews and downloads independently", async () => {
     expect((await request(asset("ready"))).headers.get("location")).toContain("download=0");
-    expect((await request(asset("ready"), "owner-1", "owner-1", true)).headers.get("location")).toContain("download=1");
+    expect((await request(asset("ready"), "owner-1", "owner-1", "?download=1")).headers.get("location")).toContain("download=1");
+  });
+
+  it("requests a transformed thumbnail only for image previews", async () => {
+    const image = { ...asset("ready"), kind: "image" as const, contentType: "image/png" };
+    expect((await request(image, "owner-1", "owner-1", "?variant=thumbnail")).headers.get("location")).toContain("thumbnail=1");
+    expect((await request(asset("ready"), "owner-1", "owner-1", "?variant=thumbnail")).headers.get("location")).toContain("thumbnail=0");
+    expect((await request(image, "owner-1", "owner-1", "?variant=thumbnail&download=1")).headers.get("location")).toContain("thumbnail=0");
   });
 
   it("hides missing, cross-user and cross-canvas assets", async () => {

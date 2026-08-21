@@ -47,11 +47,11 @@ export const resolveCanvasProjectMedia = (asset: CanvasProjectAsset, preferOrigi
   throw new Error(`参考素材「${asset.title}」无法读取`);
 };
 
-export const canvasProjectAssetSignedUrl = async (asset: CanvasProjectAsset, download = false) => {
+export const canvasProjectAssetSignedUrl = async (asset: CanvasProjectAsset, download = false, thumbnail = false) => {
   const media = resolveCanvasProjectMedia(asset, download);
   return download
     ? signedObjectUrl(media.objectKey, { download: true, fileName: media.fileName })
-    : stablePreviewUrl({ objectKey: media.objectKey, fileName: media.fileName });
+    : stablePreviewUrl({ objectKey: media.objectKey, fileName: media.fileName, process: thumbnail && media.contentType.startsWith("image/") ? "image/resize,w_960/format,webp" : undefined });
 };
 
 /** Provider references always use the archived source-quality object, never the low-bitrate browser preview. */
@@ -99,13 +99,14 @@ export const publicCanvasProjectAsset = (asset: CanvasProjectAsset) => ({
   createdAt: asset.createdAt,
   updatedAt: asset.updatedAt,
   mediaUrl: `/api/canvas-project-assets/${encodeURIComponent(asset.id)}/media`,
+  thumbnailUrl: `/api/canvas-project-assets/${encodeURIComponent(asset.id)}/media${asset.kind === "image" ? "?variant=thumbnail" : ""}`,
   downloadUrl: `/api/canvas-project-assets/${encodeURIComponent(asset.id)}/media?download=1`,
 });
 
 export const createCanvasProjectMediaHandler = (deps: {
   readAsset: (id: string) => CanvasProjectAsset | null;
   canAccessCanvas: (canvasId: string, userId: string) => boolean;
-  signedUrl: (asset: CanvasProjectAsset, download: boolean) => string | Promise<string>;
+  signedUrl: (asset: CanvasProjectAsset, download: boolean, thumbnail: boolean) => string | Promise<string>;
   cacheControl: string;
 }): RequestHandler => async (req, res) => {
   try {
@@ -116,6 +117,8 @@ export const createCanvasProjectMediaHandler = (deps: {
     if (asset.status !== "ready") return res.status(asset.status === "copying" ? 425 : 409).json({ error: asset.status === "copying" ? "画布素材正在归档" : "画布素材归档失败" });
     res.setHeader("Cache-Control", deps.cacheControl);
     res.setHeader("Vary", "Cookie");
-    res.redirect(302, await deps.signedUrl(asset, req.query.download === "1"));
+    const download = req.query.download === "1";
+    const thumbnail = !download && asset.kind === "image" && req.query.variant === "thumbnail";
+    res.redirect(302, await deps.signedUrl(asset, download, thumbnail));
   } catch { res.status(502).json({ error: "画布素材暂时无法读取" }); }
 };
