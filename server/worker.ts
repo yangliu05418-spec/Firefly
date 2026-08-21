@@ -90,8 +90,8 @@ worker.on("failed", async (job, error) => {
     await saveTask({ ...task, status: "failed", error: error.message, updatedAt: Date.now() });
     const canvasJob = users.readCanvasJobByProviderTask(task.id);
     if (canvasJob && canvasJob.status !== "cancelled") {
-      const failed = users.updateCanvasJob(canvasJob.id, { status: "failed", error: error.message.slice(0, 500) });
-      await connection.publish(`canvas:events:${canvasJob.canvasId}`, JSON.stringify({ type: "canvas_job", job: failed }));
+      const failed = users.transitionActiveCanvasJob(canvasJob.id, { status: "failed", error: error.message.slice(0, 500) });
+      if (failed) await connection.publish(`canvas:events:${canvasJob.canvasId}`, JSON.stringify({ type: "canvas_job", job: failed }));
     }
     console.error(JSON.stringify({ type: "generation_failed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, providerId: task.providerId, attempts: job.attemptsMade, message: error.message }));
   } catch (handlerError) {

@@ -421,7 +421,7 @@ export class UserStore {
         model=excluded.model, mode=excluded.mode, ratio=excluded.ratio, resolution=excluded.resolution, duration=excluded.duration,
         request_json=excluded.request_json, source_video_url=excluded.source_video_url, source_video_expires_at=excluded.source_video_expires_at,
         error=excluded.error, fetch_task_id=excluded.fetch_task_id, media_attempts=excluded.media_attempts, media_last_error=excluded.media_last_error,
-        updated_at=excluded.updated_at, deleted_at=excluded.deleted_at
+        updated_at=excluded.updated_at, deleted_at=COALESCE(generation_tasks.deleted_at, excluded.deleted_at)
     `).run(
       task.id, task.sessionId ?? null, task.ownerId ?? null, task.visibility ?? (task.ownerId ? "private" : "shared"), task.providerId ?? null,
       task.status, task.mediaStatus ?? "none", task.mediaRevision ?? 0, task.prompt, task.model, task.mode, task.ratio,
@@ -429,7 +429,7 @@ export class UserStore {
       task.sourceVideoExpiresAt ?? null, task.error ?? null, task.fetchTaskId ?? null,
       task.mediaAttempts ?? 0, task.mediaLastError ?? null, task.createdAt, task.updatedAt, task.deletedAt ?? null
     );
-    return task;
+    return this.readTask(task.id, true)!;
   }
 
   readTask(id: string, includeDeleted = false) {
@@ -560,6 +560,27 @@ export class UserStore {
   readMedia(id: string) { return mapMedia(this.database.prepare("SELECT * FROM media_objects WHERE id = ?").get(id) as MediaRow | undefined); }
   readUpload(uploadId: string) { return mapMedia(this.database.prepare("SELECT * FROM media_objects WHERE upload_id = ? AND kind = 'input' AND status = 'ready'").get(uploadId) as MediaRow | undefined); }
   readTaskMedia(taskId: string, kind: "output" | "preview" | "poster") { return mapMedia(this.database.prepare("SELECT * FROM media_objects WHERE task_id = ? AND kind = ? AND status = 'ready' ORDER BY created_at DESC LIMIT 1").get(taskId, kind) as MediaRow | undefined); }
+
+  commitTaskMediaIfActive(taskId: string, media: MediaObject, finalizeOutput = false) {
+    return this.database.transaction(() => {
+      const task = this.readTask(taskId, true);
+      if (!task || task.deletedAt) return null;
+      if (media.taskId !== taskId || media.ownerId !== task.ownerId || media.status !== "ready") throw new Error("任务媒体归属或状态不一致");
+      if (finalizeOutput && media.kind !== "output") throw new Error("只有成片可以完成媒体归档");
+      this.upsertMedia(media);
+      const now = Date.now();
+      const result = finalizeOutput
+        ? this.database.prepare(`
+            UPDATE generation_tasks
+            SET status = 'succeeded', media_status = 'ready', media_revision = media_revision + 1,
+                media_last_error = NULL, updated_at = ?
+            WHERE id = ? AND deleted_at IS NULL
+          `).run(now, taskId)
+        : this.database.prepare("UPDATE generation_tasks SET media_revision = media_revision + 1, updated_at = ? WHERE id = ? AND deleted_at IS NULL").run(now, taskId);
+      if (!result.changes) return null;
+      return this.readTask(taskId)!;
+    })();
+  }
 
   createImageGeneration(task: ImageGenerationTask) {
     this.database.prepare(`
@@ -844,6 +865,14 @@ export class UserStore {
       .run(status, Date.now(), sourceType, sourceId).changes;
   }
 
+  softDeleteCanvasProjectAssetBySource(canvasId: string, ownerId: string, sourceType: CanvasProjectAsset["sourceType"], sourceId: string) {
+    const now = Date.now();
+    return this.database.prepare(`
+      UPDATE canvas_project_assets SET deleted_at = ?, updated_at = ?
+      WHERE canvas_id = ? AND owner_id = ? AND source_type = ? AND source_id = ? AND deleted_at IS NULL
+    `).run(now, now, canvasId, ownerId, sourceType, sourceId).changes > 0;
+  }
+
   listCanvasProjectAssets(canvasId: string, ownerId: string, limit = 100, before = Number.MAX_SAFE_INTEGER, beforeId = "\uffff") {
     return (this.database.prepare(`
       SELECT * FROM canvas_project_assets
@@ -900,6 +929,77 @@ export class UserStore {
       patch.cancelledAt ?? current.cancelledAt ?? null, id,
     );
     return this.readCanvasJob(id)!;
+  }
+
+  transitionActiveCanvasJob(id: string, patch: Partial<Pick<CanvasJob, "status" | "resultAssetId" | "providerTaskId" | "partialText">> & { error?: string | null }) {
+    const current = this.readCanvasJob(id);
+    if (!current || !["queued", "running"].includes(current.status)) return null;
+    const updatedAt = Date.now();
+    const result = this.database.prepare(`
+      UPDATE canvas_jobs SET status = ?, result_asset_id = ?, provider_task_id = ?, partial_text = ?, error = ?, updated_at = ?
+      WHERE id = ? AND status IN ('queued', 'running')
+    `).run(
+      patch.status ?? current.status, patch.resultAssetId ?? current.resultAssetId ?? null,
+      patch.providerTaskId ?? current.providerTaskId ?? null, patch.partialText ?? current.partialText,
+      patch.error === undefined ? current.error ?? null : patch.error, updatedAt, id,
+    );
+    return result.changes ? this.readCanvasJob(id)! : null;
+  }
+
+  cancelCanvasJob(id: string) {
+    return this.database.transaction(() => {
+      const updatedAt = Date.now();
+      const result = this.database.prepare(`
+        UPDATE canvas_jobs SET status = 'cancelled', error = NULL, updated_at = ?, cancelled_at = ?
+        WHERE id = ? AND status IN ('queued', 'running')
+      `).run(updatedAt, updatedAt, id);
+      return { changed: result.changes > 0, job: this.readCanvasJob(id) };
+    })();
+  }
+
+  completeCanvasGeneratedJob(id: string, asset: CanvasProjectAsset) {
+    return this.database.transaction(() => {
+      const current = this.readCanvasJob(id);
+      if (!current || !["queued", "running"].includes(current.status)) return null;
+      if (asset.canvasId !== current.canvasId || asset.ownerId !== current.ownerId || asset.sourceType !== "generated") throw new Error("画布生成结果归属不一致");
+      const media = this.readMedia(asset.sourceId);
+      if (!media || media.ownerId !== current.ownerId || media.kind !== "generated" || media.status !== "ready") throw new Error("画布生成媒体尚未就绪");
+      const storedAsset = this.upsertCanvasProjectAsset(asset);
+      const result = this.database.prepare(`
+        UPDATE canvas_jobs SET status = 'succeeded', result_asset_id = ?, error = NULL, updated_at = ?
+        WHERE id = ? AND status IN ('queued', 'running')
+      `).run(storedAsset.id, Date.now(), id);
+      if (!result.changes) return null;
+      return { job: this.readCanvasJob(id)!, asset: storedAsset };
+    })();
+  }
+
+  attachCanvasProjectAssetToActiveJob(id: string, asset: CanvasProjectAsset, complete: boolean) {
+    return this.database.transaction(() => {
+      const current = this.readCanvasJob(id);
+      if (!current || !["queued", "running"].includes(current.status)) return null;
+      if (asset.canvasId !== current.canvasId || asset.ownerId !== current.ownerId) throw new Error("画布任务素材归属不一致");
+      if (asset.sourceType === "generation" && asset.sourceId !== current.providerTaskId) throw new Error("画布视频任务来源不一致");
+      const storedAsset = this.upsertCanvasProjectAsset(asset);
+      const result = this.database.prepare(`
+        UPDATE canvas_jobs SET status = ?, result_asset_id = ?, error = NULL, updated_at = ?
+        WHERE id = ? AND status IN ('queued', 'running')
+      `).run(complete ? "succeeded" : current.status, storedAsset.id, Date.now(), id);
+      if (!result.changes) return null;
+      return { job: this.readCanvasJob(id)!, asset: storedAsset };
+    })();
+  }
+
+  markUnreferencedGeneratedMediaForDeletion(id: string, ownerId: string) {
+    const result = this.database.prepare(`
+      UPDATE media_objects SET status = 'delete_pending', updated_at = ?
+      WHERE id = ? AND owner_id = ? AND kind = 'generated' AND status = 'ready'
+        AND NOT EXISTS (
+          SELECT 1 FROM canvas_project_assets
+          WHERE source_type = 'generated' AND source_id = media_objects.id AND deleted_at IS NULL
+        )
+    `).run(Date.now(), id, ownerId);
+    return result.changes > 0;
   }
 
   createCanvasMontage(montage: CanvasMontage) {
