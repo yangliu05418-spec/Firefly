@@ -4,14 +4,13 @@ import { config } from "./config.js";
 import { shouldRecoverArchiveHandoff } from "./archive-state.js";
 import type { StoredTask } from "./db.js";
 import { validateGeneration, type GenerationInput } from "./provider.js";
-import { canvasQueue, generationQueue, imageGenerationQueue, mediaQueue, readTask, saveTask } from "./redis.js";
+import { mediaQueue, readTask, saveTask } from "./redis.js";
 import { AssetRegistrationRejected, isRetryableAssetRejection, prepareProviderAssets } from "./asset-registration.js";
 import { users } from "./store.js";
 import { closeWorkersWithin } from "./shutdown.js";
 import { createImageGenerationWorker } from "./image-generation-worker.js";
 import { shouldFinalizeJobFailure } from "./job-failure.js";
 import { startWorkerHeartbeat } from "./worker-heartbeat.js";
-import { startAsyncJobOutboxDispatcher } from "./async-job-outbox.js";
 import { resolveCanvasGenerationReferences } from "./canvas-project-assets.js";
 import { submitProviderTaskOnce } from "./generation-submission.js";
 import { pollProviderTaskUntilTerminal, ProviderPollingTerminalError } from "./provider-polling.js";
@@ -119,11 +118,6 @@ const worker = new Worker<{ input: unknown }>("generation", async (job) => {
 const imageWorker = createImageGenerationWorker(connection);
 await Promise.all([worker.waitUntilReady(), imageWorker.waitUntilReady()]);
 const heartbeat = await startWorkerHeartbeat(connection, "generation");
-const stopOutboxDispatcher = startAsyncJobOutboxDispatcher(users, {
-  generation: generationQueue,
-  "image-generation": imageGenerationQueue,
-  "canvas-jobs": canvasQueue,
-});
 
 worker.on("failed", async (job, error) => {
   if (!job?.id) return;
@@ -154,7 +148,6 @@ let shuttingDown = false;
 const shutdown = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
-  await stopOutboxDispatcher();
   await heartbeat.stop();
   const graceful = await closeWorkersWithin([worker, imageWorker], config.shutdownGraceMs);
   console.info(JSON.stringify({ type: "worker_shutdown", at: new Date().toISOString(), worker: "generation", graceful }));
