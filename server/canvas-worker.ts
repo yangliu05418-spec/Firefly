@@ -3,7 +3,7 @@ import { Worker, type Job } from "bullmq";
 import { config } from "./config.js";
 import { users } from "./store.js";
 import { redis } from "./redis.js";
-import { computeImageSize, imageModelById } from "./image-models.js";
+import { imageModelById, openRouterResolution } from "./image-models.js";
 import { downloadImageBuffer, generateCanvasText, generateSingleImage } from "./openrouter.js";
 import { storeGeneratedImage } from "./generated-media.js";
 import { canvasProjectAssetProviderUrl } from "./canvas-project-assets.js";
@@ -49,8 +49,7 @@ const processCanvasJob = async (bullJob: Job<CanvasQueuePayload>) => {
       if (!asset || asset.canvasId !== record.canvasId || asset.ownerId !== record.ownerId) throw new Error("参考素材不存在");
       return canvasProjectAssetProviderUrl(asset);
     });
-    const size = computeImageSize(payload.ratio as never, Number(payload.resolution), spec.maxSize);
-    const url = await generateSingleImage({ model: payload.model, prompt: payload.prompt, references, size });
+    const url = await generateSingleImage({ model: payload.model, prompt: payload.prompt, references, ratio: payload.ratio, resolution: openRouterResolution(payload.resolution) });
     if (users.readCanvasJob(record.id)?.status === "cancelled") return;
     const buffer = await downloadImageBuffer(url);
     if (users.readCanvasJob(record.id)?.status === "cancelled") return;

@@ -22,7 +22,7 @@ export const IMAGE_MODELS: ImageModelSpec[] = [
   {
     id: "google/gemini-3.1-flash-lite-image",
     name: "Google: Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image)",
-    resolutions: ["512", "768", "1024"],
+    resolutions: ["1024"],
     defaultResolution: "1024",
     maxCount: 4,
     maxSize: 1024,
@@ -80,6 +80,15 @@ export const IMAGE_MODELS: ImageModelSpec[] = [
 export const DEFAULT_IMAGE_MODEL = "google/gemini-3.1-flash-lite-image";
 
 export const imageModelById = (id: string): ImageModelSpec | undefined => IMAGE_MODELS.find((model) => model.id === id);
+
+/** OpenRouter Images API accepts normalized resolution tiers, not arbitrary pixels. */
+export const openRouterResolution = (value: string): "512" | "1K" | "2K" | "4K" => {
+  const pixels = Number(value);
+  if (!Number.isFinite(pixels) || pixels <= 512) return "512";
+  if (pixels <= 1024) return "1K";
+  if (pixels <= 2048) return "2K";
+  return "4K";
+};
 
 /** 比例 + 分辨率档位 → 具体尺寸（WxH，16 的倍数，不超过模型最长边上限） */
 export const computeImageSize = (ratio: string, tier: number, maxSize: number): string => {

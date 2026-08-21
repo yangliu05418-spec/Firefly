@@ -10,6 +10,17 @@ export const mediaQueue = new Queue("media", { connection: redis });
 export const previewQueue = new Queue("preview", { connection: redis });
 export const assetQueue = new Queue("asset-ingest", { connection: redis });
 export const canvasQueue = new Queue("canvas-jobs", { connection: redis });
+export const imageGenerationQueue = new Queue("image-generation", { connection: redis });
+
+export type ImageGenerationQueuePayload = {
+  ownerId: string;
+  model: string;
+  prompt: string;
+  ratio: string;
+  resolution: string;
+  count: number;
+  referenceUploadIds: string[];
+};
 
 export type { StoredTask } from "./db.js";
 

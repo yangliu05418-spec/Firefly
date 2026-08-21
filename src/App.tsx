@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Archive, ArrowRight, AudioLines, Check, CheckSquare2, ChevronDown, ChevronRight, Clock3, Clapperboard, Copy, Download, Film, Home, ImageIcon, Layers3, LayoutGrid, Library, LoaderCircle, LogOut, Menu, MessageSquare, PanelLeftClose, Pencil, Play, Plus, RefreshCw, Search, Send, Settings2, Sparkles, Square, Trash2, Upload, Video, WandSparkles, X } from "lucide-react";
 import { api, inferUploadType, listenForSignedOut, notifySignedOut, uploadFile } from "./api";
-import type { AssetCategory, CreationMode, ImageGenResponse, ImageModel, ImageResultBundle, LibraryAsset, LibraryGroup, ModelCapability, SessionUser, Task, UploadAsset } from "./types";
+import type { AssetCategory, CreationMode, CreationSession, ImageGenResponse, ImageModel, ImageResultBundle, LibraryAsset, LibraryGroup, ModelCapability, SessionUser, Task, UploadAsset } from "./types";
 import { materializePromptReferences, promptAssetLabel, promptAssetMarker } from "./prompt-references";
 import { clearEditorSelection } from "./prompt-selection";
 import { CanvasProjectList } from "./features/canvas/CanvasProjectList";
@@ -203,7 +203,7 @@ function PromptEditor({ value, placeholder, assets, disabled, attach, change }: 
   return <div className="prompt-editor-wrap"><div ref={editor} className="prompt-editor" contentEditable role="textbox" aria-multiline="true" aria-label="创作提示词" data-placeholder={placeholder} suppressContentEditableWarning onInput={() => { sync(); detectMention(); }} onKeyUp={(event) => !["ArrowDown", "ArrowUp", "Enter", "Escape"].includes(event.key) && detectMention()} onKeyDown={keyDown} onBlur={(event) => { clearEditorSelection(event.currentTarget); window.setTimeout(() => setOpen(false), 120); }} onPaste={(event) => { event.preventDefault(); document.execCommand("insertText", false, event.clipboardData.getData("text/plain")); }} />{popup}</div>;
 }
 
-function Composer({ models, compact, onCreated, onImagesGenerated }: { models: ModelCapability[]; compact: boolean; onCreated: (task: Task) => void; onImagesGenerated?: (bundle: ImageResultBundle) => void }) {
+function Composer({ models, compact, sessionId, onCreated, onImagesGenerated }: { models: ModelCapability[]; compact: boolean; sessionId: string; onCreated: (task: Task) => void; onImagesGenerated?: (bundle: ImageResultBundle) => void }) {
   const defaultModel = models[0];
   const [modelId, setModelId] = useState(defaultModel?.id ?? "");
   const model = models.find((item) => item.id === modelId) ?? defaultModel;
@@ -356,15 +356,14 @@ function Composer({ models, compact, onCreated, onImagesGenerated }: { models: M
       if (engine === "image") {
         const spec = imageModels.find((item) => item.id === imageModelId) ?? imageModels[0];
         const submittedPrompt = prompt.trim();
-        pendingImage = { id: crypto.randomUUID(), modelName: spec?.name ?? imageModelId, ratio: imageRatio, resolution: imageResolution, prompt: submittedPrompt, items: [], createdAt: Date.now(), status: "generating", requestedCount: imageCount };
+        pendingImage = { id: crypto.randomUUID(), sessionId, modelName: spec?.name ?? imageModelId, ratio: imageRatio, resolution: imageResolution, prompt: submittedPrompt, items: [], createdAt: Date.now(), status: "generating", requestedCount: imageCount };
         onImagesGenerated?.(pendingImage);
         const references = assets.filter((asset) => asset.type === "image" && asset.uploadId).map((asset) => asset.uploadId!);
-        const result = await api.post<ImageGenResponse>("/api/image-generation", { requestId: pendingImage.id, model: imageModelId, ratio: imageRatio, resolution: imageResolution, count: imageCount, prompt: submittedPrompt, references });
-        onImagesGenerated?.({ ...pendingImage, status: "succeeded", items: result.Items ?? [], failed: result.Failed });
+        await api.post<ImageGenResponse>("/api/image-generation", { requestId: pendingImage.id, sessionId, model: imageModelId, ratio: imageRatio, resolution: imageResolution, count: imageCount, prompt: submittedPrompt, references });
         setPrompt(""); clearAttachedAssets();
         return;
       }
-      const task = await api.post<Task>("/api/generations", { prompt: materializePromptReferences(prompt, assets), model: model.id, mode, ratio, resolution, duration, generateAudio: model.supportsAudio && generateAudio, seed, cameraFixed, watermark, outputFormat: "mp4", assets: assets.map(({ preview, progress, size, ...asset }) => asset) });
+      const task = await api.post<Task>("/api/generations", { sessionId, prompt: materializePromptReferences(prompt, assets), model: model.id, mode, ratio, resolution, duration, generateAudio: model.supportsAudio && generateAudio, seed, cameraFixed, watermark, outputFormat: "mp4", assets: assets.map(({ preview, progress, size, ...asset }) => asset) });
       onCreated(task); setPrompt(""); clearAttachedAssets();
     } catch (e) {
       const message = e instanceof Error ? e.message : "无法创建任务";
@@ -749,7 +748,7 @@ function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: Library
   </section>;
 }
 
-function AssetArchive({ tasks, models, onCreate, onDelete, onInsertCanvas }: { tasks: Task[]; models: ModelCapability[]; onCreate: () => void; onDelete: (task: Task) => void; onInsertCanvas: (target: { kind: "video"; task: Task } | { kind: "image"; asset: LibraryAsset }) => void }) {
+function AssetArchive({ tasks, imageResults, models, onCreate, onDelete, onRemoveImage, onInsertCanvas }: { tasks: Task[]; imageResults: ImageResultBundle[]; models: ModelCapability[]; onCreate: () => void; onDelete: (task: Task) => void; onRemoveImage: (id: string) => void; onInsertCanvas: (target: { kind: "video"; task: Task } | { kind: "image"; asset: LibraryAsset } | { kind: "generated"; mediaId: string; title: string }) => void }) {
   const [assetView, setAssetView] = useState<"videos" | "images">("videos"); const [query, setQuery] = useState(""); const [preview, setPreview] = useState<Task | null>(null); const [downloadNotice, setDownloadNotice] = useState<{ task: Task; message: string } | null>(null); const noticeTimer = useRef<number | null>(null); const playbackPositions = useRef(new Map<string, number>());
   const archived = useMemo(() => tasks.filter((task) => task.visibility !== "shared" && task.status === "succeeded" && task.mediaStatus === "ready" && task.videoUrl), [tasks]);
   const filtered = useMemo(() => archived.filter((task) => (task.prompt || "参考素材生成").toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())), [archived, query]);
@@ -772,7 +771,7 @@ function AssetArchive({ tasks, models, onCreate, onDelete, onInsertCanvas }: { t
   return <div className="archive-page">
     <header className="archive-heading"><div><span>Firefly archive</span><h1>我的资产</h1><p>{assetView === "videos" ? "已完成并归档的视频会自动收录在这里。" : "管理只属于你的参考图片素材。"}</p></div>{assetView === "videos" && archived.length > 0 && <label className="archive-search"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索视频" aria-label="搜索视频资产" /></label>}</header>
     <nav className="asset-tabs" aria-label="资产类型"><button className={assetView === "videos" ? "active" : ""} aria-current={assetView === "videos" ? "page" : undefined} onClick={() => setAssetView("videos")}><Film /> 视频资产</button><button className={assetView === "images" ? "active" : ""} aria-current={assetView === "images" ? "page" : undefined} onClick={() => { setAssetView("images"); setPreview(null); }}><ImageIcon /> 图片资产</button></nav>
-    {assetView === "images" ? <ImageAssetManager onInsertCanvas={(asset) => onInsertCanvas({ kind: "image", asset })} /> : <>{!archived.length ? <div className="archive-empty"><div><Archive /></div><h2>第一支成片会出现在这里</h2><p>完成一次视频生成后，Firefly 会自动整理预览、下载与创作参数。</p><button onClick={onCreate}><Plus /> 开始创作</button></div>
+    {assetView === "images" ? <><section className="generated-image-assets"><header><span>Generated archive</span><h2>生成图片</h2><p>所有创作会话的生成结果都会汇总在这里。</p></header>{imageResults.length ? <ImageResultsGallery results={imageResults} onInsertCanvas={(target) => onInsertCanvas(target)} onRemove={onRemoveImage} /> : <div className="generated-image-assets__empty"><ImageIcon /><span>生成的第一张图片会出现在这里</span></div>}</section><ImageAssetManager onInsertCanvas={(asset) => onInsertCanvas({ kind: "image", asset })} /></> : <>{!archived.length ? <div className="archive-empty"><div><Archive /></div><h2>第一支成片会出现在这里</h2><p>完成一次视频生成后，Firefly 会自动整理预览、下载与创作参数。</p><button onClick={onCreate}><Plus /> 开始创作</button></div>
       : !filtered.length ? <div className="archive-empty archive-empty--search"><Search /><h2>没有找到相关视频</h2><p>换一个关键词，或清除当前搜索。</p><button onClick={() => setQuery("")}>清除搜索</button></div>
       : <div className="archive-grid">{filtered.map((task) => { const model = models.find((item) => item.id === task.model); return <article className="archive-card" key={task.id}>
         <button className="archive-card__media" onClick={() => setPreview(task)} aria-label={`预览 ${task.prompt || "生成视频"}`}>
@@ -792,7 +791,7 @@ function ImageResultsGallery({ results, onInsertCanvas, onRemove }: { results: I
       <header><span className="image-result__badge">{status === "generating" ? <WandSparkles /> : status === "failed" ? <X /> : <ImageIcon />} {status === "generating" ? "正在生成" : status === "failed" ? "生成未完成" : "图片生成"}</span><b>{result.modelName}</b><small>{result.ratio}{result.resolution ? ` · ${result.resolution}px` : ""} · {count} 张 · {new Date(result.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</small></header>
       {result.prompt && <p className="image-result__prompt" title={result.prompt}>「{result.prompt}」</p>}
       {status === "generating" ? <div className="image-result__pending" role="status"><span className="image-result__pending-mark"><WandSparkles /></span><span><b>请求已接收</b><small>正在生成画面，完成后会自动显示在这里。</small></span><div className="image-result__pending-cells" aria-hidden="true">{Array.from({ length: Math.min(4, Math.max(1, count)) }, (_, index) => <i key={index} />)}</div></div> : status === "failed" ? <div className="image-result__failure" role="alert"><X /><span><b>这次没有生成成功</b><small>{result.error ?? "请检查网络或调整参数后重新生成。"}</small></span></div> : <div className="image-result__grid">
-        {result.items.map((item) => <figure key={item.mediaId}>
+        {result.items.map((item) => <figure key={item.mediaId} style={{ aspectRatio: result.ratio.replace(":", " / ") }}>
           <img src={"/api/image-media/" + encodeURIComponent(item.mediaId)} alt={result.prompt || "生成图片"} loading="lazy" decoding="async" />
           <figcaption>
             <a href={"/api/image-media/" + encodeURIComponent(item.mediaId) + "?download=1"} download title="下载图片"><Download /> 下载</a>
@@ -808,53 +807,73 @@ function ImageResultsGallery({ results, onInsertCanvas, onRemove }: { results: I
 
 function Studio({ user, route, navigate, logout }: { user: SessionUser; route: string; navigate: (path: string) => void; logout: () => void }) {
   const view = route.startsWith("/studio/canvas") ? "canvas" : route === "/studio/assets" ? "assets" : "create";
-  const [models, setModels] = useState<ModelCapability[]>([]); const [tasks, setTasks] = useState<Task[]>([]); const [sidebar, setSidebar] = useState(() => window.innerWidth > 760); const [loading, setLoading] = useState(true); const [loadError, setLoadError] = useState(""); const [syncIssue, setSyncIssue] = useState(false); const [creatingNew, setCreatingNew] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<Task | null>(null); const [deleting, setDeleting] = useState(false); const [deleteError, setDeleteError] = useState(""); const [profileOpen, setProfileOpen] = useState(false); const [featureNotice, setFeatureNotice] = useState<{ kind: "atlas"; nonce: number; leaving?: boolean } | null>(null); const [pendingCanvasCreate, setPendingCanvasCreate] = useState(false); const [canvasInsertTarget, setCanvasInsertTarget] = useState<{ kind: "video"; task: Task } | { kind: "image"; asset: LibraryAsset } | { kind: "generated"; mediaId: string; title: string } | null>(null); const [imageResults, setImageResults] = useState<ImageResultBundle[]>([]); const profileRef = useRef<HTMLDivElement>(null); const atlasExitTimer = useRef<number | undefined>(undefined); const atlasAutoTimer = useRef<number | undefined>(undefined);
-  const updateImageResult = (bundle: ImageResultBundle) => setImageResults((current) => current.some((item) => item.id === bundle.id) ? current.map((item) => item.id === bundle.id ? bundle : item) : [bundle, ...current]);
+  const routedSessionId = route.startsWith("/studio/sessions/") ? decodeURIComponent(route.slice("/studio/sessions/".length)) : "";
+  const [models, setModels] = useState<ModelCapability[]>([]); const [tasks, setTasks] = useState<Task[]>([]); const [assetTasks, setAssetTasks] = useState<Task[]>([]); const [sessions, setSessions] = useState<CreationSession[]>([]); const [sidebar, setSidebar] = useState(() => window.innerWidth > 760); const [loading, setLoading] = useState(true); const [loadError, setLoadError] = useState(""); const [syncIssue, setSyncIssue] = useState(false); const [creatingNew, setCreatingNew] = useState(false); const [creatingSession, setCreatingSession] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Task | null>(null); const [deleting, setDeleting] = useState(false); const [deleteError, setDeleteError] = useState(""); const [sessionDeleteTarget, setSessionDeleteTarget] = useState<CreationSession | null>(null); const [editingSessionId, setEditingSessionId] = useState<string | null>(null); const [sessionTitleDraft, setSessionTitleDraft] = useState(""); const [sessionBusy, setSessionBusy] = useState(false); const [profileOpen, setProfileOpen] = useState(false); const [featureNotice, setFeatureNotice] = useState<{ kind: "atlas"; nonce: number; leaving?: boolean } | null>(null); const [pendingCanvasCreate, setPendingCanvasCreate] = useState(false); const [canvasInsertTarget, setCanvasInsertTarget] = useState<{ kind: "video"; task: Task } | { kind: "image"; asset: LibraryAsset } | { kind: "generated"; mediaId: string; title: string } | null>(null); const [imageResults, setImageResults] = useState<ImageResultBundle[]>([]); const [assetImageResults, setAssetImageResults] = useState<ImageResultBundle[]>([]); const [selectedSessionId, setSelectedSessionId] = useState(""); const profileRef = useRef<HTMLDivElement>(null); const sessionRequestSequence = useRef(0); const atlasExitTimer = useRef<number | undefined>(undefined); const atlasAutoTimer = useRef<number | undefined>(undefined);
+  const activeSessionId = routedSessionId || selectedSessionId || sessions[0]?.id || "";
+  const markSessionUsed = (prompt: string) => setSessions((current) => current.map((session) => session.id === activeSessionId ? { ...session, title: session.title === "新创作" && prompt.trim() ? prompt.trim().slice(0, 40) : session.title, updatedAt: Date.now() } : session).sort((a, b) => b.updatedAt - a.updatedAt));
+  const mergeImageResult = (current: ImageResultBundle[], bundle: ImageResultBundle) => current.some((item) => item.id === bundle.id) ? current.map((item) => item.id === bundle.id ? bundle : item) : [bundle, ...current];
+  const updateImageResult = (bundle: ImageResultBundle) => { setImageResults((current) => mergeImageResult(current, bundle)); setAssetImageResults((current) => mergeImageResult(current, bundle)); };
   const removeImageResult = async (id: string) => {
-    const removed = imageResults.find((item) => item.id === id);
+    const removed = assetImageResults.find((item) => item.id === id);
     setImageResults((current) => current.filter((item) => item.id !== id));
+    setAssetImageResults((current) => current.filter((item) => item.id !== id));
     try { await api.delete(`/api/image-generations/${encodeURIComponent(id)}`); }
     catch (error) {
-      if (removed) updateImageResult(removed);
+      if (removed) { setAssetImageResults((current) => mergeImageResult(current, removed)); if (removed.sessionId === activeSessionId) setImageResults((current) => mergeImageResult(current, removed)); }
       setSyncIssue(true);
       console.warn("image history delete failed", error);
     }
   };
   const [now, setNow] = useState(Date.now());
   const activeTasks = useMemo(() => tasks.filter((task) => !["succeeded", "failed"].includes(task.status) || task.mediaStatus === "archiving"), [tasks]);
-  const privateTasks = useMemo(() => tasks.filter((task) => task.visibility !== "shared"), [tasks]);
-  const sharedTasks = useMemo(() => tasks.filter((task) => task.visibility === "shared"), [tasks]);
-  const archivedCount = useMemo(() => privateTasks.filter((task) => task.status === "succeeded" && task.videoUrl).length, [privateTasks]);
+  const archivedCount = useMemo(() => assetTasks.filter((task) => task.visibility !== "shared" && task.status === "succeeded" && task.videoUrl).length, [assetTasks]);
   const latestVideoTaskId = useMemo(() => tasks.find((task) => task.status === "succeeded" && task.videoUrl && (!task.videoExpiresAt || task.videoExpiresAt > now))?.id, [tasks, now]);
   const refresh = async () => {
-    const [taskResult, imageResult] = await Promise.allSettled([api.get<Task[]>("/api/generations"), api.get<ImageResultBundle[]>("/api/image-generations")]);
+    if (!activeSessionId) return;
+    const sequence = ++sessionRequestSequence.current;
+    const query = `?sessionId=${encodeURIComponent(activeSessionId)}`;
+    const [taskResult, imageResult] = await Promise.allSettled([api.get<Task[]>(`/api/generations${query}`), api.get<ImageResultBundle[]>(`/api/image-generations${query}`)]);
+    if (sequence !== sessionRequestSequence.current) return;
     if (taskResult.status === "fulfilled") { setTasks(taskResult.value); setLoadError(""); }
-    if (imageResult.status === "fulfilled") setImageResults(imageResult.value);
+    if (imageResult.status === "fulfilled") { setImageResults(imageResult.value); setAssetImageResults((current) => imageResult.value.reduce(mergeImageResult, current)); }
     setSyncIssue(taskResult.status === "rejected" || imageResult.status === "rejected");
     setLoading(false);
   };
-  const initialLoad = () => {
+  const initialLoad = async () => {
     setLoading(true); setLoadError("");
-    Promise.all([api.get<ModelCapability[]>("/api/models"), api.get<Task[]>("/api/generations")])
-      .then(async ([m, t]) => { setModels(m); setTasks(t); try { setImageResults(await api.get<ImageResultBundle[]>("/api/image-generations")); setSyncIssue(false); } catch { setSyncIssue(true); } })
-      .catch((error) => setLoadError(error instanceof Error ? error.message : "创作台暂时无法载入"))
-      .finally(() => setLoading(false));
+    try {
+      const [m, allTasks, allImages, loadedSessions] = await Promise.all([api.get<ModelCapability[]>("/api/models"), api.get<Task[]>("/api/generations"), api.get<ImageResultBundle[]>("/api/image-generations"), api.get<CreationSession[]>("/api/creation-sessions")]);
+      let availableSessions = loadedSessions;
+      if (!availableSessions.length) availableSessions = [await api.post<CreationSession>("/api/creation-sessions", {})];
+      const target = availableSessions.some((session) => session.id === routedSessionId) ? routedSessionId : availableSessions[0].id;
+      setModels(m); setAssetTasks(allTasks); setAssetImageResults(allImages); setSessions(availableSessions); setSelectedSessionId(target); setTasks(allTasks.filter((task) => task.sessionId === target)); setImageResults(allImages.filter((result) => result.sessionId === target)); setSyncIssue(false);
+      if (view === "create" && route !== `/studio/sessions/${encodeURIComponent(target)}`) navigate(`/studio/sessions/${encodeURIComponent(target)}`);
+    } catch (error) { setLoadError(error instanceof Error ? error.message : "创作台暂时无法载入"); }
+    finally { setLoading(false); }
   };
-  useEffect(initialLoad, []);
+  useEffect(() => { void initialLoad(); }, []);
+  useEffect(() => { if (!loading && view === "create" && activeSessionId) void refresh(); }, [activeSessionId, view]);
   useEffect(() => {
     if (!imageResults.some((result) => result.status === "generating")) return;
-    const timer = window.setInterval(() => void api.get<ImageResultBundle[]>("/api/image-generations").then(setImageResults).catch(() => setSyncIssue(true)), document.hidden ? 15_000 : 2_000);
+    const poll = () => {
+      const sequence = sessionRequestSequence.current;
+      void api.get<ImageResultBundle[]>(`/api/image-generations?sessionId=${encodeURIComponent(activeSessionId)}`).then((results) => {
+        if (sequence !== sessionRequestSequence.current) return;
+        setImageResults(results); setAssetImageResults((current) => results.reduce(mergeImageResult, current));
+      }).catch(() => { if (sequence === sessionRequestSequence.current) setSyncIssue(true); });
+    };
+    const timer = window.setInterval(poll, document.hidden ? 15_000 : 2_000);
     return () => window.clearInterval(timer);
-  }, [imageResults.some((result) => result.status === "generating")]);
+  }, [activeSessionId, imageResults.some((result) => result.status === "generating")]);
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 60000); return () => window.clearInterval(timer); }, []);
   useEffect(() => () => { if (atlasExitTimer.current) window.clearTimeout(atlasExitTimer.current); if (atlasAutoTimer.current) window.clearTimeout(atlasAutoTimer.current); }, []);
   useEffect(() => {
     const close = (event: PointerEvent) => { if (profileRef.current && !profileRef.current.contains(event.target as Node)) setProfileOpen(false); };
-    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") { setProfileOpen(false); if (!deleting) setDeleteTarget(null); } };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") { setProfileOpen(false); setEditingSessionId(null); if (!deleting) setDeleteTarget(null); if (!sessionBusy) setSessionDeleteTarget(null); } };
     document.addEventListener("pointerdown", close); document.addEventListener("keydown", escape);
     return () => { document.removeEventListener("pointerdown", close); document.removeEventListener("keydown", escape); };
-  }, [deleting]);
+  }, [deleting, sessionBusy]);
   useEffect(() => {
     if (!activeTasks.length) return;
     let disposed = false; let timer: number | undefined;
@@ -873,8 +892,22 @@ function Studio({ user, route, navigate, logout }: { user: SessionUser; route: s
     schedule(); document.addEventListener("visibilitychange", resume); window.addEventListener("online", resume);
     return () => { if (timer) window.clearTimeout(timer); document.removeEventListener("visibilitychange", resume); window.removeEventListener("online", resume); };
   }, [activeTasks.length]);
-  const showCreate = (fresh = false) => { navigate("/studio"); setCreatingNew(fresh); setFeatureNotice(null); if (window.innerWidth <= 760) setSidebar(false); };
-  const showAssets = () => { navigate("/studio/assets"); setProfileOpen(false); setFeatureNotice(null); if (window.innerWidth <= 760) setSidebar(false); };
+  const openSession = async (session: CreationSession) => {
+    const sequence = ++sessionRequestSequence.current;
+    navigate(`/studio/sessions/${encodeURIComponent(session.id)}`); setSelectedSessionId(session.id); setCreatingNew(false); setFeatureNotice(null); setLoadError("");
+    const query = `?sessionId=${encodeURIComponent(session.id)}`;
+    try { const [nextTasks, nextImages] = await Promise.all([api.get<Task[]>(`/api/generations${query}`), api.get<ImageResultBundle[]>(`/api/image-generations${query}`)]); if (sequence !== sessionRequestSequence.current) return; setTasks(nextTasks); setImageResults(nextImages); setSyncIssue(false); }
+    catch { setSyncIssue(true); }
+    if (window.innerWidth <= 760) setSidebar(false);
+  };
+  const createSession = async () => {
+    if (creatingSession) return; setCreatingSession(true);
+    try { const session = await api.post<CreationSession>("/api/creation-sessions", {}); sessionRequestSequence.current += 1; setSessions((current) => [session, ...current]); setSelectedSessionId(session.id); setTasks([]); setImageResults([]); setCreatingNew(true); navigate(`/studio/sessions/${encodeURIComponent(session.id)}`); setSyncIssue(false); }
+    catch { setSyncIssue(true); }
+    finally { setCreatingSession(false); if (window.innerWidth <= 760) setSidebar(false); }
+  };
+  const showCreate = (fresh = false) => { if (fresh) { void createSession(); return; } const target = sessions.find((session) => session.id === activeSessionId) ?? sessions[0]; if (target) void openSession(target); else void createSession(); };
+  const showAssets = () => { navigate("/studio/assets"); setProfileOpen(false); setFeatureNotice(null); void Promise.all([api.get<Task[]>("/api/generations"), api.get<ImageResultBundle[]>("/api/image-generations")]).then(([videos, images]) => { setAssetTasks(videos); setAssetImageResults(images); }).catch(() => setSyncIssue(true)); if (window.innerWidth <= 760) setSidebar(false); };
   const showCanvas = () => { navigate("/studio/canvas"); setProfileOpen(false); setFeatureNotice(null); if (window.innerWidth <= 760) setSidebar(false); };
   const createCanvasFromSidebar = () => { setPendingCanvasCreate(true); showCanvas(); };
   const dismissAtlas = () => {
@@ -894,20 +927,22 @@ function Studio({ user, route, navigate, logout }: { user: SessionUser; route: s
       atlasExitTimer.current = window.setTimeout(() => setFeatureNotice(null), 700);
     }, 6400);
   };
-  const selectTask = (task: Task) => { showCreate(false); requestAnimationFrame(() => document.getElementById(`task-${task.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" })); };
   const requestDelete = (task: Task) => { setDeleteError(""); setDeleteTarget(task); };
-  const confirmDelete = async () => { if (!deleteTarget) return; setDeleting(true); setDeleteError(""); try { await api.delete(`/api/generations/${deleteTarget.id}`); setTasks((old) => old.filter((task) => task.id !== deleteTarget.id)); setDeleteTarget(null); } catch (error) { setDeleteError(error instanceof Error ? error.message : "删除失败，请稍后重试"); } finally { setDeleting(false); } };
-  const historySection = (label: string, items: Task[]) => <>{!!items.length && <><div className="sidebar-label">{label}</div><div className="history-list">{items.map((task) => <button key={task.id} onClick={() => selectTask(task)}><MessageSquare /><span><b>{task.prompt || "参考素材生成"}</b><small>{taskStatusText(task)} · {new Date(task.createdAt).toLocaleDateString("zh-CN")}</small></span></button>)}</div></>}</>;
+  const confirmDelete = async () => { if (!deleteTarget) return; setDeleting(true); setDeleteError(""); try { await api.delete(`/api/generations/${deleteTarget.id}`); setTasks((old) => old.filter((task) => task.id !== deleteTarget.id)); setAssetTasks((old) => old.filter((task) => task.id !== deleteTarget.id)); setDeleteTarget(null); } catch (error) { setDeleteError(error instanceof Error ? error.message : "删除失败，请稍后重试"); } finally { setDeleting(false); } };
+  const beginRenameSession = (session: CreationSession) => { setEditingSessionId(session.id); setSessionTitleDraft(session.title); };
+  const saveSessionTitle = async (session: CreationSession) => { const title = sessionTitleDraft.trim(); if (!title || title === session.title) { setEditingSessionId(null); return; } setSessionBusy(true); try { const updated = await api.patch<CreationSession>(`/api/creation-sessions/${encodeURIComponent(session.id)}`, { title }); setSessions((current) => current.map((item) => item.id === session.id ? updated : item)); setEditingSessionId(null); } catch { setSyncIssue(true); } finally { setSessionBusy(false); } };
+  const confirmDeleteSession = async () => { if (!sessionDeleteTarget) return; setSessionBusy(true); try { await api.delete(`/api/creation-sessions/${encodeURIComponent(sessionDeleteTarget.id)}`); const remaining = sessions.filter((session) => session.id !== sessionDeleteTarget.id); setSessions(remaining); setSessionDeleteTarget(null); if (sessionDeleteTarget.id === activeSessionId) { if (remaining[0]) await openSession(remaining[0]); else await createSession(); } } catch { setSyncIssue(true); } finally { setSessionBusy(false); } };
   return <main className={`studio ${sidebar ? "" : "studio--collapsed"}`}>
     <div className={`intelligence-aura ${featureNotice ? featureNotice.leaving ? "intelligence-aura--leaving" : "intelligence-aura--active" : ""}`} aria-hidden="true"><i className="aura-corner aura-corner--tl" /><i className="aura-corner aura-corner--tr" /><i className="aura-corner aura-corner--br" /><i className="aura-corner aura-corner--bl" /></div>
     <nav className="app-rail" aria-label="主要导航"><button className="rail-logo" aria-label="Firefly 创作台" onClick={() => showCreate(false)}><FireflyGlyph compact /></button><div className="rail-nav"><button className={view === "create" ? "active" : ""} aria-current={view === "create" ? "page" : undefined} onClick={() => showCreate(false)}><GenerateNavGlyph /><span>生成</span></button><button className={view === "assets" ? "active" : ""} aria-current={view === "assets" ? "page" : undefined} onClick={showAssets}><AssetsNavGlyph /><span>资产</span>{archivedCount > 0 && <i title={`${archivedCount} 个资产`}>{archivedCount > 99 ? "99+" : archivedCount}</i>}</button><button className={view === "canvas" ? "active" : ""} aria-current={view === "canvas" ? "page" : undefined} onClick={showCanvas}><CanvasNavGlyph /><span>画布</span></button><button className={featureNotice && !featureNotice.leaving ? "future active-preview" : "future"} aria-pressed={Boolean(featureNotice && !featureNotice.leaving)} onClick={activateAtlas}><AtlasNavGlyph /><span>Atlas</span></button></div><div className="rail-account" ref={profileRef}><button className="rail-avatar" aria-label="打开账号菜单" aria-expanded={profileOpen} onClick={() => setProfileOpen((open) => !open)}><UserAvatar user={user} /></button>{profileOpen && <AccountMenu user={user} close={() => setProfileOpen(false)} home={() => navigate("/")} logout={logout} />}</div></nav>
-    <aside className="sidebar" aria-hidden={!sidebar} inert={!sidebar ? true : undefined}><div className="sidebar-head"><span>{view === "assets" ? "资产归档" : view === "canvas" ? "画布" : "开始创作"}</span><button aria-label="收起侧栏" onClick={() => setSidebar(false)}><PanelLeftClose /></button></div>{view === "create" ? <><button className="new-chat" onClick={() => showCreate(true)}><Plus /> 新创作</button>{historySection("我的创作", privateTasks)}{historySection("团队历史", sharedTasks)}{!tasks.length && <div className="history-list"><p>还没有创作记录</p></div>}</> : view === "assets" ? <><div className="asset-sidebar-summary"><span>已归档成片</span><strong>{archivedCount}</strong><p>完成生成的视频会自动进入资产页，并长期保留至你主动删除。</p></div><button className="new-chat new-chat--quiet" onClick={() => showCreate(true)}><Plus /> 创建新视频</button></> : <div className="canvas-sidebar-summary"><CanvasNavGlyph /><span>自由画布</span><p>把镜头、素材与灵感组织在同一张画布上，自由排版、连接创作。</p><button className="new-chat new-chat--quiet" onClick={createCanvasFromSidebar}><Plus /> 新建画布</button></div>}</aside>
+    <aside className="sidebar" aria-hidden={!sidebar} inert={!sidebar ? true : undefined}><div className="sidebar-head"><span>{view === "assets" ? "资产归档" : view === "canvas" ? "画布" : "开始创作"}</span><button aria-label="收起侧栏" onClick={() => setSidebar(false)}><PanelLeftClose /></button></div>{view === "create" ? <><button className="new-chat" disabled={creatingSession} onClick={() => showCreate(true)}>{creatingSession ? <LoaderCircle className="spin" /> : <Plus />} 新创作</button><div className="sidebar-label">创作会话</div><div className="session-list">{sessions.map((session) => <div className={`session-item ${session.id === activeSessionId ? "is-active" : ""}`} key={session.id}>{editingSessionId === session.id ? <input autoFocus maxLength={64} value={sessionTitleDraft} disabled={sessionBusy} onChange={(event) => setSessionTitleDraft(event.target.value)} onBlur={() => void saveSessionTitle(session)} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); if (event.key === "Escape") setEditingSessionId(null); }} aria-label="会话名称" /> : <button className="session-item__main" onClick={() => void openSession(session)}><MessageSquare /><span><b>{session.title}</b><small>{new Date(session.updatedAt).toLocaleDateString("zh-CN")}</small></span></button>}<span className="session-item__actions"><button title="重命名会话" aria-label={`重命名 ${session.title}`} onPointerDown={(event) => event.preventDefault()} onClick={() => beginRenameSession(session)}><Pencil /></button><button title="删除会话" aria-label={`删除 ${session.title}`} onClick={() => setSessionDeleteTarget(session)}><Trash2 /></button></span></div>)}{!sessions.length && <p>还没有创作会话</p>}</div></> : view === "assets" ? <><div className="asset-sidebar-summary"><span>已归档成片</span><strong>{archivedCount}</strong><p>不同创作会话的成片会统一归档在这里。</p></div><button className="new-chat new-chat--quiet" onClick={() => showCreate(true)}><Plus /> 创建新内容</button></> : <div className="canvas-sidebar-summary"><CanvasNavGlyph /><span>自由画布</span><p>把镜头、素材与灵感组织在同一张画布上，自由排版、连接创作。</p><button className="new-chat new-chat--quiet" onClick={createCanvasFromSidebar}><Plus /> 新建画布</button></div>}</aside>
     {sidebar && <button className="sidebar-scrim" aria-label="关闭侧栏" onClick={() => setSidebar(false)} />}
     <section className="workspace"><header className="workspace-head">{!sidebar && <button className="menu-button" aria-label="打开侧栏" onClick={() => setSidebar(true)}><Menu /></button>}<span>{view === "assets" ? "Firefly media archive" : view === "canvas" ? "Firefly canvas" : "Seedance video studio"}</span><div className={`system-live ${syncIssue ? "system-live--issue" : ""}`} title={syncIssue ? "与服务端的同步暂时中断，系统会自动重试" : undefined}><i /> {syncIssue ? "同步暂时中断" : activeTasks.length ? `${activeTasks.length} 项进行中` : "系统在线"}</div></header>
-      {loading ? <div className="workspace-loading"><LoaderCircle className="spin" /> 正在唤醒 Firefly</div> : loadError ? <div className="workspace-error"><Archive /><h1>创作台暂时无法载入</h1><p>{loadError}</p><button onClick={initialLoad}><RefreshCw /> 重新载入</button></div> : view === "canvas" ? (route === "/studio/canvas" ? <CanvasProjectList navigate={navigate} autoCreate={pendingCanvasCreate} onAutoCreateHandled={() => setPendingCanvasCreate(false)} /> : <CanvasWorkspace canvasId={route.split("/")[3] ?? ""} navigate={navigate} user={user} logout={logout} />) : view === "assets" ? <AssetArchive tasks={tasks} models={models} onCreate={() => showCreate(true)} onDelete={requestDelete} onInsertCanvas={setCanvasInsertTarget} /> : creatingNew || !tasks.length ? <div className="empty-workspace"><Composer models={models} compact={false} onCreated={(task) => { setTasks((old) => [task, ...old]); setCreatingNew(false); }} onImagesGenerated={updateImageResult} /><ImageResultsGallery results={imageResults} onInsertCanvas={setCanvasInsertTarget} onRemove={removeImageResult} /><div className="creation-footnote">输入素材保留 7 天 · 成片将长期保存至主动删除</div></div> : <div className="conversation"><div className="conversation-inner"><ImageResultsGallery results={imageResults} onInsertCanvas={setCanvasInsertTarget} onRemove={removeImageResult} /><div className="conversation-heading"><span>Current sequence</span><h1>创作正在发生</h1></div>{tasks.map((task) => <TaskCard key={task.id} task={task} models={models} eager={task.id === latestVideoTaskId} now={now} onDelete={requestDelete} canDelete={task.ownerId === user.id} />)}</div><div className="composer-dock"><Composer models={models} compact onCreated={(task) => setTasks((old) => [task, ...old])} onImagesGenerated={updateImageResult} /></div></div>}
+      {loading ? <div className="workspace-loading"><LoaderCircle className="spin" /> 正在唤醒 Firefly</div> : loadError ? <div className="workspace-error"><Archive /><h1>创作台暂时无法载入</h1><p>{loadError}</p><button onClick={() => void initialLoad()}><RefreshCw /> 重新载入</button></div> : view === "canvas" ? (route === "/studio/canvas" ? <CanvasProjectList navigate={navigate} autoCreate={pendingCanvasCreate} onAutoCreateHandled={() => setPendingCanvasCreate(false)} /> : <CanvasWorkspace canvasId={route.split("/")[3] ?? ""} navigate={navigate} user={user} logout={logout} />) : view === "assets" ? <AssetArchive tasks={assetTasks} imageResults={assetImageResults} models={models} onCreate={() => showCreate(true)} onDelete={requestDelete} onRemoveImage={(id) => void removeImageResult(id)} onInsertCanvas={setCanvasInsertTarget} /> : creatingNew || (!tasks.length && !imageResults.length) ? <div className="empty-workspace"><Composer models={models} compact={false} sessionId={activeSessionId} onCreated={(task) => { setTasks((old) => [task, ...old]); setAssetTasks((old) => [task, ...old]); setCreatingNew(false); markSessionUsed(task.prompt); }} onImagesGenerated={(bundle) => { updateImageResult(bundle); setCreatingNew(false); markSessionUsed(bundle.prompt); }} /><div className="creation-footnote">输入素材保留 7 天 · 成片将长期保存至主动删除</div></div> : <div className="conversation"><div className="conversation-inner"><ImageResultsGallery results={imageResults} onInsertCanvas={setCanvasInsertTarget} onRemove={removeImageResult} />{!!tasks.length && <><div className="conversation-heading"><span>Current sequence</span><h1>创作正在发生</h1></div>{tasks.map((task) => <TaskCard key={task.id} task={task} models={models} eager={task.id === latestVideoTaskId} now={now} onDelete={requestDelete} canDelete={task.ownerId === user.id} />)}</>}</div><div className="composer-dock"><Composer models={models} compact sessionId={activeSessionId} onCreated={(task) => { setTasks((old) => [task, ...old]); setAssetTasks((old) => [task, ...old]); markSessionUsed(task.prompt); }} onImagesGenerated={(bundle) => { updateImageResult(bundle); markSessionUsed(bundle.prompt); }} /></div></div>}
     </section>
     {canvasInsertTarget && <CanvasInsertPicker payload={canvasInsertTarget.kind === "video" ? { kind: "video", taskId: canvasInsertTarget.task.id, title: canvasInsertTarget.task.prompt || "参考素材生成" } : canvasInsertTarget.kind === "image" ? { kind: "image", uploadId: canvasInsertTarget.asset.UploadId ?? "", name: canvasInsertTarget.asset.Name || "图片" } : { kind: "generated", mediaId: canvasInsertTarget.mediaId, title: canvasInsertTarget.title }} onClose={() => setCanvasInsertTarget(null)} navigate={navigate} />}
     {deleteTarget && <div className="confirm-backdrop" role="dialog" aria-modal="true" aria-labelledby="delete-title" onClick={() => !deleting && setDeleteTarget(null)}><div className="confirm-dialog" onClick={(event) => event.stopPropagation()}><span><Trash2 /></span><h2 id="delete-title">删除这次创作？</h2><p>项目与已归档成片将被删除，此操作无法撤销。</p>{deleteError && <small className="confirm-error" role="alert">{deleteError}</small>}<div><button autoFocus disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button><button className="danger" disabled={deleting} onClick={confirmDelete}>{deleting ? <LoaderCircle className="spin" /> : <Trash2 />} 删除项目</button></div></div></div>}
+    {sessionDeleteTarget && <div className="confirm-backdrop" role="dialog" aria-modal="true" aria-labelledby="session-delete-title" onClick={() => !sessionBusy && setSessionDeleteTarget(null)}><div className="confirm-dialog" onClick={(event) => event.stopPropagation()}><span><Trash2 /></span><h2 id="session-delete-title">删除“{sessionDeleteTarget.title}”？</h2><p>会话会从左侧栏移除；已归档的视频与图片仍保留在资产页。</p><div><button autoFocus disabled={sessionBusy} onClick={() => setSessionDeleteTarget(null)}>取消</button><button className="danger" disabled={sessionBusy} onClick={() => void confirmDeleteSession()}>{sessionBusy ? <LoaderCircle className="spin" /> : <Trash2 />} 删除会话</button></div></div></div>}
     {featureNotice && <div key={`notice-${featureNotice.nonce}`} className={`feature-notice feature-notice--atlas ${featureNotice.leaving ? "feature-notice--leaving" : ""}`} role="status" aria-live="polite"><span className="feature-notice__icon"><AtlasNavGlyph /></span><span><b>Atlas</b><small>功能即将上线</small></span><button aria-label="关闭提示" onClick={dismissAtlas}><X /></button></div>}
   </main>;
 }

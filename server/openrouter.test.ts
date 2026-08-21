@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { OpenRouterError, OpenRouterKeyPool, parseOpenRouterImages, parseOpenRouterTextDelta } from "./openrouter.js";
-import { computeImageSize, IMAGE_MODELS, imageModelById } from "./image-models.js";
+import { buildImageRequestBody, OpenRouterError, OpenRouterKeyPool, parseOpenRouterImages, parseOpenRouterTextDelta } from "./openrouter.js";
+import { computeImageSize, IMAGE_MODELS, imageModelById, openRouterResolution } from "./image-models.js";
 
 describe("OpenRouterKeyPool", () => {
   it("round-robins across healthy keys", () => {
@@ -137,13 +137,31 @@ describe("computeImageSize", () => {
   });
 });
 
+describe("OpenRouter image resolution normalization", () => {
+  it("maps UI pixel tiers to the dedicated Images API enums", () => {
+    expect(openRouterResolution("512")).toBe("512");
+    expect(openRouterResolution("768")).toBe("1K");
+    expect(openRouterResolution("1024")).toBe("1K");
+    expect(openRouterResolution("1536")).toBe("2K");
+    expect(openRouterResolution("2048")).toBe("2K");
+    expect(openRouterResolution("4096")).toBe("4K");
+  });
+
+  it("sends aspect ratio and normalized resolution without a lossy fallback", () => {
+    expect(buildImageRequestBody({ model: "model", prompt: "landscape", references: ["https://example.test/ref.png"], ratio: "16:9", resolution: "1K" })).toEqual({
+      model: "model", prompt: "landscape", n: 1, resolution: "1K", aspect_ratio: "16:9",
+      input_references: [{ type: "image_url", image_url: { url: "https://example.test/ref.png" } }],
+    });
+  });
+});
+
 describe("image model registry", () => {
   it("exposes the Nano Banana family with display names and default", () => {
     const lite = imageModelById("google/gemini-3.1-flash-lite-image")!;
     expect(lite.name).toBe("Google: Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image)");
     expect(IMAGE_MODELS.some((m) => m.id === "google/gemini-3.1-flash-image")).toBe(true);
     expect(IMAGE_MODELS.some((m) => m.id === "google/gemini-3-pro-image")).toBe(true);
-    expect(lite.resolutions[0]).toBe("512");
+    expect(lite.resolutions).toEqual(["1024"]);
     expect(lite.maxCount).toBe(4);
   });
 });
