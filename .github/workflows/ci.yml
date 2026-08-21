@@ -72,6 +72,9 @@ jobs:
             fi
           done < <(git ls-files '*.sh')
 
+      - name: Validate browser worker syntax
+        run: node --check public/firefly-media-sw.js
+
       - name: Exercise Firefly container ownership guards
         shell: bash
         run: |

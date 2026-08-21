@@ -10,7 +10,13 @@ export default defineConfig({
   // Exercise the exact optimized bundle that ships to production. Vite's development
   // transform server made parallel WebKit runs wait on cold module transforms and hid
   // real chunk-loading behavior behind test-only timing noise.
-  webServer: { command: "npm run build && npm exec vite preview -- --host 127.0.0.1 --port 4173 --strictPort", url: "http://127.0.0.1:4173", reuseExistingServer: !process.env.CI, timeout: 120_000 },
+  webServer: {
+    command: "npm run build && npm exec vite preview -- --host 127.0.0.1 --port 4173 --strictPort",
+    env: { ...process.env, VITE_DISABLE_PRIVATE_MEDIA_CACHE: "true" },
+    url: "http://127.0.0.1:4173",
+    reuseExistingServer: !process.env.CI,
+    timeout: 120_000
+  },
   projects: [
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },
     { name: "webkit", use: { ...devices["Desktop Safari"] } },
