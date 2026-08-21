@@ -1,4 +1,5 @@
 export const PRIVATE_MEDIA_CACHE_NAME = "firefly-private-thumbnails-v1";
+export const PRIVATE_MEDIA_SERVICE_WORKER_URL = "/api/firefly-media-sw.js";
 const PRIVATE_MEDIA_CACHE_USER_KEY = "firefly-private-media-cache-user";
 
 const hasCacheStorage = () => typeof window !== "undefined" && "caches" in window;
@@ -38,6 +39,6 @@ export async function forgetPrivateMediaCacheUser() {
 export function registerPrivateMediaCache() {
   if (!import.meta.env.PROD || import.meta.env.VITE_DISABLE_PRIVATE_MEDIA_CACHE === "true" || typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
   window.addEventListener("load", () => {
-    void navigator.serviceWorker.register("/firefly-media-sw.js", { scope: "/", updateViaCache: "none" }).catch(() => undefined);
+    void navigator.serviceWorker.register(PRIVATE_MEDIA_SERVICE_WORKER_URL, { scope: "/", updateViaCache: "none" }).catch(() => undefined);
   }, { once: true });
 }

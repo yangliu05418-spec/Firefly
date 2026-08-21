@@ -23,7 +23,7 @@ describe("service worker delivery", () => {
       if (!address || typeof address === "string") throw new Error("test server did not expose a port");
       const response = await fetch(`http://127.0.0.1:${address.port}/firefly-media-sw.js`);
       expect(response.status).toBe(200);
-      expect(response.headers.get("cache-control")).toBe("no-cache");
+      expect(response.headers.get("cache-control")).toBe("no-cache, no-store, must-revalidate");
       expect(response.headers.get("service-worker-allowed")).toBe("/");
     } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
   });
