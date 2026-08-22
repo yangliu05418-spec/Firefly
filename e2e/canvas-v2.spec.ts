@@ -23,6 +23,13 @@ const emptyMediaDocument: CanvasDocumentV2 = {
   ],
   connections: [],
 };
+const interruptedUploadDocument: CanvasDocumentV2 = {
+  ...documentV2,
+  nodes: [
+    { id: "interrupted-image", type: "image", title: "未完成上传.png", position: { x: 240, y: 100 }, width: 320, height: 300, data: { status: "running", mimeType: "image/png" } },
+  ],
+  connections: [],
+};
 const projectImageAsset: CanvasProjectAsset = {
   id: "project-library-image", canvasId: "canvas-e2e", kind: "image", title: "常用角色参考", contentType: "image/png", size: 128,
   width: 512, height: 512, status: "ready", createdAt: 1, updatedAt: 1,
@@ -498,6 +505,19 @@ test("media nodes drag from their body, keep the selected stack, and persist upl
   await assetPanel.locator(".canvas-v2-assets__list>button").filter({ hasText: "常用角色参考" }).click();
   await expect.poll(() => mock.storedDocument().nodes.find((node) => node.id === "empty-character")?.data.projectAssetId).toBe("project-library-image");
   await expect(characterNode.getByRole("img", { name: "常用角色参考" })).toBeVisible();
+});
+
+test("an interrupted local Canvas upload recovers instead of spinning forever", async ({ page }) => {
+  const mock = await mockAuthenticatedApi(page, { document: interruptedUploadDocument });
+  await page.goto("/studio/canvas/canvas-e2e");
+  await expect(page.getByRole("button", { name: "Firefly 画布导航" })).toContainText("Firefly", { timeout: 30_000 });
+
+  const node = page.locator('.canvas-v2-node[data-node-id="interrupted-image"]');
+  await expect(node.getByRole("button", { name: "本地上传", exact: true })).toBeVisible();
+  await expect(node.getByRole("button", { name: "资产库", exact: true })).toBeVisible();
+  await expect(node.locator('header i[title="上次本地素材保存未完成，请重新选择素材"]')).toBeVisible();
+  await expect(node.locator(".spin")).toHaveCount(0);
+  await expect.poll(() => mock.storedDocument().nodes[0]?.data.status).toBe("failed");
 });
 
 test("image generation confirms immediately and moves provider waiting into the result card", async ({ page }) => {

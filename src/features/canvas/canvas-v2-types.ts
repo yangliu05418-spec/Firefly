@@ -66,9 +66,24 @@ export const defaultCanvasDocumentV2 = (): CanvasDocumentV2 => ({
   connections: [],
 });
 
+const mediaNodeTypes = new Set<CanvasNodeTypeV2>(["character", "scene", "image", "video"]);
+const interruptedLocalUpload = (node: CanvasNodeV2) => mediaNodeTypes.has(node.type)
+  && ["queued", "running"].includes(node.data.status ?? "")
+  && !node.data.jobId
+  && !node.data.projectAssetId;
+
+/** Browser uploads are not resumable after the editor closes; never persist their transient spinner. */
+export const canvasNodeForPersistence = (node: CanvasNodeV2): CanvasNodeV2 => interruptedLocalUpload(node)
+  ? { ...node, data: { ...node.data, status: "idle", error: undefined } }
+  : node;
+
+/** Repair documents written by older clients that left an unresumable local upload running forever. */
+export const recoverInterruptedCanvasNode = (node: CanvasNodeV2): CanvasNodeV2 => interruptedLocalUpload(node)
+  ? { ...node, data: { ...node.data, status: "failed", error: "上次本地素材保存未完成，请重新选择素材" } }
+  : node;
+
 export const toCanvasDocumentV2 = (document: AnyCanvasDocument): CanvasDocumentV2 => {
-  if (document.version === 2) return document;
-  return {
+  const converted: CanvasDocumentV2 = document.version === 2 ? document : {
     ...defaultCanvasDocumentV2(),
     viewport: document.viewport,
     background: document.background,
@@ -98,6 +113,7 @@ export const toCanvasDocumentV2 = (document: AnyCanvasDocument): CanvasDocumentV
       relation: "context",
     })),
   };
+  return { ...converted, nodes: converted.nodes.map(recoverInterruptedCanvasNode) };
 };
 
 export const createCanvasNodeV2 = (
