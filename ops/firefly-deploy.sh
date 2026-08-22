@@ -26,6 +26,10 @@ current_port=8090
 switched=0
 old_workers_file="/run/firefly-old-workers-$case_id"
 diagnostics_dir="/var/lib/firefly/deployments/$case_id"
+firefly_image_label='org.opencontainers.image.source=https://github.com/yangliu05418-spec/Firefly'
+minimum_free_kb=8388608
+docker_root=$(/usr/bin/docker info --format '{{.DockerRootDir}}' 2>/dev/null || printf '/var/lib/docker')
+[ -d "$docker_root" ] || docker_root=/
 : > "$old_workers_file"
 if [ -r "$release_env" ]; then
   # shellcheck disable=SC1090
@@ -36,8 +40,26 @@ fi
 if [ "$current_port" = "8090" ]; then next_port=8091; next_slot=green; else next_port=8090; next_slot=blue; fi
 
 notify() { /usr/local/sbin/firefly-notify "$1" "$revision" "$case_id" "$(( $(date +%s) - started_at ))" || true; }
+available_disk_kb() { df -Pk "$docker_root" | awk 'NR==2 {print $4}'; }
+ensure_deploy_space() {
+  available=$(available_disk_kb)
+  [ "${available:-0}" -ge "$minimum_free_kb" ] && return 0
+  echo "deployment disk low: ${available:-0} KiB available; pruning unused Firefly images and build cache" >&2
+  /usr/bin/docker image prune -af --filter "label=$firefly_image_label" >/dev/null || true
+  /usr/bin/docker builder prune -af --filter 'until=24h' >/dev/null || true
+  available=$(available_disk_kb)
+  if [ "${available:-0}" -lt "$minimum_free_kb" ]; then
+    failure_event=failed_disk_space
+    echo "deployment requires at least $minimum_free_kb KiB free on $docker_root; only ${available:-0} KiB available" >&2
+    return 1
+  fi
+  echo "deployment disk recovered: $available KiB available" >&2
+}
 capture_candidate_diagnostics() {
-  install -d -o root -g root -m 0700 "$diagnostics_dir"
+  if ! install -d -o root -g root -m 0700 "$diagnostics_dir"; then
+    echo "candidate diagnostics unavailable: cannot create $diagnostics_dir" >&2
+    return 0
+  fi
   diagnostics_file="$diagnostics_dir/candidate.log"
   {
     printf 'case_id=%s\nrevision=%s\nslot=%s\nport=%s\ncaptured_at=%s\n' \
@@ -54,6 +76,9 @@ capture_candidate_diagnostics() {
       /usr/bin/docker inspect --format '{{json .State}}' "$container" 2>&1 || true
       /usr/bin/docker logs --tail 200 "$container" 2>&1 || true
     done
+    printf '\nDISK\n'
+    df -h / "$docker_root" 2>&1 || true
+    /usr/bin/docker system df 2>&1 || true
   } > "$diagnostics_file" 2>&1
   chown root:root "$diagnostics_file"
   chmod 0600 "$diagnostics_file"
@@ -156,6 +181,7 @@ stop_old_workers() {
 }
 
 notify started
+ensure_deploy_space
 /usr/bin/docker pull "$image" >/dev/null
 /usr/bin/docker image inspect "$image" >/dev/null
 /usr/local/sbin/firefly-backup "$image"
@@ -247,6 +273,9 @@ cp "$release_env" "/var/lib/firefly/releases/$revision.env"
 if command -v systemd-run >/dev/null 2>&1; then
   systemd-run --quiet --unit="firefly-retire-$current_slot-${revision%????????????????????????????????}" --on-active=30m /usr/local/sbin/firefly-retire-slot "$current_slot" || true
 fi
+# Retain every image referenced by the active and rollback containers while
+# removing older Firefly releases. Docker refuses to delete referenced images.
+/usr/bin/docker image prune -af --filter "label=$firefly_image_label" >/dev/null 2>&1 || true
 notify succeeded
 rm -f "$old_workers_file"
 trap - EXIT
