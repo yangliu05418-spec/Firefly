@@ -24,6 +24,7 @@ import { deactivatePrivateMediaCacheScope, forgetPrivateMediaCacheUser, scopePri
 import { usePendingAssetPreviews } from "./use-pending-asset-previews";
 import { RecoveringImage, RecoveringThumbnail } from "./recovering-image";
 import { bootstrapSession } from "./auth-bootstrap";
+import { loadPromptLibraryCacheFirst } from "./prompt-library-cache";
 
 const modeLabels: Record<CreationMode, string> = { omni: "全能参考", first_frame: "首帧生成", first_last: "首尾帧", edit: "视频编辑", extend: "视频续写", text: "文本生成" };
 const modeNotes: Record<CreationMode, string> = { omni: "自由组合图片、视频和音频", first_frame: "锁定开场画面继续创作", first_last: "精确控制起点与落点", edit: "替换、增删或重绘画面", extend: "向前、向后或多段衔接", text: "只用提示词生成镜头" };
@@ -140,9 +141,10 @@ function AccessGate({ back }: { back: () => void }) {
 function Popover({ children, className = "" }: { children: React.ReactNode; className?: string }) { return <div className={`popover ${className}`} onClick={(e) => e.stopPropagation()}>{children}</div>; }
 
 function PromptEditor({ value, placeholder, assets, disabled, attach, change }: { value: string; placeholder: string; assets: UploadAsset[]; disabled: boolean; attach: (asset: UploadAsset) => UploadAsset | null; change: (value: string) => void }) {
+  const userId = useAssetCacheUserId();
   const editor = useRef<HTMLDivElement>(null); const mentionRange = useRef<Range | null>(null);
   const [open, setOpen] = useState(false); const [query, setQuery] = useState(""); const [active, setActive] = useState(0); const [anchor, setAnchor] = useState({ left: 12, top: 12, above: false });
-  const [library, setLibrary] = useState<UploadAsset[]>([]); const [libraryLoading, setLibraryLoading] = useState(false); const loadedLibrary = useRef(false);
+  const [library, setLibrary] = useState<UploadAsset[]>([]); const [libraryLoading, setLibraryLoading] = useState(false); const [libraryError, setLibraryError] = useState(false); const loadedLibrary = useRef(false); const libraryRequest = useRef(0);
   const sync = () => { if (editor.current) change(Array.from(editor.current.childNodes).map(promptNodeText).join("").replace(/\n{3,}/g, "\n\n")); };
   const candidates = useMemo(() => {
     const ready = assets.filter((asset) => asset.progress === 100);
@@ -167,14 +169,31 @@ function PromptEditor({ value, placeholder, assets, disabled, attach, change }: 
     editor.current.querySelectorAll<HTMLElement>("[data-asset-id]").forEach((token) => { if (!attached.has(token.dataset.assetId ?? "")) { token.remove(); removed = true; } });
     if (removed) sync();
   }, [assets]);
+  useEffect(() => () => { libraryRequest.current += 1; }, []);
 
   const loadLibrary = () => {
     if (loadedLibrary.current) return;
-    loadedLibrary.current = true; setLibraryLoading(true);
-    void api.get<{ Items?: LibraryAsset[] }>("/api/assets").then((result) => setLibrary((result.Items ?? []).filter((asset) => asset.Status === "Active").map((asset) => ({
-      id: asset.Id, assetId: asset.Id, name: asset.Name || asset.Id, type: asset.AssetType.toLowerCase() as UploadAsset["type"], size: 0,
-      role: asset.AssetType === "Image" ? "reference_image" : asset.AssetType === "Video" ? "reference_video" : "reference_audio", progress: 100, preview: asset.URL
-    })))).catch(() => setLibrary([])).finally(() => setLibraryLoading(false));
+    loadedLibrary.current = true; setLibraryLoading(true); setLibraryError(false);
+    const request = ++libraryRequest.current;
+    void loadPromptLibraryCacheFirst({
+      userId,
+      loadFresh: () => api.get<{ Items?: LibraryAsset[] }>("/api/assets").then((result) => result.Items ?? []),
+      onCached: (cached) => {
+        if (libraryRequest.current !== request) return;
+        setLibrary(cached);
+        setLibraryLoading(false);
+      },
+    }).then((result) => {
+      if (libraryRequest.current !== request) return;
+      setLibrary(result.assets);
+    }).catch(() => {
+      if (libraryRequest.current !== request) return;
+      loadedLibrary.current = false;
+      setLibrary([]);
+      setLibraryError(true);
+    }).finally(() => {
+      if (libraryRequest.current === request) setLibraryLoading(false);
+    });
   };
 
   const detectMention = () => {
@@ -210,7 +229,7 @@ function PromptEditor({ value, placeholder, assets, disabled, attach, change }: 
     <div className="mention-pop__list">{libraryLoading && !candidates.length ? <div className="mention-pop__state"><LoaderCircle className="spin" /> 正在读取资产</div> : candidates.length ? candidates.map((asset, index) => <button key={asset.id} className={index === active ? "active" : ""} role="option" aria-selected={index === active} onMouseDown={(event) => { event.preventDefault(); selectAsset(asset); }}>
       {asset.preview ? <RecoveringThumbnail src={asset.preview} alt={asset.name || "参考素材"} fallbackClassName="mention-pop__media" manualRecovery={false} /> : <span className="mention-pop__media">{asset.type === "video" ? <Video /> : asset.type === "audio" ? <AudioLines /> : <Library />}</span>}
       <span><b>{asset.name}</b><small>{promptAssetLabel(asset, assets.some((item) => item.id === asset.id) ? assets : [...assets, asset])}</small></span><Check />
-    </button>) : <div className="mention-pop__state">没有匹配的可用资产</div>}</div>
+    </button>) : <div className="mention-pop__state">{libraryError ? "资产读取失败，再次输入 @ 即可重试" : "没有匹配的可用资产"}</div>}</div>
     <footer>↑↓ 选择　Enter 插入　Esc 关闭</footer>
   </div>, document.body);
 
