@@ -11,6 +11,7 @@ import { api, inferUploadType } from "../../../api";
 import { RecoveringThumbnail } from "../../../recovering-image";
 import { uploadFileUntilAccepted } from "../../../upload-acceptance";
 import { filterCachedAssets, loadAssetsCacheFirst } from "../../../asset-metadata-cache";
+import { assetCategoryLabels } from "../../../asset-categories";
 import { runWithConcurrency } from "../../../concurrency";
 import { readPendingAssetPreview, removePendingAssetPreview, storePendingAssetPreview } from "../../../pending-asset-preview-cache";
 import { useAdaptiveRefresh } from "../../../use-adaptive-refresh";
@@ -40,7 +41,6 @@ const nodeTypes = { character: CanvasV2Node, scene: CanvasV2Node, text: CanvasV2
 const creatableTypes = ["character", "scene", "video", "image", "text"] as const;
 const typeLabels: Record<CanvasNodeTypeV2, string> = { character: "角色", scene: "场景", video: "视频", image: "图片", text: "文本", group: "分组", "legacy-audio": "旧音频" };
 const typeIcons: Record<string, typeof ImageIcon> = { character: ScanFace, scene: LayoutDashboard, video: Video, image: ImageIcon, text: TextCursorInput, group: Users };
-const assetCategoryLabels: Record<AssetCategory, string> = { character: "角色", scene: "场景", prop: "道具", material: "素材" };
 const acceptsProjectAsset = (nodeType: CanvasNodeTypeV2, assetKind: CanvasProjectAsset["kind"]) =>
   nodeType === "video" ? assetKind === "video" : ["image", "character", "scene"].includes(nodeType) ? assetKind === "image" : false;
 const canvasPreviewCacheId = (canvasId: string, assetId: string) => `canvas:${canvasId}:${assetId}`;
