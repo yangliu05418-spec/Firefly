@@ -149,6 +149,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   const saving = useRef<Promise<void> | null>(null);
   const saveAgain = useRef(false);
   const pendingSaveDocument = useRef<CanvasDocumentV2 | undefined>(undefined);
+  const pendingNodePatches = useRef(new Map<string, Partial<CanvasNodeV2["data"]>>());
   const flushSaveRef = useRef<() => Promise<void>>(async () => undefined);
   const latestDocument = useRef<CanvasDocumentV2>(defaultCanvasDocumentV2());
   const history = useRef<CanvasDocumentV2[]>([]);
@@ -262,8 +263,19 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   }, []);
 
   const patchNode = useCallback((id: string, patch: Partial<CanvasNodeV2["data"]>) => {
-    setNodes((current) => current.map((node) => node.id === id ? { ...node, data: { ...node.data, domain: { ...node.data.domain, data: { ...node.data.domain.data, ...patch } } } } : node));
+    pendingNodePatches.current.set(id, { ...pendingNodePatches.current.get(id), ...patch });
+    setNodes((current) => {
+      const pendingPatch = pendingNodePatches.current.get(id) ?? patch;
+      return current.map((node) => node.id === id ? { ...node, data: { ...node.data, domain: { ...node.data.domain, data: { ...node.data.domain.data, ...pendingPatch } } } } : node);
+    });
   }, [setNodes]);
+
+  useEffect(() => {
+    for (const [id, patch] of pendingNodePatches.current) {
+      const node = nodes.find((candidate) => candidate.id === id);
+      if (!node || Object.entries(patch).every(([key, value]) => Object.is(node.data.domain.data[key], value))) pendingNodePatches.current.delete(id);
+    }
+  }, [nodes]);
 
   const openComposer = useCallback((id: string) => {
     const node = flow.getNode(id);
@@ -334,12 +346,17 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
       viewport: (() => { const viewport = flow.getViewport(); return { x: viewport.x, y: viewport.y, k: viewport.zoom }; })(),
       background: "dots",
       preferences: { edgesHidden, snapToGrid, minimapOpen, panMode },
-      nodes: graph.nodes.map((node) => ({ ...node.data.domain, position: node.position, width: node.measured?.width ?? node.width ?? node.data.domain.width, height: node.measured?.height ?? node.height ?? node.data.domain.height, parentId: node.parentId })),
+      nodes: graph.nodes.map((node) => {
+        const pendingPatch = pendingNodePatches.current.get(node.id);
+        const domain = pendingPatch ? { ...node.data.domain, data: { ...node.data.domain.data, ...pendingPatch } } : node.data.domain;
+        return { ...domain, position: node.position, width: node.measured?.width ?? node.width ?? domain.width, height: node.measured?.height ?? node.height ?? domain.height, parentId: node.parentId };
+      }),
       connections: graph.connections.map((edge) => ({ id: edge.id, source: edge.source, target: edge.target, sourceHandle: "right", targetHandle: "left", relation: "context" })),
     };
   }, [edgesHidden, flow, minimapOpen, panMode, snapToGrid]);
 
   const hydrate = useCallback((document: CanvasDocumentV2) => {
+    pendingNodePatches.current.clear();
     setEdgesHidden(document.preferences.edgesHidden); setSnapToGrid(document.preferences.snapToGrid); setMinimapOpen(document.preferences.minimapOpen); setPanMode(document.preferences.panMode);
     setNodes([...document.nodes].sort((left, right) => Number(right.type === "group") - Number(left.type === "group")).map(makeFlowNode)); setEdges(document.connections.map(toEdge));
     requestAnimationFrame(() => flow.setViewport({ x: document.viewport.x, y: document.viewport.y, zoom: document.viewport.k }));
