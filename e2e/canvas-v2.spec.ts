@@ -219,6 +219,26 @@ test("studio recovers transient session bootstrap failures without showing a fal
   expect(await page.evaluate(() => (window as typeof window & { __feishuLoginSeen: boolean }).__feishuLoginSeen)).toBe(false);
 });
 
+test("composer keeps uploaded assets available through the inline mention picker", async ({ page }) => {
+  await mockAuthenticatedApi(page);
+  await page.goto("/studio");
+
+  await page.locator('.composer input[type="file"]').setInputFiles("public/ciridae/video-placeholder.webp");
+  const attached = page.locator(".asset-chip").filter({ hasText: "video-placeholder.webp" });
+  await expect(attached).toBeVisible({ timeout: 15_000 });
+
+  const editor = page.getByRole("textbox", { name: "创作提示词" });
+  await editor.click();
+  await page.keyboard.type("@");
+  const picker = page.getByRole("listbox", { name: "选择参考资产" });
+  await expect(picker).toBeVisible();
+  await expect(picker.getByRole("option").filter({ hasText: "video-placeholder.webp" })).toBeVisible();
+  await page.keyboard.press("Enter");
+
+  await expect(editor.locator("[data-asset-id]")).toHaveCount(1);
+  await expect(editor).toContainText("video-placeholder.webp");
+});
+
 test("asset archive preserves the selected media view across refresh", async ({ page }) => {
   await mockAuthenticatedApi(page);
   await page.goto("/studio/assets");
