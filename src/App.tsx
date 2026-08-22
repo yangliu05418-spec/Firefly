@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Archive, ArrowRight, AudioLines, Check, CheckSquare2, ChevronDown, ChevronRight, Clock3, Clapperboard, Copy, Download, Film, Home, ImageIcon, Layers3, LayoutGrid, Library, LoaderCircle, LogOut, Menu, MessageSquare, PanelLeftClose, Pencil, Play, Plus, RefreshCw, Search, Send, Settings2, Sparkles, Square, Trash2, Upload, Video, WandSparkles, X } from "lucide-react";
 import { api, inferUploadType, listenForSignedOut, notifySignedOut, uploadFile } from "./api";
-import type { AssetCategory, CreationMode, CreationSession, ImageGenResponse, ImageModel, ImageResultBundle, LibraryAsset, LibraryGroup, ModelCapability, SessionUser, Task, UploadAsset } from "./types";
+import type { AssetCategory, CreationMode, CreationSession, ImageGenResponse, ImageResultBundle, LibraryAsset, LibraryGroup, ModelCapability, SessionUser, Task, UploadAsset } from "./types";
 import { materializePromptReferences, promptAssetLabel } from "./prompt-references";
 import { createPromptAssetToken, promptNodeText, renderPromptValue } from "./prompt-editor-dom";
 import { clearEditorSelection } from "./prompt-selection";
@@ -25,6 +25,7 @@ import { usePendingAssetPreviews } from "./use-pending-asset-previews";
 import { RecoveringImage, RecoveringThumbnail } from "./recovering-image";
 import { bootstrapSession } from "./auth-bootstrap";
 import { loadPromptLibraryCacheFirst } from "./prompt-library-cache";
+import { useImageModelCatalog } from "./use-image-model-catalog";
 
 const modeLabels: Record<CreationMode, string> = { omni: "全能参考", first_frame: "首帧生成", first_last: "首尾帧", edit: "视频编辑", extend: "视频续写", text: "文本生成" };
 const modeNotes: Record<CreationMode, string> = { omni: "自由组合图片、视频和音频", first_frame: "锁定开场画面继续创作", first_last: "精确控制起点与落点", edit: "替换、增删或重绘画面", extend: "向前、向后或多段衔接", text: "只用提示词生成镜头" };
@@ -238,12 +239,13 @@ function PromptEditor({ value, placeholder, assets, disabled, attach, change }: 
 
 function Composer({ models, compact, sessionId, onCreated, onImagesGenerated }: { models: ModelCapability[]; compact: boolean; sessionId: string; onCreated: (task: Task) => void; onImagesGenerated?: (bundle: ImageResultBundle) => void }) {
   const userId = useAssetCacheUserId();
+  const { catalog: imageModelCatalog, error: imageModelCatalogError } = useImageModelCatalog();
   const defaultModel = models[0];
   const [modelId, setModelId] = useState(defaultModel?.id ?? "");
   const model = models.find((item) => item.id === modelId) ?? defaultModel;
   const [mode, setMode] = useState<CreationMode>("omni");
   const [engine, setEngine] = useState<"video" | "image">("video");
-  const [imageModels, setImageModels] = useState<ImageModel[]>([]);
+  const imageModels = imageModelCatalog?.Items ?? [];
   const [imageModelId, setImageModelId] = useState("");
   const [imageRatio, setImageRatio] = useState("1:1");
   const [imageResolution, setImageResolution] = useState("");
@@ -284,19 +286,17 @@ function Composer({ models, compact, sessionId, onCreated, onImagesGenerated }: 
   const imageReady = engine === "image" ? Boolean(prompt.trim()) && Boolean(imageSpec) : undefined;
 
   useEffect(() => {
-    void api.get<{ Items: ImageModel[]; DefaultModel: string }>("/api/image-models").then((result) => {
-      const items = result.Items ?? [];
-      setImageModels(items);
-      setImageModelId((current) => {
-        const spec = items.find((item) => item.id === current) ?? items.find((item) => item.id === result.DefaultModel) ?? items[0];
-        if (spec) {
-          setImageResolution((resolution) => spec.resolutions.includes(resolution) ? resolution : (spec.defaultResolution ?? spec.resolutions[0]));
-          setImageCount((count) => Math.min(count, spec.maxCount));
-        }
-        return spec?.id ?? "";
-      });
-    }).catch(() => setImageModels([]));
-  }, []);
+    if (!imageModelCatalog) return;
+    const items = imageModelCatalog.Items;
+    setImageModelId((current) => {
+      const spec = items.find((item) => item.id === current) ?? items.find((item) => item.id === imageModelCatalog.DefaultModel) ?? items[0];
+      if (spec) {
+        setImageResolution((resolution) => spec.resolutions.includes(resolution) ? resolution : (spec.defaultResolution ?? spec.resolutions[0]));
+        setImageCount((count) => Math.min(count, spec.maxCount));
+      }
+      return spec?.id ?? "";
+    });
+  }, [imageModelCatalog]);
   useEffect(() => {
     if (!model) return;
     if (!model.modes.includes(mode)) { setMode(model.modes[0]); return; }
@@ -536,6 +536,7 @@ function Composer({ models, compact, sessionId, onCreated, onImagesGenerated }: 
       </div>
       {engine === "image" && loading && <div className="composer-generation-status" role="status" aria-live="polite"><Check /><span><b>已提交，正在生成</b><small>完成后会自动出现在结果区</small></span></div>}
       {draftNotice && <div className="composer-draft-status" role="status" aria-live="polite"><RefreshCw /><span>{draftNotice}</span></div>}
+      {engine === "image" && imageModelCatalogError && !imageModels.length && <div className="composer-error">{imageModelCatalogError}</div>}
       {error && <div className="composer-error">{error}</div>}
     </div>
   </div>;
