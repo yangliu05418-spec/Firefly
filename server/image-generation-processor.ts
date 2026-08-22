@@ -6,6 +6,7 @@ import { downloadGeneratedImage, generateSingleImage, isRetryableOpenRouterFailu
 import type { ImageGenerationQueuePayload } from "./redis.js";
 import { users } from "./store.js";
 import { signedProviderObjectUrl } from "./tos.js";
+import { UploadReferencePendingError } from "./asset-upload-admission.js";
 
 export type ImageGenerationAttempt = {
   id: string;
@@ -17,6 +18,7 @@ export type ImageGenerationAttempt = {
 export type ImageGenerationProcessorDependencies = {
   readTask: (id: string) => ImageGenerationTask | null;
   readUpload: typeof users.readUpload;
+  readUploadState: typeof users.readUploadState;
   updateTask: typeof users.updateImageGeneration;
   signReference: (objectKey: string) => string;
   generate: typeof generateSingleImage;
@@ -29,6 +31,7 @@ let productionDependencies: ImageGenerationProcessorDependencies | undefined;
 const defaultDependencies = () => productionDependencies ??= {
   readTask: (id) => users.readImageGeneration(id),
   readUpload: users.readUpload.bind(users),
+  readUploadState: users.readUploadState.bind(users),
   updateTask: users.updateImageGeneration.bind(users),
   signReference: signedProviderObjectUrl,
   generate: generateSingleImage,
@@ -57,7 +60,12 @@ export const processImageGenerationAttempt = async (
 
   const references = job.data.referenceUploadIds.map((uploadId) => {
     const media = deps.readUpload(uploadId);
-    if (!media || media.ownerId !== job.data.ownerId) throw new UnrecoverableError("参考素材不存在或已过期");
+    if (!media) {
+      const pending = deps.readUploadState(uploadId);
+      if (pending?.ownerId === job.data.ownerId && pending.status === "uploading") throw new UploadReferencePendingError();
+      throw new UnrecoverableError("参考素材不存在、已过期或未通过校验");
+    }
+    if (media.ownerId !== job.data.ownerId) throw new UnrecoverableError("参考素材不存在或已过期");
     return deps.signReference(media.objectKey);
   });
   const items = [...task.items];

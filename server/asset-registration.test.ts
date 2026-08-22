@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AssetRegistrationRejected, isRetryableAssetRejection, prepareProviderAssets } from "./asset-registration.js";
 import { providerAssetName } from "./asset-name.js";
 import { buildProviderPayload, type GenerationInput } from "./provider.js";
+import { UploadReferencePendingError } from "./asset-upload-admission.js";
 
 const input = (): GenerationInput => ({
   prompt: "Image 1 walks through a room", model: "dreamina-seedance-2-5-260628", mode: "omni",
@@ -44,6 +45,17 @@ describe("trusted asset registration", () => {
     });
     expect(result.assets[0]?.assetId).toBe("asset-existing");
     expect(callAsset).toHaveBeenCalledTimes(1);
+  });
+
+  it("defers provider asset registration until deep upload validation is ready", async () => {
+    const callAsset = vi.fn();
+    await expect(prepareProviderAssets(input(), "owner-1", {
+      readUpload: vi.fn(() => null) as never,
+      readUploadState: vi.fn(() => ({ ownerId: "owner-1", status: "uploading" })) as never,
+      cacheGet: vi.fn(async () => null), cacheSet: vi.fn(async () => undefined), callAsset: callAsset as never,
+      resolveMediaUrl: vi.fn(async () => "https://tos.example/asset") as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 1),
+    })).rejects.toBeInstanceOf(UploadReferencePendingError);
+    expect(callAsset).not.toHaveBeenCalled();
   });
 
   it("reconciles a CreateAsset response loss by deterministic upload name", async () => {

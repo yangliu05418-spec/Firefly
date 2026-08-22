@@ -20,6 +20,19 @@ export type AsyncJobOutboxStore = {
 
 export type AsyncJobQueues = Record<AsyncJobQueueName, OutboxQueue>;
 
+type RetriableQueueJob = { id?: string; attemptsMade: number; opts: { attempts?: number }; remove(): Promise<unknown> };
+
+/** Starts a fresh bounded BullMQ retry window while the durable task remains active. */
+export const requeueExhaustedAsyncJob = async (
+  store: Pick<AsyncJobOutboxStore, "requeueAsyncJobIntent">,
+  queueName: AsyncJobQueueName,
+  job: RetriableQueueJob,
+) => {
+  if (!job.id || job.attemptsMade < (job.opts.attempts ?? 1)) return false;
+  await job.remove();
+  return store.requeueAsyncJobIntent(queueName, job.id);
+};
+
 const retention = { age: 7 * 24 * 3600 };
 const queueOptions = (intent: AsyncJobOutbox): JobsOptions => {
   const imageWork = intent.queueName === "image-generation" || (intent.queueName === "canvas-jobs" && intent.jobName !== "text");

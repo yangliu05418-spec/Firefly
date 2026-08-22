@@ -2,9 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import type { ImageGenerationTask, MediaObject } from "./db.js";
 import {
   processImageGenerationAttempt,
+  type ImageGenerationAttempt,
   type ImageGenerationProcessorDependencies,
 } from "./image-generation-processor.js";
 import { OpenRouterError } from "./openrouter.js";
+import { UploadReferencePendingError } from "./asset-upload-admission.js";
 
 const taskFixture = (requestedCount = 1): ImageGenerationTask => ({
   id: "image-task-1",
@@ -44,6 +46,7 @@ const harness = (initialTask = taskFixture()) => {
   const deps: ImageGenerationProcessorDependencies = {
     readTask: () => task,
     readUpload: (() => null) as ImageGenerationProcessorDependencies["readUpload"],
+    readUploadState: (() => null) as ImageGenerationProcessorDependencies["readUploadState"],
     updateTask: ((id, ownerId, patch) => {
       if (!task || task.id !== id || task.ownerId !== ownerId) return null;
       task = { ...task, ...patch, updatedAt: task.updatedAt + 1 };
@@ -58,7 +61,7 @@ const harness = (initialTask = taskFixture()) => {
   return { deps, generate, store, discard, setTask: (next: ImageGenerationTask | null) => { task = next; }, task: () => task };
 };
 
-const attempt = (attemptNumber: number, maxAttempts = 3) => ({
+const attempt = (attemptNumber: number, maxAttempts = 3): ImageGenerationAttempt => ({
   id: "image-task-1",
   attemptNumber,
   maxAttempts,
@@ -91,6 +94,20 @@ describe("image generation processor", () => {
 
     await expect(processImageGenerationAttempt(mismatched, state.deps)).rejects.toThrow("所有者校验失败");
     expect(state.generate).not.toHaveBeenCalled();
+  });
+
+  it("defers provider submission while a transported reference is still validating", async () => {
+    const state = harness();
+    state.deps.readUploadState = (() => ({
+      id: "input:upload-1", uploadId: "upload-1", ownerId: "user-1", kind: "input", objectKey: "inputs/upload-1.png",
+      status: "uploading", fileName: "upload-1.png", contentType: "image/png", size: 10, etag: "", createdAt: 1, updatedAt: 1,
+    })) as ImageGenerationProcessorDependencies["readUploadState"];
+    const withReference = attempt(1);
+    withReference.data.referenceUploadIds = ["upload-1"];
+
+    await expect(processImageGenerationAttempt(withReference, state.deps)).rejects.toBeInstanceOf(UploadReferencePendingError);
+    expect(state.generate).not.toHaveBeenCalled();
+    expect(state.task()).toMatchObject({ status: "running", items: [], failures: [] });
   });
 
   it("resumes from durable checkpoints and does not regenerate completed items", async () => {

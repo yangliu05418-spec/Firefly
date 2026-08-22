@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { dispatchPendingAsyncJobs, reconcileDispatchedAsyncJobs, type AsyncJobQueues } from "./async-job-outbox.js";
+import { dispatchPendingAsyncJobs, reconcileDispatchedAsyncJobs, requeueExhaustedAsyncJob, type AsyncJobQueues } from "./async-job-outbox.js";
 import { UserStore, type StoredTask } from "./db.js";
 import { migrateDatabase } from "./migrations.js";
 
@@ -142,6 +142,21 @@ describe("durable async job outbox", () => {
     store.saveTask({ ...record, status: "failed", updatedAt: 70_001 });
     await reconcileDispatchedAsyncJobs(store, adapters, 130_001);
     expect(store.readAsyncJobIntent("generation", record.id)).toMatchObject({ status: "complete", payload: {} });
+    store.close();
+  });
+
+  it("opens a fresh retry window only after a BullMQ job exhausts its attempts", async () => {
+    const { store, owner } = createStore();
+    const record = task("task-reference-wait", owner.id);
+    store.createTaskWithinLimit(record, 2, { queueName: "generation", jobId: record.id, jobName: "generate", payload: { input: record.request } });
+    store.markAsyncJobDispatched("generation", record.id, 100);
+    const remove = vi.fn(async () => undefined);
+
+    expect(await requeueExhaustedAsyncJob(store, "generation", { id: record.id, attemptsMade: 3, opts: { attempts: 4 }, remove })).toBe(false);
+    expect(remove).not.toHaveBeenCalled();
+    expect(await requeueExhaustedAsyncJob(store, "generation", { id: record.id, attemptsMade: 4, opts: { attempts: 4 }, remove })).toBe(true);
+    expect(remove).toHaveBeenCalledOnce();
+    expect(store.readAsyncJobIntent("generation", record.id)).toMatchObject({ status: "pending" });
     store.close();
   });
 });

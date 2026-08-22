@@ -14,6 +14,8 @@ import { resolveCanvasGenerationReferences } from "./canvas-project-assets.js";
 import { submitProviderTaskOnce } from "./generation-submission.js";
 import { pollProviderTaskUntilTerminal, ProviderPollingTerminalError } from "./provider-polling.js";
 import { generationReplayAction } from "./generation-replay.js";
+import { canKeepPreparingReference, UploadReferencePendingError } from "./asset-upload-admission.js";
+import { requeueExhaustedAsyncJob } from "./async-job-outbox.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const archiveRecoveryBucketMs = 15 * 60 * 1000;
@@ -123,19 +125,27 @@ worker.on("failed", async (job, error) => {
   try {
     const task = await readTask(job.id);
     if (!task) return;
+    const referencePending = error instanceof UploadReferencePendingError
+      || error instanceof AssetRegistrationRejected && isRetryableAssetRejection(error);
+    if (referencePending && canKeepPreparingReference(task.createdAt)) {
+      const requeued = await requeueExhaustedAsyncJob(users, "generation", job);
+      console.info(JSON.stringify({ type: "generation_waiting_for_reference", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempts: job.attemptsMade, requeued }));
+      return;
+    }
     if (shouldRecoverArchiveHandoff(task, config.mediaStorageBackend)) {
       await enqueueArchiveHandoff(task);
       console.warn(JSON.stringify({ type: "generation_archive_handoff_recovered", at: new Date().toISOString(), taskId: task.id }));
       users.completeAsyncJobIntent("generation", job.id);
       return;
     }
-    await saveTask({ ...task, status: "failed", error: error.message, updatedAt: Date.now() });
+    const message = referencePending ? "参考素材长时间未能准备完成，请重新上传后再试" : error.message;
+    await saveTask({ ...task, status: "failed", error: message, updatedAt: Date.now() });
     const canvasJob = users.readCanvasJobByProviderTask(task.id);
     if (canvasJob && canvasJob.status !== "cancelled") {
-      const failed = users.transitionActiveCanvasJob(canvasJob.id, { status: "failed", error: error.message.slice(0, 500) });
+      const failed = users.transitionActiveCanvasJob(canvasJob.id, { status: "failed", error: message.slice(0, 500) });
       if (failed) await connection.publish(`canvas:events:${canvasJob.canvasId}`, JSON.stringify({ type: "canvas_job", job: failed }));
     }
-    console.error(JSON.stringify({ type: "generation_failed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, providerId: task.providerId, attempts: job.attemptsMade, message: error.message }));
+    console.error(JSON.stringify({ type: "generation_failed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, providerId: task.providerId, attempts: job.attemptsMade, message }));
     users.completeAsyncJobIntent("generation", job.id);
   } catch (handlerError) {
     console.error(JSON.stringify({ type: "generation_failure_handler_failed", at: new Date().toISOString(), taskId: job.id, code: (handlerError as { code?: string }).code ?? "unknown" }));
