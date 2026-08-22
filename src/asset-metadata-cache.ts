@@ -163,9 +163,24 @@ export async function loadAssetsCacheFirst(options: {
 }) {
   const cache = options.cache ?? assetMetadataCache;
   const freshRequest = options.loadFresh().then((assets) => ({ ok: true as const, assets }), (error: unknown) => ({ ok: false as const, error }));
-  const cached = (options.selectCached ?? ((assets) => assets))(await cache.read(options.userId));
-  if (cached.length) options.onCached?.(cached);
-  const fresh = await freshRequest;
+  const cachedRequest = cache.read(options.userId).then(options.selectCached ?? ((assets) => assets));
+  const first = await Promise.race([
+    freshRequest.then((fresh) => ({ source: "network" as const, fresh })),
+    cachedRequest.then((cached) => ({ source: "cache" as const, cached })),
+  ]);
+  let cached: LibraryAsset[] = [];
+  let fresh: Awaited<typeof freshRequest>;
+  if (first.source === "cache") {
+    cached = first.cached;
+    if (cached.length) options.onCached?.(cached);
+    fresh = await freshRequest;
+  } else {
+    fresh = first.fresh;
+    if (!fresh.ok) {
+      cached = await cachedRequest;
+      if (cached.length) options.onCached?.(cached);
+    }
+  }
   if (!fresh.ok) {
     if (cached.length) return { assets: cached, source: "cache" as const, error: fresh.error };
     throw fresh.error;
