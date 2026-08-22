@@ -92,4 +92,22 @@ describe("asset metadata cache", () => {
     expect(result.assets.map((item) => item.Id)).toEqual(["cached"]);
     expect((await cache.read("user-a")).map((item) => item.Id)).toEqual(["cached"]);
   });
+
+  it("never lets a hanging IndexedDB read block a fresh asset response", async () => {
+    const never = new Promise<never>(() => undefined);
+    const cache = createAssetMetadataCache({ get: () => never, put: () => never, delete: () => never }, () => 1_000, 5);
+
+    await expect(loadAssetsCacheFirst({ userId: "user-a", cache, loadFresh: async () => [asset("fresh")] }))
+      .resolves.toMatchObject({ source: "network", assets: [{ Id: "fresh" }] });
+  });
+
+  it("releases its mutation queue when IndexedDB persistence hangs", async () => {
+    const never = new Promise<never>(() => undefined);
+    const cache = createAssetMetadataCache({ get: async () => undefined, put: () => never, delete: async () => undefined }, () => 1_000, 5);
+
+    await cache.replace("user-a", [asset("first")]);
+    await cache.merge("user-a", [asset("second")]);
+
+    expect((await cache.read("user-a")).map((item) => item.Id)).toEqual(["second", "first"]);
+  });
 });

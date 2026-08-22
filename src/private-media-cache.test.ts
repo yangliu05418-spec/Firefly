@@ -88,4 +88,28 @@ describe("private media cache account scope", () => {
     expect(persisted).toHaveBeenCalledTimes(1);
     expect(persist).toHaveBeenCalledTimes(1);
   });
+
+  it("does not let a hanging CacheStorage cleanup block the next authenticated user", async () => {
+    vi.useFakeTimers();
+    try {
+      const state = browser();
+      await scopePrivateMediaCacheToUser("user-old");
+      const never = new Promise<never>(() => undefined);
+      window.caches.keys = () => never;
+      window.caches.delete = () => never;
+
+      const switching = scopePrivateMediaCacheToUser("user-new");
+      await respondToPrivateMediaCacheScopeRequest({ type: "REQUEST_PRIVATE_MEDIA_CACHE_SCOPE" });
+      expect(state.messages.at(-1)).toEqual({ type: "CLEAR_PRIVATE_MEDIA_CACHE" });
+      await vi.advanceTimersByTimeAsync(300);
+      await switching;
+
+      expect(state.messages.slice(-2)).toEqual([
+        { type: "CLEAR_PRIVATE_MEDIA_CACHE" },
+        { type: "SET_PRIVATE_MEDIA_CACHE_SCOPE", userId: "user-new" },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
