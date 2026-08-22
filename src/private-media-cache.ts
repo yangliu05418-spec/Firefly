@@ -1,8 +1,11 @@
+import { bestEffortWithin } from "./best-effort";
+
 export const PRIVATE_MEDIA_CACHE_NAME = "firefly-private-pending-assets-v1";
 export const PRIVATE_MEDIA_CACHE_PREFIX = "firefly-private-thumbnails-v2-";
 export const PRIVATE_MEDIA_LEGACY_CACHE_NAME = "firefly-private-thumbnails-v1";
 export const PRIVATE_MEDIA_SERVICE_WORKER_URL = "/api/firefly-media-sw.js";
 const PRIVATE_MEDIA_CACHE_USER_KEY = "firefly-private-media-cache-user";
+const CACHE_OPERATION_BUDGET_MS = 300;
 let persistenceRequest: Promise<boolean> | undefined;
 let currentPrivateMediaUser = "";
 
@@ -19,6 +22,11 @@ export function persistPrivateMediaStorage() {
 }
 
 export async function clearPrivateMediaCache() {
+  if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+    // Revoke access before touching optional CacheStorage. Even a stuck cache
+    // cleanup can no longer expose the previous user's namespace.
+    navigator.serviceWorker.controller?.postMessage({ type: "CLEAR_PRIVATE_MEDIA_CACHE" });
+  }
   if (hasCacheStorage()) {
     try {
       const names = typeof window.caches.keys === "function" ? await window.caches.keys() : [];
@@ -26,9 +34,6 @@ export async function clearPrivateMediaCache() {
       await Promise.all([...targets].map((name) => window.caches.delete(name)));
     }
     catch { /* Private media caching is a performance enhancement, never a product dependency. */ }
-  }
-  if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-    navigator.serviceWorker.controller?.postMessage({ type: "CLEAR_PRIVATE_MEDIA_CACHE" });
   }
 }
 
@@ -66,8 +71,14 @@ export async function scopePrivateMediaCacheToUser(userId: string) {
   catch { /* Storage can be unavailable in hardened/private browsing modes. */ }
   // Remove the legacy shared cache on every authenticated bootstrap. Scoped
   // caches remain available for the same user and are cleared on account swap.
-  try { await window.caches?.delete(PRIVATE_MEDIA_LEGACY_CACHE_NAME); } catch { /* Best effort migration. */ }
-  if (previous && previous !== userId) await clearPrivateMediaCache();
+  if (previous && previous !== userId) {
+    // Prevent a restarted worker from restoring the previous scope while its
+    // best-effort disk cleanup is still consuming the bounded time budget.
+    currentPrivateMediaUser = "";
+    await bestEffortWithin(clearPrivateMediaCache(), CACHE_OPERATION_BUDGET_MS);
+  } else {
+    void bestEffortWithin(window.caches?.delete(PRIVATE_MEDIA_LEGACY_CACHE_NAME) ?? Promise.resolve(false), CACHE_OPERATION_BUDGET_MS);
+  }
   try { window.localStorage.setItem(PRIVATE_MEDIA_CACHE_USER_KEY, userId); }
   catch { /* The native HTTP cache remains available when localStorage is blocked. */ }
   currentPrivateMediaUser = userId;

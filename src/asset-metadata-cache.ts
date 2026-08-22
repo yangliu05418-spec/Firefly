@@ -1,10 +1,12 @@
 import type { LibraryAsset } from "./types";
+import { bestEffortWithin } from "./best-effort";
 
 const DB_NAME = "firefly-client-cache-v1";
 const STORE_NAME = "asset-metadata";
 const CACHE_VERSION = 1;
 const MAX_ASSETS = 500;
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const CACHE_OPERATION_BUDGET_MS = 300;
 
 export type AssetCacheRecord = {
   userId: string;
@@ -83,19 +85,19 @@ const indexedDbStore = (): AssetMetadataStore => {
   };
 };
 
-export const createAssetMetadataCache = (store: AssetMetadataStore, now = () => Date.now()) => {
+export const createAssetMetadataCache = (store: AssetMetadataStore, now = () => Date.now(), operationBudgetMs = CACHE_OPERATION_BUDGET_MS) => {
   const memory = new Map<string, AssetCacheRecord>();
   const mutations = new Map<string, Promise<void>>();
   const getRecord = async (userId: string) => {
     let record = memory.get(userId);
     if (!record) {
-      try { record = await store.get(userId); }
-      catch { return undefined; }
+      record = await bestEffortWithin(store.get(userId), operationBudgetMs);
       if (record) memory.set(userId, record);
     }
-    if (!record || record.version !== CACHE_VERSION || now() - record.updatedAt > MAX_AGE_MS) {
+    if (!record) return undefined;
+    if (record.version !== CACHE_VERSION || now() - record.updatedAt > MAX_AGE_MS) {
       memory.delete(userId);
-      try { await store.delete(userId); } catch { /* Expired cache cleanup is best effort. */ }
+      await bestEffortWithin(store.delete(userId), operationBudgetMs);
       return undefined;
     }
     return record;
@@ -116,7 +118,7 @@ export const createAssetMetadataCache = (store: AssetMetadataStore, now = () => 
   const persist = async (userId: string, assets: readonly LibraryAsset[]) => {
     const record: AssetCacheRecord = { userId, version: CACHE_VERSION, updatedAt: now(), assets: normalizeAssets(assets) };
     memory.set(userId, record);
-    try { await store.put(record); } catch { /* Cache failures must never block the product. */ }
+    await bestEffortWithin(store.put(record), operationBudgetMs);
   };
   return {
     async read(userId: string) { return [...(await safeGet(userId))?.assets ?? []]; },
@@ -144,7 +146,7 @@ export const createAssetMetadataCache = (store: AssetMetadataStore, now = () => 
     clear(userId: string) {
       return enqueue(userId, async () => {
         memory.delete(userId);
-        try { await store.delete(userId); } catch { /* Best-effort privacy cleanup. */ }
+        await bestEffortWithin(store.delete(userId), operationBudgetMs);
       });
     },
   };
@@ -168,7 +170,7 @@ export async function loadAssetsCacheFirst(options: {
     if (cached.length) return { assets: cached, source: "cache" as const, error: fresh.error };
     throw fresh.error;
   }
-  await cache.merge(options.userId, fresh.assets);
+  void cache.merge(options.userId, fresh.assets).catch(() => undefined);
   return { assets: fresh.assets, source: "network" as const };
 }
 
