@@ -95,10 +95,15 @@ describe("asset metadata cache", () => {
 
   it("never lets a hanging IndexedDB read block a fresh asset response", async () => {
     const never = new Promise<never>(() => undefined);
-    const cache = createAssetMetadataCache({ get: () => never, put: () => never, delete: () => never }, () => 1_000, 5);
+    const cache = createAssetMetadataCache({ get: () => never, put: () => never, delete: () => never }, () => 1_000, 60_000);
+    let settled = false;
+    const loading = loadAssetsCacheFirst({ userId: "user-a", cache, loadFresh: async () => [asset("fresh")] })
+      .then((result) => { settled = true; return result; });
 
-    await expect(loadAssetsCacheFirst({ userId: "user-a", cache, loadFresh: async () => [asset("fresh")] }))
-      .resolves.toMatchObject({ source: "network", assets: [{ Id: "fresh" }] });
+    for (let index = 0; index < 5; index += 1) await Promise.resolve();
+
+    expect(settled).toBe(true);
+    await expect(loading).resolves.toMatchObject({ source: "network", assets: [{ Id: "fresh" }] });
   });
 
   it("releases its mutation queue when IndexedDB persistence hangs", async () => {
