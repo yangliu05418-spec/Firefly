@@ -78,15 +78,35 @@ describe("private media cache account scope", () => {
   });
 
   it("asks the browser to protect native asset caches from automatic eviction", async () => {
-    const persisted = vi.fn(async () => false);
+    const persisted = vi.fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
     const persist = vi.fn(async () => true);
     vi.stubGlobal("navigator", { storage: { persisted, persist } });
 
     await expect(persistPrivateMediaStorage()).resolves.toBe(true);
     await expect(persistPrivateMediaStorage()).resolves.toBe(true);
 
-    expect(persisted).toHaveBeenCalledTimes(1);
+    expect(persisted).toHaveBeenCalledTimes(2);
     expect(persist).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a denied bootstrap request from a later user gesture", async () => {
+    const persisted = vi.fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    const persist = vi.fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    vi.stubGlobal("navigator", { storage: { persisted, persist } });
+
+    await expect(persistPrivateMediaStorage()).resolves.toBe(false);
+    await expect(persistPrivateMediaStorage()).resolves.toBe(true);
+    await expect(persistPrivateMediaStorage()).resolves.toBe(true);
+
+    expect(persisted).toHaveBeenCalledTimes(3);
+    expect(persist).toHaveBeenCalledTimes(2);
   });
 
   it("does not let a hanging CacheStorage cleanup block the next authenticated user", async () => {

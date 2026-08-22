@@ -9,6 +9,7 @@ import { RecoveringThumbnail } from "../../recovering-image";
 import type { AssetCategory, LibraryAsset, LibraryGroup } from "../../types";
 import { uploadFileUntilAccepted } from "../../upload-acceptance";
 import { usePendingAssetPreviews } from "../../use-pending-asset-previews";
+import { persistPrivateMediaStorage } from "../../private-media-cache";
 
 export function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: LibraryAsset) => void }) {
   const userId = useAssetCacheUserId();
@@ -36,6 +37,10 @@ export function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: 
   const cancelRename = useRef(false);
   const uploadControllers = useRef(new Set<AbortController>());
   const pendingPreviews = usePendingAssetPreviews(userId, assets);
+  const openFilePicker = () => {
+    void persistPrivateMediaStorage();
+    fileInput.current?.click();
+  };
 
   const loadPage = async (requestedPage: number, replace: boolean, search = query) => {
     const sequence = ++requestSequence.current;
@@ -270,7 +275,7 @@ export function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: 
       <div>
         {assets.length > 0 && <button className="quiet" onClick={toggleAll}>{allSelected ? <CheckSquare2 /> : <Square />}{allSelected ? "取消全选" : "全选当前页"}</button>}
         {selected.size > 0 && <button className="quiet danger" onClick={() => setConfirmDelete(true)}><Trash2 /> 删除 {selected.size} 项</button>}
-        <button className="asset-upload" disabled={!group || uploading} onClick={() => fileInput.current?.click()}>{uploading ? <LoaderCircle className="spin" /> : <Upload />}{progress ? `上传 ${progress.done}/${progress.total}` : "上传图片"}</button>
+        <button className="asset-upload" disabled={!group || uploading} onClick={openFilePicker}>{uploading ? <LoaderCircle className="spin" /> : <Upload />}{progress ? `上传 ${progress.done}/${progress.total}` : "上传图片"}</button>
         <input ref={fileInput} hidden multiple type="file" accept="image/*" onChange={(event) => void uploadImages(event.target.files)} />
       </div>
     </div>
@@ -279,7 +284,7 @@ export function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: 
       <ImageIcon />
       <h2>{query ? "没有匹配的图片" : category === "all" ? "把常用参考图放在这里" : `${assetCategoryLabels[category]}标签下还没有图片`}</h2>
       <p>{query ? "换一个关键词，或清除搜索。" : "支持一次选择多张图片；上传时会自动归入当前标签。"}</p>
-      {query ? <button onClick={() => setQuery("")}>清除搜索</button> : <button disabled={!group} onClick={() => fileInput.current?.click()}><Upload /> 上传第一批图片</button>}
+      {query ? <button onClick={() => setQuery("")}>清除搜索</button> : <button disabled={!group} onClick={openFilePicker}><Upload /> 上传第一批图片</button>}
     </div> : <>
       <div className="image-assets__grid">{assets.map((asset) => {
         const preview = assetPreviewSource(asset, pendingPreviews.get(asset.Id));

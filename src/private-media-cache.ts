@@ -15,10 +15,17 @@ const hasCacheStorage = () => typeof window !== "undefined" && "caches" in windo
 export function persistPrivateMediaStorage() {
   if (persistenceRequest) return persistenceRequest;
   if (typeof navigator === "undefined" || !navigator.storage?.persisted || !navigator.storage?.persist) return Promise.resolve(false);
-  persistenceRequest = navigator.storage.persisted()
+  const request = navigator.storage.persisted()
     .then((persisted) => persisted || navigator.storage.persist())
     .catch(() => false);
-  return persistenceRequest;
+  persistenceRequest = request;
+  void request.then(() => {
+    // Browsers can deny a bootstrap-time request before the user has interacted
+    // with Firefly. Deduplicate concurrent calls, then re-check on later asset
+    // or upload clicks so a real user gesture can obtain persistence.
+    if (persistenceRequest === request) persistenceRequest = undefined;
+  });
+  return request;
 }
 
 export async function clearPrivateMediaCache() {

@@ -13,7 +13,7 @@ import { createSessionRecoverably, hasActiveStudioWork, isAmbiguousSubmissionFai
 import { loadStudioBootstrap } from "./studio-bootstrap";
 import { useAdaptiveRefresh } from "./use-adaptive-refresh";
 import { composerDraftCache } from "./composer-draft-cache";
-import { deactivatePrivateMediaCacheScope, forgetPrivateMediaCacheUser, scopePrivateMediaCacheToUser } from "./private-media-cache";
+import { deactivatePrivateMediaCacheScope, forgetPrivateMediaCacheUser, persistPrivateMediaStorage, scopePrivateMediaCacheToUser } from "./private-media-cache";
 import { RecoveringImage, RecoveringThumbnail } from "./recovering-image";
 import { bootstrapSession } from "./auth-bootstrap";
 const statusText: Record<Task["status"], string> = { queued: "等待调度", submitting: "正在提交", running: "正在生成", succeeded: "生成完成", failed: "生成失败" };
@@ -475,7 +475,7 @@ function Studio({ user, route, navigate, logout }: { user: SessionUser; route: s
     finally { setCreatingSession(false); if (window.innerWidth <= 760) setSidebar(false); }
   };
   const showCreate = (fresh = false) => { if (fresh) { void createSession(); return; } const target = sessions.find((session) => session.id === activeSessionId) ?? sessions[0]; if (target) void openSession(target); else void createSession(); };
-  const showAssets = () => { navigate("/studio/assets"); setProfileOpen(false); setFeatureNotice(null); void Promise.allSettled([api.get<Task[]>("/api/generations"), api.get<ImageResultBundle[]>("/api/image-generations")]).then(([videos, images]) => { if (videos.status === "fulfilled") setAssetTasks(videos.value); if (images.status === "fulfilled") setAssetImageResults(images.value); setSyncIssue(videos.status === "rejected" || images.status === "rejected"); }); if (window.innerWidth <= 760) setSidebar(false); };
+  const showAssets = () => { void persistPrivateMediaStorage(); navigate("/studio/assets"); setProfileOpen(false); setFeatureNotice(null); void Promise.allSettled([api.get<Task[]>("/api/generations"), api.get<ImageResultBundle[]>("/api/image-generations")]).then(([videos, images]) => { if (videos.status === "fulfilled") setAssetTasks(videos.value); if (images.status === "fulfilled") setAssetImageResults(images.value); setSyncIssue(videos.status === "rejected" || images.status === "rejected"); }); if (window.innerWidth <= 760) setSidebar(false); };
   const showCanvas = () => { navigate("/studio/canvas"); setProfileOpen(false); setFeatureNotice(null); if (window.innerWidth <= 760) setSidebar(false); };
   const createCanvasFromSidebar = () => { setPendingCanvasCreate(true); showCanvas(); };
   const dismissAtlas = () => {
