@@ -15,7 +15,7 @@ import { areAttachedUploadsReady } from "./upload-state";
 import { createSessionRecoverably, hasActiveStudioWork, isAmbiguousSubmissionFailure, replaceSessionSnapshot, selectSessionSnapshot, upsertStudioItem } from "./studio-sync";
 import { loadStudioBootstrap } from "./studio-bootstrap";
 import { useAdaptiveRefresh } from "./use-adaptive-refresh";
-import { composerDraftCache, type ComposerDraftState } from "./composer-draft-cache";
+import { clearComposerDraftInBackground, composerDraftCache, type ComposerDraftState } from "./composer-draft-cache";
 import { recoverComposerDraftAsset } from "./composer-draft-recovery";
 import { reconcileComposerAssets } from "./composer-assets";
 import { uploadFileUntilAccepted } from "./upload-acceptance";
@@ -453,18 +453,18 @@ function Composer({ models, compact, sessionId, onCreated, onImagesGenerated }: 
     setLoading(true); setError("");
     let pendingImage: ImageResultBundle | undefined;
     let pendingVideo: Task | undefined;
-    const clearSubmittedComposer = async () => {
+    const clearSubmittedComposer = () => {
       setPrompt(""); clearAttachedAssets();
-      await composerDraftCache.clearSession(userId, sessionId);
+      clearComposerDraftInBackground(composerDraftCache, userId, sessionId);
     };
     try {
       if (engine === "image") {
         const spec = imageModels.find((item) => item.id === imageModelId) ?? imageModels[0];
         const submittedPrompt = prompt.trim();
         pendingImage = { id: crypto.randomUUID(), sessionId, modelName: spec?.name ?? imageModelId, ratio: imageRatio, resolution: imageResolution, prompt: submittedPrompt, items: [], createdAt: Date.now(), status: "generating", requestedCount: imageCount };
-        await clearSubmittedComposer();
-        onImagesGenerated?.(pendingImage);
         const references = assets.filter((asset) => asset.type === "image" && asset.uploadId).map((asset) => asset.uploadId!);
+        clearSubmittedComposer();
+        onImagesGenerated?.(pendingImage);
         await api.post<ImageGenResponse>("/api/image-generation", { requestId: pendingImage.id, sessionId, model: imageModelId, ratio: imageRatio, resolution: imageResolution, count: imageCount, prompt: submittedPrompt, references }, { timeoutMs: 8_000 });
         return;
       }
@@ -473,7 +473,7 @@ function Composer({ models, compact, sessionId, onCreated, onImagesGenerated }: 
       const submittedAt = Date.now();
       pendingVideo = { id: requestId, sessionId, caseId: requestId, ownerId: userId, visibility: "private", status: "submitting", mediaStatus: "none", prompt: submittedPrompt, model: model.id, mode, ratio, resolution, duration, createdAt: submittedAt, updatedAt: submittedAt };
       const task = await api.post<Task>("/api/generations", { requestId, sessionId, prompt: submittedPrompt, model: model.id, mode, ratio, resolution, duration, generateAudio: model.supportsAudio && generateAudio, seed, cameraFixed, watermark, outputFormat: "mp4", assets: assets.map(({ preview, progress, size, ...asset }) => asset) }, { timeoutMs: 8_000 });
-      await clearSubmittedComposer(); onCreated(task);
+      clearSubmittedComposer(); onCreated(task);
     } catch (e) {
       const message = e instanceof Error ? e.message : "无法创建任务";
       if (pendingImage && isAmbiguousSubmissionFailure(e)) {
@@ -485,7 +485,7 @@ function Composer({ models, compact, sessionId, onCreated, onImagesGenerated }: 
         return;
       }
       if (pendingVideo && isAmbiguousSubmissionFailure(e)) {
-        await clearSubmittedComposer(); onCreated(pendingVideo);
+        clearSubmittedComposer(); onCreated(pendingVideo);
         void api.get<Task>(`/api/generations/${encodeURIComponent(pendingVideo.id)}`, { timeoutMs: 8_000 })
           .then(onCreated)
           .catch((confirmation) => { if ((confirmation as { status?: number }).status === 404) onCreated({ ...pendingVideo!, status: "failed", error: "任务未完成接纳，请重新生成", updatedAt: Date.now() }); });

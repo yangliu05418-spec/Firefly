@@ -165,3 +165,16 @@ export const createComposerDraftCache = (store: ComposerDraftStore, now = () => 
 };
 
 export const composerDraftCache = createComposerDraftCache(indexedDbStore());
+
+/**
+ * Draft persistence is a local recovery aid, never part of generation
+ * admission. IndexedDB can be slow or temporarily unavailable, so clearing a
+ * submitted draft must not delay or reject the provider-facing request.
+ */
+export const clearComposerDraftInBackground = (
+  cache: Pick<ReturnType<typeof createComposerDraftCache>, "clearSession">,
+  userId: string,
+  sessionId: string,
+) => {
+  void cache.clearSession(userId, sessionId).catch(() => undefined);
+};

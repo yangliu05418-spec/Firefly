@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createComposerDraftCache, type ComposerDraftRecord, type ComposerDraftState, type ComposerDraftStore } from "./composer-draft-cache";
+import { clearComposerDraftInBackground, createComposerDraftCache, type ComposerDraftRecord, type ComposerDraftState, type ComposerDraftStore } from "./composer-draft-cache";
 
 const state = (patch: Partial<ComposerDraftState> = {}): ComposerDraftState => ({
   engine: "video", prompt: "雨夜街道", modelId: "seedance", mode: "omni", ratio: "16:9", resolution: "720p", duration: 5,
@@ -60,5 +60,19 @@ describe("composer draft cache", () => {
     expect(await cache.read("user-a", "session-a")).toBeUndefined();
     expect(await cache.read("user-a", "session-b")).toBeUndefined();
     expect(await cache.read("user-b", "session-a")).toBeDefined();
+  });
+
+  it("never makes generation wait for a slow or failed IndexedDB cleanup", async () => {
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    const cache = { clearSession: () => pending };
+
+    expect(clearComposerDraftInBackground(cache, "user-a", "session-a")).toBeUndefined();
+    finish();
+    await pending;
+
+    const failed = { clearSession: async () => { throw new Error("IndexedDB unavailable"); } };
+    expect(clearComposerDraftInBackground(failed, "user-a", "session-a")).toBeUndefined();
+    await Promise.resolve();
   });
 });
