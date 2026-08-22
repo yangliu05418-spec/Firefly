@@ -21,7 +21,7 @@ import {
   acquireCanvasLease, cancelCanvasJob, createCanvasJob, getCanvasV2, importCanvasProjectAsset, listCanvasAssets, listCanvasJobs,
   releaseCanvasLease, renewCanvasLease, saveCanvasV2, type CanvasJob, type CanvasProjectAsset,
 } from "../canvas-api";
-import { canCreateFromNode, createCanvasNodeV2, defaultCanvasDocumentV2, NODE_CONNECTION_MATRIX, toCanvasDocumentV2, type CanvasDocumentV2, type CanvasNodeTypeV2, type CanvasNodeV2 } from "../canvas-v2-types";
+import { canCreateFromNode, canvasNodeForPersistence, createCanvasNodeV2, defaultCanvasDocumentV2, NODE_CONNECTION_MATRIX, toCanvasDocumentV2, type CanvasDocumentV2, type CanvasNodeTypeV2, type CanvasNodeV2 } from "../canvas-v2-types";
 import { deleteCanvasDraft, readCanvasDraft, writeCanvasDraft } from "./canvas-draft";
 import { CanvasV2Node, type CanvasFlowData, type CanvasFlowNode } from "./CanvasV2Node";
 import { canvasAssetDownloadName } from "./canvas-download";
@@ -350,7 +350,7 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
       nodes: graph.nodes.map((node) => {
         const pendingPatch = pendingNodePatches.current.get(node.id);
         const domain = pendingPatch ? { ...node.data.domain, data: { ...node.data.domain.data, ...pendingPatch } } : node.data.domain;
-        return { ...domain, position: node.position, width: node.measured?.width ?? node.width ?? domain.width, height: node.measured?.height ?? node.height ?? domain.height, parentId: node.parentId };
+        return canvasNodeForPersistence({ ...domain, position: node.position, width: node.measured?.width ?? node.width ?? domain.width, height: node.measured?.height ?? node.height ?? domain.height, parentId: node.parentId });
       }),
       connections: graph.connections.map((edge) => ({ id: edge.id, source: edge.source, target: edge.target, sourceHandle: "right", targetHandle: "left", relation: "context" })),
     };
