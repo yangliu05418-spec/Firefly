@@ -36,7 +36,7 @@ const json = (route: Route, body: unknown, status = 200) => route.fulfill({ stat
 async function mockAuthenticatedApi(page: Page, options: {
   leaseHeld?: boolean; expireLeaseOnce?: boolean; document?: CanvasDocumentV2; imageGenerationDelayMs?: number; projectAssets?: CanvasProjectAsset[];
   creationSessions?: Array<{ id: string; title: string; createdAt: number; updatedAt: number }>;
-  imageHistory?: Array<Record<string, unknown>>; imageSessionFailures?: string[]; generationAdmissionResponseLost?: boolean; creationSessionAdmissionResponseLost?: boolean;
+  imageHistory?: Array<Record<string, unknown>>; imageSessionFailures?: string[]; holdGenerationAdmission?: boolean; generationAdmissionResponseLost?: boolean; creationSessionAdmissionResponseLost?: boolean;
   authSessionFailures?: number;
 } = {}) {
   let revision = 0;
@@ -47,6 +47,10 @@ async function mockAuthenticatedApi(page: Page, options: {
   let creationSessions = structuredClone(options.creationSessions ?? [{ id: "session-e2e", title: "新创作", createdAt: Date.now(), updatedAt: Date.now() }]);
   const postedSessionRequests: string[] = [];
   const postedGenerations: Array<Record<string, unknown>> = [];
+  let releaseGenerationAdmission: () => void = () => undefined;
+  const generationAdmissionGate = options.holdGenerationAdmission
+    ? new Promise<void>((resolve) => { releaseGenerationAdmission = resolve; })
+    : Promise.resolve();
   let leasePostCount = 0;
   let leaseRenewCount = 0;
   const saveLeaseTokens: string[] = [];
@@ -115,6 +119,7 @@ async function mockAuthenticatedApi(page: Page, options: {
       const now = Date.now();
       const pending = { id: body.requestId, sessionId: body.sessionId, caseId: body.requestId, ownerId: "user-e2e", visibility: "private", status: "queued", mediaStatus: "none", prompt: body.prompt, model: body.model, mode: body.mode, ratio: body.ratio, resolution: body.resolution, duration: body.duration, createdAt: now, updatedAt: now };
       videoHistory = [pending, ...videoHistory.filter((item) => item.id !== pending.id)];
+      await generationAdmissionGate;
       return options.generationAdmissionResponseLost ? json(route, { error: "response lost" }, 503) : json(route, pending, 202);
     }
     if (/^\/api\/generations\/[^/]+$/.test(path) && request.method() === "GET") {
@@ -186,6 +191,7 @@ async function mockAuthenticatedApi(page: Page, options: {
     saveLeaseTokens: () => [...saveLeaseTokens],
     postedJobs: () => [...postedJobs],
     postedGenerations: () => [...postedGenerations],
+    releaseGenerationAdmission,
     postedSessionRequests: () => [...postedSessionRequests],
     authSessionRequests: () => authSessionRequests,
     creationSessions: () => structuredClone(creationSessions),
@@ -575,6 +581,25 @@ test("a lost video admission response reconciles by client id without creating a
   await expect(page.locator(".composer-dock").getByRole("textbox", { name: "创作提示词" })).toHaveText("");
   await expect.poll(() => mock.postedGenerations()).toHaveLength(1);
   expect(mock.postedGenerations()[0]?.requestId).toMatch(/^[0-9a-f-]{36}$/);
+});
+
+test("video generation acknowledges the click while task admission completes in the background", async ({ page }) => {
+  const mock = await mockAuthenticatedApi(page, { holdGenerationAdmission: true });
+  await page.goto("/studio/sessions/session-e2e");
+  await page.getByRole("button", { name: "全能参考", exact: true }).click();
+  await page.getByRole("button", { name: /文本生成/ }).click();
+  const prompt = "海边公路上缓慢后退的长镜头";
+  await page.getByRole("textbox", { name: "创作提示词" }).fill(prompt);
+  await page.locator(".send-button").click();
+
+  const confirmation = page.locator(".composer-generation-status");
+  await expect(confirmation).toContainText("已提交，正在确认任务", { timeout: 500 });
+  await expect(confirmation).toContainText("接纳后会立即进入上方生成队列");
+  await expect(page.getByRole("button", { name: "视频已提交，正在确认任务" })).toBeVisible();
+  await expect(page.locator(".task-card").filter({ hasText: prompt })).toHaveCount(0);
+  mock.releaseGenerationAdmission();
+  await expect(page.locator(".task-card").filter({ hasText: prompt })).toBeVisible({ timeout: 8_000 });
+  await expect(confirmation).toHaveCount(0);
 });
 
 test("a fast text edit is committed to the browser draft before the page leaves", async ({ page }) => {
