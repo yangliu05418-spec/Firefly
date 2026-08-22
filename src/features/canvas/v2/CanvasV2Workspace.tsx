@@ -14,6 +14,7 @@ import { filterCachedAssets, loadAssetsCacheFirst } from "../../../asset-metadat
 import { runWithConcurrency } from "../../../concurrency";
 import { readPendingAssetPreview, removePendingAssetPreview, storePendingAssetPreview } from "../../../pending-asset-preview-cache";
 import { useAdaptiveRefresh } from "../../../use-adaptive-refresh";
+import { useImageModelCatalog } from "../../../use-image-model-catalog";
 import type { AssetCategory, ImageModel, LibraryAsset, ModelCapability, SessionUser } from "../../../types";
 import {
   acquireCanvasLease, cancelCanvasJob, createCanvasJob, getCanvasV2, importCanvasProjectAsset, listCanvasAssets, listCanvasJobs,
@@ -27,6 +28,8 @@ import { canvasVideoModeForReferences, canvasVideoModelsForReferences, type Canv
 import { CANVAS_INITIAL_FIT_VIEW_OPTIONS, hasCanvasConnection, incomingCanvasReferences, placeCanvasMenu, withoutEphemeralCanvasElements, type CanvasMenuAnchor } from "./canvas-ux";
 
 const CanvasMontage = lazy(() => import("./CanvasMontage").then((module) => ({ default: module.CanvasMontage })));
+const EMPTY_IMAGE_MODELS: ImageModel[] = [];
+const EMPTY_IMAGE_RATIOS: string[] = [];
 
 type SaveState = "saved" | "draft" | "saving" | "offline" | "conflict" | "error";
 type CreateMenu = { sourceId?: string; side?: "left" | "right"; anchor?: CanvasMenuAnchor; screen?: { x: number; y: number }; position?: { x: number; y: number }; focusOnOpen?: boolean };
@@ -88,6 +91,7 @@ function CanvasZoomControls() {
 }
 
 function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; navigate: (path: string) => void; user: SessionUser; logout: () => void }) {
+  const { catalog: imageModelCatalog, error: imageModelCatalogError } = useImageModelCatalog();
   const flow = useReactFlow<CanvasFlowNode, Edge>();
   const viewport = useViewport();
   const [nodes, setNodes, onNodesChangeBase] = useNodesState<CanvasFlowNode>([]);
@@ -114,8 +118,8 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   const [globalAssets, setGlobalAssets] = useState<LibraryAsset[]>([]);
   const globalAssetRequest = useRef(0);
   const [videoModels, setVideoModels] = useState<ModelCapability[]>([]);
-  const [imageModels, setImageModels] = useState<ImageModel[]>([]);
-  const [imageRatios, setImageRatios] = useState<string[]>([]);
+  const imageModels = imageModelCatalog?.Items ?? EMPTY_IMAGE_MODELS;
+  const imageRatios = imageModelCatalog?.Ratios ?? EMPTY_IMAGE_RATIOS;
   const [assetSearch, setAssetSearch] = useState("");
   const [uploading, setUploading] = useState<CanvasUploadItem[]>([]);
   const uploadBatchControllers = useRef(new Set<AbortController>());
@@ -425,15 +429,14 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
   }, [assetPanel, composer, cropNodeId, inspectAsset, montageOpen, shortcutOpen]);
   useEffect(() => {
     let active = true;
-    Promise.all([
-      api.get<ModelCapability[]>("/api/models"),
-      api.get<{ Items: ImageModel[]; Ratios: string[] }>("/api/image-models"),
-    ]).then(([videos, images]) => {
-      if (!active) return;
-      setVideoModels(videos); setImageModels(images.Items); setImageRatios(images.Ratios);
-    }).catch(() => { if (active) setMessage("模型能力暂时无法载入，画布编辑不受影响"); });
+    void api.get<ModelCapability[]>("/api/models").then((videos) => { if (active) setVideoModels(videos); }).catch(() => { if (active) setMessage((current) => current || "视频模型能力暂时无法载入，画布编辑不受影响"); });
     return () => { active = false; };
   }, []);
+  useEffect(() => {
+    const unavailable = "图片模型能力暂时无法载入，网络恢复后会自动重试";
+    if (imageModelCatalogError && !imageModelCatalog) setMessage((current) => current || unavailable);
+    else setMessage((current) => current === unavailable ? "" : current);
+  }, [imageModelCatalog, imageModelCatalogError]);
   useEffect(() => { const media = matchMedia("(max-width: 820px)"); const update = () => setMobile(media.matches); media.addEventListener("change", update); return () => media.removeEventListener("change", update); }, []);
   useEffect(() => {
     if (!mobile || !leaseToken) return;
