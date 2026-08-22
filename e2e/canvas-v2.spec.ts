@@ -261,6 +261,10 @@ test("asset archive preserves the selected media view across refresh", async ({ 
   await page.getByRole("button", { name: "图片资产" }).click();
   await expect(page).toHaveURL(/\/studio\/assets\?view=images$/);
   await expect(page.getByRole("heading", { name: "生成图片" })).toBeVisible();
+  // Group metadata is a control-plane refresh. The deterministic Firefly
+  // namespace must keep direct-to-TOS upload available when that request is
+  // slow or temporarily unavailable (the mock intentionally returns 404).
+  await expect(page.getByRole("button", { name: "上传图片" })).toBeEnabled();
 
   await page.reload();
   await expect(page.getByRole("button", { name: "图片资产" })).toHaveAttribute("aria-current", "page");
