@@ -5,6 +5,7 @@ import { RecoveringImage, type ImageRecoveryState } from "../../../recovering-im
 import type { CanvasNodeTypeV2, CanvasNodeV2 } from "../canvas-v2-types";
 import { LazyCanvasVideo } from "../components/media/LazyCanvasVideo";
 import type { CanvasMenuAnchor, CanvasReferenceSummary } from "./canvas-ux";
+import { persistPrivateMediaStorage } from "../../../private-media-cache";
 
 const CanvasRichText = lazy(() => import("./CanvasRichText").then((module) => ({ default: module.CanvasRichText })));
 
@@ -51,7 +52,7 @@ function CanvasV2NodeView({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     <Icon />
     <span>{emptyCopy[domain.type]}</span>
     {!readOnly && <div className="canvas-v2-node__empty-actions nodrag nowheel">
-      <button type="button" onClick={() => uploadInput.current?.click()}>
+      <button type="button" onClick={() => { void persistPrivateMediaStorage(); uploadInput.current?.click(); }}>
         <Upload />
         <span>本地上传</span>
       </button>

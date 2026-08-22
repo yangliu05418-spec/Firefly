@@ -8,6 +8,7 @@ import { uploadFileUntilAccepted } from "../../upload-acceptance";
 import { assetPreviewSource } from "../../asset-preview-source";
 import { usePendingAssetPreviews } from "../../use-pending-asset-previews";
 import { RecoveringThumbnail } from "../../recovering-image";
+import { persistPrivateMediaStorage } from "../../private-media-cache";
 
 export function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
   const userId = useAssetCacheUserId();
@@ -159,7 +160,7 @@ export function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
       <div className="library-create">
         {groups.length ? <>
           <label><input type="checkbox" checked={rights} onChange={(event) => setRights(event.target.checked)} /> 我确认素材为 AI 角色且拥有完整权利</label>
-          <button disabled={!rights || creating} onClick={() => libraryFile.current?.click()}>{creating ? <LoaderCircle className="spin" /> : <Upload />} {creating && batchProgress ? batchProgress.uploaded > batchProgress.done ? `已上传 ${batchProgress.uploaded}/${batchProgress.total} · 正在准备引用` : `正在上传 ${batchProgress.done}/${batchProgress.total}` : `批量上传到「${groups[0].Name}」`}</button>
+          <button disabled={!rights || creating} onClick={() => { void persistPrivateMediaStorage(); libraryFile.current?.click(); }}>{creating ? <LoaderCircle className="spin" /> : <Upload />} {creating && batchProgress ? batchProgress.uploaded > batchProgress.done ? `已上传 ${batchProgress.uploaded}/${batchProgress.total} · 正在准备引用` : `正在上传 ${batchProgress.done}/${batchProgress.total}` : `批量上传到「${groups[0].Name}」`}</button>
           <input hidden ref={libraryFile} type="file" multiple accept="image/*,video/mp4,video/quicktime,audio/mpeg,audio/wav" onChange={(event) => void ingest(event.target.files)} />
         </> : <>
           <input value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder="输入第一个角色分组名称" />
