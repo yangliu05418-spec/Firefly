@@ -324,9 +324,9 @@ export function Composer({ models, compact, sessionId, onCreated, onImagesGenera
         <span className="control-spacer" />
           </>
         )}
-        <button className={`send-button ${engine === "image" && loading ? "send-button--submitted" : ""}`} title={uploadsFinalizing ? "文件已上传，引用准备完成后即可生成" : undefined} aria-label={uploadsFinalizing ? "文件已上传，正在准备引用" : engine === "image" && loading ? "图片已提交，正在生成" : engine === "image" ? "生成图片" : "生成视频"} aria-busy={engine === "image" && loading ? true : undefined} disabled={loading || !uploadsReady || !modeReady} onClick={submit}>{engine === "image" && loading ? <Check /> : loading ? <LoaderCircle className="spin" /> : <Send />}</button>
+        <button className={`send-button ${loading ? "send-button--submitted" : ""}`} title={uploadsFinalizing ? "文件已上传，引用准备完成后即可生成" : undefined} aria-label={uploadsFinalizing ? "文件已上传，正在准备引用" : loading ? engine === "image" ? "图片已提交，正在生成" : "视频已提交，正在确认任务" : engine === "image" ? "生成图片" : "生成视频"} aria-busy={loading ? true : undefined} disabled={loading || !uploadsReady || !modeReady} onClick={submit}>{loading ? <Check /> : <Send />}</button>
       </div>
-      {engine === "image" && loading && <div className="composer-generation-status" role="status" aria-live="polite"><Check /><span><b>已提交，正在生成</b><small>完成后会自动出现在结果区</small></span></div>}
+      {loading && <div className="composer-generation-status" role="status" aria-live="polite"><Check /><span><b>{engine === "image" ? "已提交，正在生成" : "已提交，正在确认任务"}</b><small>{engine === "image" ? "完成后会自动出现在结果区" : "接纳后会立即进入上方生成队列"}</small></span></div>}
       {draftNotice && <div className="composer-draft-status" role="status" aria-live="polite"><RefreshCw /><span>{draftNotice}</span></div>}
       {engine === "image" && imageModelCatalogError && !imageModels.length && <div className="composer-error">{imageModelCatalogError}</div>}
       {error && <div className="composer-error">{error}</div>}
