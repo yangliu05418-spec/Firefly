@@ -6,13 +6,13 @@ import type { LibraryAsset } from "./types";
 import { usePendingAssetPreviews } from "./use-pending-asset-previews";
 
 const cache = vi.hoisted(() => ({
-  read: vi.fn<() => Promise<Blob | undefined>>(),
+  readMany: vi.fn<() => Promise<Map<string, Blob>>>(),
   remove: vi.fn<() => Promise<void>>(),
   store: vi.fn<() => Promise<void>>(),
 }));
 
 vi.mock("./pending-asset-preview-cache", () => ({
-  readPendingAssetPreview: cache.read,
+  readPendingAssetPreviews: cache.readMany,
   removePendingAssetPreview: cache.remove,
   storePendingAssetPreview: cache.store,
 }));
@@ -35,22 +35,31 @@ describe("pending asset preview hook", () => {
   let container: HTMLDivElement;
   let nextUrl = 0;
   const revoke = vi.fn();
+  const preloaders: { onload: (() => void) | null; onerror: (() => void) | null; src: string }[] = [];
 
   beforeEach(() => {
     container = document.createElement("div");
     document.body.append(container);
     nextUrl = 0;
-    cache.read.mockReset().mockResolvedValue(undefined);
+    cache.readMany.mockReset().mockResolvedValue(new Map());
     cache.remove.mockReset().mockResolvedValue(undefined);
     cache.store.mockReset().mockResolvedValue(undefined);
+    preloaders.length = 0;
+    vi.stubGlobal("Image", class {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      private value = "";
+      set src(value: string) { this.value = value; if (value) preloaders.push(this); }
+      get src() { return this.value; }
+    });
     Object.defineProperty(URL, "createObjectURL", { configurable: true, value: vi.fn(() => `blob:test-${++nextUrl}`) });
     Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: revoke });
     revoke.mockReset();
   });
 
-  afterEach(() => { container.remove(); });
+  afterEach(() => { container.remove(); vi.unstubAllGlobals(); });
 
-  it("shows a local upload immediately and releases it when the remote asset is active", async () => {
+  it("keeps a local upload visible until the active remote thumbnail has actually loaded", async () => {
     const root = createRoot(container);
     let remember: ((id: string, blob: Blob) => void) | undefined;
     await act(async () => { root.render(<Harness current={asset("Processing")} onReady={(callback) => { remember = callback; }} />); });
@@ -58,7 +67,12 @@ describe("pending asset preview hook", () => {
     expect(container.textContent).toBe("blob:test-1");
     expect(cache.store).toHaveBeenCalledWith("user-1", "asset-1", expect.any(Blob));
 
-    await act(async () => { root.render(<Harness current={asset("Active")} />); });
+    await act(async () => { root.render(<Harness current={asset("Active")} />); await Promise.resolve(); });
+    expect(container.textContent).toBe("blob:test-1");
+    expect(cache.remove).not.toHaveBeenCalled();
+    expect(preloaders).toHaveLength(1);
+
+    await act(async () => { preloaders[0]?.onload?.(); await Promise.resolve(); });
     expect(container.textContent).toBe("none");
     expect(cache.remove).toHaveBeenCalledWith("user-1", "asset-1");
     expect(revoke).toHaveBeenCalledWith("blob:test-1");
@@ -66,11 +80,24 @@ describe("pending asset preview hook", () => {
   });
 
   it("restores a pending preview after a refresh", async () => {
-    cache.read.mockResolvedValue(new Blob(["cached"], { type: "image/webp" }));
+    cache.readMany.mockResolvedValue(new Map([["asset-1", new Blob(["cached"], { type: "image/webp" })]]));
     const root = createRoot(container);
     await act(async () => { root.render(<Harness current={asset("Processing")} />); await Promise.resolve(); });
     expect(container.textContent).toBe("blob:test-1");
     await act(async () => root.unmount());
     expect(revoke).toHaveBeenCalledWith("blob:test-1");
+  });
+
+  it("keeps a restored local fallback when the active TOS thumbnail is unavailable", async () => {
+    cache.readMany.mockResolvedValue(new Map([["asset-1", new Blob(["cached"], { type: "image/webp" })]]));
+    const root = createRoot(container);
+    await act(async () => { root.render(<Harness current={asset("Active")} />); await Promise.resolve(); });
+    expect(container.textContent).toBe("blob:test-1");
+    expect(preloaders).toHaveLength(1);
+
+    await act(async () => { preloaders[0]?.onerror?.(); await Promise.resolve(); });
+    expect(container.textContent).toBe("blob:test-1");
+    expect(cache.remove).not.toHaveBeenCalled();
+    await act(async () => root.unmount());
   });
 });
