@@ -27,19 +27,28 @@ export async function storePendingAssetPreview(userId: string, assetId: string, 
 }
 
 export async function readPendingAssetPreview(userId: string, assetId: string) {
-  if (!storageAvailable()) return undefined;
+  return (await readPendingAssetPreviews(userId, [assetId])).get(assetId);
+}
+
+/** Open CacheStorage once when restoring a page of assets. */
+export async function readPendingAssetPreviews(userId: string, assetIds: readonly string[]) {
+  const restored = new Map<string, Blob>();
+  if (!storageAvailable()) return restored;
   try {
     const cache = await window.caches.open(PRIVATE_MEDIA_CACHE_NAME);
-    const request = requestFor(userId, assetId);
-    const response = await cache.match(request);
-    if (!response) return undefined;
-    const cachedAt = Number(response.headers.get("X-Firefly-Cached-At") ?? 0);
-    if (!cachedAt || Date.now() - cachedAt > MAX_AGE_MS) {
-      await cache.delete(request);
-      return undefined;
-    }
-    return await response.blob();
-  } catch { return undefined; }
+    await Promise.all([...new Set(assetIds)].map(async (assetId) => {
+      const request = requestFor(userId, assetId);
+      const response = await cache.match(request);
+      if (!response) return;
+      const cachedAt = Number(response.headers.get("X-Firefly-Cached-At") ?? 0);
+      if (!cachedAt || Date.now() - cachedAt > MAX_AGE_MS) {
+        await cache.delete(request);
+        return;
+      }
+      restored.set(assetId, await response.blob());
+    }));
+  } catch { /* Cache recovery is optional; the authenticated TOS route remains authoritative. */ }
+  return restored;
 }
 
 export async function removePendingAssetPreview(userId: string, assetId: string) {

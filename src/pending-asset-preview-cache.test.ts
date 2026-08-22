@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readPendingAssetPreview, removePendingAssetPreview, storePendingAssetPreview } from "./pending-asset-preview-cache";
+import { readPendingAssetPreview, readPendingAssetPreviews, removePendingAssetPreview, storePendingAssetPreview } from "./pending-asset-preview-cache";
 
 const browserCache = () => {
   const entries = new Map<string, Response>();
@@ -24,6 +24,17 @@ describe("pending asset preview cache", () => {
 
     expect(await (await readPendingAssetPreview("user-a", "asset-1"))?.text()).toBe("preview");
     expect(await readPendingAssetPreview("user-b", "asset-1")).toBeUndefined();
+  });
+
+  it("restores a page of previews with one CacheStorage open", async () => {
+    browserCache();
+    await storePendingAssetPreview("user-a", "asset-1", new Blob(["one"]));
+    await storePendingAssetPreview("user-a", "asset-2", new Blob(["two"]));
+
+    const restored = await readPendingAssetPreviews("user-a", ["asset-1", "asset-2", "missing"]);
+    expect(await restored.get("asset-1")?.text()).toBe("one");
+    expect(await restored.get("asset-2")?.text()).toBe("two");
+    expect(restored.has("missing")).toBe(false);
   });
 
   it("expires pending previews and supports explicit cleanup", async () => {
