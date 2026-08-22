@@ -5,6 +5,7 @@ import { redis } from "./redis.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
 import { acquireAssetCreationLock, releaseAssetCreationLock } from "./upload-slots.js";
 import { providerAssetName } from "./asset-name.js";
+import { UploadReferencePendingError } from "./asset-upload-admission.js";
 
 import type { GenerationInput } from "./provider.js";
 
@@ -32,6 +33,7 @@ type GroupRecord = { Id: string; Name?: string };
 
 type RegistrationDeps = {
   readUpload: typeof users.readUpload;
+  readUploadState?: typeof users.readUploadState;
   cacheGet: (key: string) => Promise<string | null>;
   cacheSet: (key: string, value: string) => Promise<unknown>;
   callAsset: typeof callAssetApi;
@@ -49,6 +51,7 @@ type RegistrationDeps = {
 let productionDeps: RegistrationDeps | undefined;
 const defaultDeps = () => productionDeps ??= {
   readUpload: users.readUpload.bind(users),
+  readUploadState: users.readUploadState.bind(users),
   cacheGet: (key) => redis.get(key),
   cacheSet: (key, value) => redis.set(key, value, "EX", CACHE_TTL_SECONDS),
   callAsset: callAssetApi,
@@ -137,7 +140,12 @@ const registerUpload = async (uploadId: string, ownerId: string, name: string, i
   if (registrationPending) throw new AssetRegistrationRejected(`参考素材「${name}」正在可信资产注册中，请稍后重试`, "ASSET_PROCESSING_TIMEOUT");
   if (!assetId) {
     const media = deps.readUpload(uploadId);
-    if (!media || media.ownerId !== ownerId || media.status !== "ready") throw new Error(`参考素材「${name}」不存在或尚未完成上传`);
+    if (!media) {
+      const pending = deps.readUploadState?.(uploadId);
+      if (pending?.ownerId === ownerId && pending.status === "uploading") throw new UploadReferencePendingError(`参考素材「${name}」`);
+      throw new AssetRegistrationRejected(`参考素材「${name}」不存在、已过期或未通过校验`, "ASSET_PROVIDER_FAILED");
+    }
+    if (media.ownerId !== ownerId || media.status !== "ready") throw new AssetRegistrationRejected(`参考素材「${name}」不存在、已过期或未通过校验`, "ASSET_PROVIDER_FAILED");
     groupId = await ensureGroupId(deps);
     assetType = media.contentType.startsWith("video/") ? "Video" : media.contentType.startsWith("audio/") ? "Audio" : "Image";
     const providerName = providerAssetName(name, uploadId);

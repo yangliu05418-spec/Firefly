@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AudioLines, Check, ChevronDown, Clock3, Clapperboard, Film, ImageIcon, Layers3, LoaderCircle, Plus, RefreshCw, Send, Settings2, Sparkles, Video, WandSparkles, X } from "lucide-react";
-import { api, inferUploadType, uploadFile } from "../../api";
+import { api, inferUploadType } from "../../api";
 import { useAssetCacheUserId } from "../../asset-cache-context";
 import { reconcileComposerAssets } from "../../composer-assets";
 import { clearComposerDraftInBackground, composerDraftCache, type ComposerDraftState } from "../../composer-draft-cache";
@@ -9,11 +9,12 @@ import { materializePromptReferences } from "../../prompt-references";
 import { RecoveringThumbnail } from "../../recovering-image";
 import { isAmbiguousSubmissionFailure } from "../../studio-sync";
 import type { CreationMode, ImageGenResponse, ImageResultBundle, ModelCapability, Task, UploadAsset } from "../../types";
-import { areAttachedUploadsReady } from "../../upload-state";
+import { areAttachedUploadsAdmissible } from "../../upload-state";
 import { useImageModelCatalog } from "../../use-image-model-catalog";
 import { LibraryPanel } from "./LibraryPanel";
 import { PromptEditor } from "./PromptEditor";
 import { persistPrivateMediaStorage } from "../../private-media-cache";
+import { uploadFileUntilAccepted } from "../../upload-acceptance";
 
 const modeLabels: Record<CreationMode, string> = { omni: "全能参考", first_frame: "首帧生成", first_last: "首尾帧", edit: "视频编辑", extend: "视频续写", text: "文本生成" };
 const modeNotes: Record<CreationMode, string> = { omni: "自由组合图片、视频和音频", first_frame: "锁定开场画面继续创作", first_last: "精确控制起点与落点", edit: "替换、增删或重绘画面", extend: "向前、向后或多段衔接", text: "只用提示词生成镜头" };
@@ -208,11 +209,11 @@ export function Composer({ models, compact, sessionId, onCreated, onImagesGenera
         const tempId = pending.id;
         const role = pending.role;
       try {
-        const uploaded = await uploadFile(file, pending.type, (progress, phase) => setAssets((old) => old.map((a) => a.id === tempId ? { ...a, progress, phase } : a)), {
+        const uploaded = await uploadFileUntilAccepted(file, pending.type, (progress, phase) => setAssets((old) => old.map((a) => a.id === tempId ? { ...a, progress, phase } : a)), {
           signal: controller.signal,
           onTransportComplete: (transport) => setAssets((old) => old.map((asset) => asset.id === tempId ? { ...asset, uploadId: transport.uploadId ?? transport.id, name: file.name, size: transport.size, progress: 100, phase: "verifying" } : asset)),
         });
-        setAssets((old) => old.map((a) => a.id === tempId ? { ...a, ...uploaded, id: tempId, uploadId: uploaded.uploadId ?? uploaded.id, role, progress: 100, phase: "ready" } : a));
+        setAssets((old) => old.map((a) => a.id === tempId ? { ...a, ...uploaded, id: tempId, uploadId: uploaded.uploadId ?? uploaded.id, role, progress: 100, phase: "verifying" } : a));
         } catch (e) {
           releaseLocalPreview(pending.preview);
           setAssets((old) => old.filter((a) => a.id !== tempId));
@@ -289,7 +290,7 @@ export function Composer({ models, compact, sessionId, onCreated, onImagesGenera
     } finally { setLoading(false); }
   };
 
-  const uploadsReady = areAttachedUploadsReady(assets);
+  const uploadsReady = areAttachedUploadsAdmissible(assets);
   const uploadsFinalizing = assets.some((asset) => !asset.assetId && asset.progress === 100 && asset.phase === "verifying");
   const modeReady = engine === "image" ? imageReady!
     : mode === "text" ? Boolean(prompt.trim())
@@ -301,7 +302,7 @@ export function Composer({ models, compact, sessionId, onCreated, onImagesGenera
   return <div className={`composer ${compact ? "composer--compact" : ""}`} onClick={(e) => e.stopPropagation()}>
     {!compact && <h1>今晚，想创造什么？</h1>}
     <div className="composer-shell">
-      {!!assets.length && <div className="asset-strip">{assets.map((asset, index) => <div className="asset-chip" key={asset.id}>{asset.preview ? <RecoveringThumbnail src={asset.preview} alt={asset.name || "参考素材"} fallbackClassName="asset-chip__media" manualRecovery={false} /> : asset.type === "image" ? <ImageIcon /> : asset.type === "video" ? <Video /> : <AudioLines />}<span><b>{asset.role === "first_frame" ? "首帧" : asset.role === "last_frame" ? "尾帧" : `${asset.type === "image" ? "图片" : asset.type === "video" ? "视频" : "音频"} ${index + 1}`}</b><small>{asset.status === "Processing" ? "正在恢复素材引用" : asset.phase === "preparing" ? "正在检查图片" : asset.phase === "verifying" ? "文件已上传 · 正在准备引用" : asset.progress === 100 ? `${asset.name}${asset.normalized ? " · 已自动补白" : ""}` : `上传 ${asset.progress ?? 0}%`}</small></span>{asset.progress !== 100 && <i style={{ width: `${asset.progress ?? 0}%` }} />}<button onClick={() => removeAttachedAsset(asset.id)}><X /></button></div>)}</div>}
+      {!!assets.length && <div className="asset-strip">{assets.map((asset, index) => <div className="asset-chip" key={asset.id}>{asset.preview ? <RecoveringThumbnail src={asset.preview} alt={asset.name || "参考素材"} fallbackClassName="asset-chip__media" manualRecovery={false} /> : asset.type === "image" ? <ImageIcon /> : asset.type === "video" ? <Video /> : <AudioLines />}<span><b>{asset.role === "first_frame" ? "首帧" : asset.role === "last_frame" ? "尾帧" : `${asset.type === "image" ? "图片" : asset.type === "video" ? "视频" : "音频"} ${index + 1}`}</b><small>{asset.status === "Processing" ? "正在恢复素材引用" : asset.phase === "preparing" ? "正在检查图片" : asset.phase === "verifying" ? `${asset.name} · 已上传，可立即生成` : asset.progress === 100 ? `${asset.name}${asset.normalized ? " · 已自动补白" : ""}` : `上传 ${asset.progress ?? 0}%`}</small></span>{asset.progress !== 100 && <i style={{ width: `${asset.progress ?? 0}%` }} />}<button onClick={() => removeAttachedAsset(asset.id)}><X /></button></div>)}</div>}
       <div className={`prompt-row ${referenceSlots.length > 1 ? "prompt-row--dual" : ""} ${!referenceSlots.length ? "prompt-row--text" : ""}`}>
         {!!referenceSlots.length && <div className="reference-slots">{referenceSlots.map((label, index) => <button className="add-reference" key={label} onClick={() => { void persistPrivateMediaStorage(); fileInput.current?.click(); }} disabled={(mode === "first_frame" && assets.length >= 1) || (mode === "first_last" && assets.length > index)}><Plus /><span>{label}</span></button>)}</div>}
         <PromptEditor value={prompt} change={setPrompt} placeholder={engine === "image" ? "描述你想生成的画面；上传参考图即可进行图生图……" : modePlaceholders[mode]} assets={assets} disabled={mode === "text" && engine === "video"} attach={attachMentionAsset} />
@@ -325,7 +326,7 @@ export function Composer({ models, compact, sessionId, onCreated, onImagesGenera
         <span className="control-spacer" />
           </>
         )}
-        <button className={`send-button ${loading ? "send-button--submitted" : ""}`} title={uploadsFinalizing ? "文件已上传，引用准备完成后即可生成" : undefined} aria-label={uploadsFinalizing ? "文件已上传，正在准备引用" : loading ? engine === "image" ? "图片已提交，正在生成" : "视频已提交，正在确认任务" : engine === "image" ? "生成图片" : "生成视频"} aria-busy={loading ? true : undefined} disabled={loading || !uploadsReady || !modeReady} onClick={submit}>{loading ? <Check /> : <Send />}</button>
+        <button className={`send-button ${loading ? "send-button--submitted" : ""}`} title={uploadsFinalizing ? "文件已上传，后台准备引用，不影响提交" : undefined} aria-label={loading ? engine === "image" ? "图片已提交，正在生成" : "视频已提交，正在确认任务" : engine === "image" ? "生成图片" : "生成视频"} aria-busy={loading ? true : undefined} disabled={loading || !uploadsReady || !modeReady} onClick={submit}>{loading ? <Check /> : <Send />}</button>
       </div>
       {loading && <div className="composer-generation-status" role="status" aria-live="polite"><Check /><span><b>{engine === "image" ? "已提交，正在生成" : "已提交，正在确认任务"}</b><small>{engine === "image" ? "完成后会自动出现在结果区" : "接纳后会立即进入上方生成队列"}</small></span></div>}
       {draftNotice && <div className="composer-draft-status" role="status" aria-live="polite"><RefreshCw /><span>{draftNotice}</span></div>}

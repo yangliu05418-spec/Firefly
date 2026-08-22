@@ -155,7 +155,7 @@ async function mockAuthenticatedApi(page: Page, options: {
     if (/^\/api\/uploads\/upload-e2e-\d+\/chunks$/.test(path) && request.method() === "POST") return route.fulfill({ status: 204 });
     if (/^\/api\/uploads\/upload-e2e-\d+\/complete$/.test(path) && request.method() === "POST") {
       const uploadId = path.split("/")[3]!;
-      return json(route, { id: uploadId, uploadId, name: "node-upload.png", type: "image", size: 68 });
+      return json(route, { id: uploadId, uploadId, name: "node-upload.png", type: "image", size: 68, state: "processing" }, 202);
     }
     if (/^\/api\/uploads\/upload-e2e-\d+$/.test(path) && request.method() === "DELETE") return route.fulfill({ status: 204 });
     if (path === "/api/canvases/canvas-e2e/assets") return json(route, { Items: projectAssets, HasMore: false });
@@ -239,6 +239,8 @@ test("composer keeps uploaded assets available through the inline mention picker
   await page.locator('.composer input[type="file"]').setInputFiles("public/ciridae/video-placeholder.webp");
   const attached = page.locator(".asset-chip").filter({ hasText: "video-placeholder.webp" });
   await expect(attached).toBeVisible({ timeout: 15_000 });
+  await expect(attached).toContainText("已上传，可立即生成");
+  await expect(page.getByRole("button", { name: "生成视频" })).toBeEnabled();
 
   const editor = page.getByRole("textbox", { name: "创作提示词" });
   await editor.click();

@@ -480,8 +480,8 @@ app.post("/api/generations", requireAuth, async (req, res) => {
     for (const asset of requestedInput.assets) {
       if (asset.canvasProjectAssetId) return res.status(404).json({ error: "引用素材不存在或无权访问" });
       if (asset.uploadId) {
-        const media = users.readUpload(asset.uploadId);
-        if (!media || media.ownerId !== owner.id) return res.status(404).json({ error: "引用素材不存在或已过期" });
+        const media = users.readUploadState(asset.uploadId);
+        if (!canCreatePendingAsset(media, owner.id)) return res.status(404).json({ error: "引用素材不存在或已过期" });
         assets.push(asset);
         continue;
       }
@@ -840,8 +840,8 @@ app.post("/api/image-generation", requireAuth, async (req, res) => {
     // Only persist opaque upload ids in BullMQ. The worker signs fresh URLs
     // immediately before the provider call, so queue delays cannot expire them.
     for (const uploadId of body.references) {
-      const media = users.readUpload(uploadId);
-      if (!media || media.ownerId !== user.id) return res.status(404).json({ error: "参考素材不存在或已过期" });
+      const media = users.readUploadState(uploadId);
+      if (!canCreatePendingAsset(media, user.id)) return res.status(404).json({ error: "参考素材不存在或已过期" });
     }
     if (!openRouterPool().size) return res.status(503).json({ error: "服务端尚未配置 OpenRouter API Key" });
     const startedAt = Date.now();

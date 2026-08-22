@@ -4,3 +4,14 @@ import type { MediaObject } from "./db.js";
 export const canCreatePendingAsset = (media: MediaObject | null, ownerId: string): media is MediaObject => Boolean(
   media && media.ownerId === ownerId && media.kind === "input" && ["uploading", "ready"].includes(media.status),
 );
+
+export class UploadReferencePendingError extends Error {
+  readonly code = "UPLOAD_REFERENCE_PENDING";
+  constructor(name = "参考素材") {
+    super(`${name}已上传，正在完成内容校验`);
+    this.name = "UploadReferencePendingError";
+  }
+}
+
+export const REFERENCE_PREPARATION_DEADLINE_MS = 30 * 60 * 1000;
+export const canKeepPreparingReference = (createdAt: number, now = Date.now()) => now - createdAt < REFERENCE_PREPARATION_DEADLINE_MS;

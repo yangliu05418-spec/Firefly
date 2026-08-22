@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { UploadAsset } from "./types";
-import { areAttachedUploadsReady } from "./upload-state";
+import { areAttachedUploadsAdmissible } from "./upload-state";
 
 const upload = (patch: Partial<UploadAsset> = {}): UploadAsset => ({
   id: "upload-1", uploadId: "upload-1", name: "image.png", type: "image", size: 10,
@@ -8,15 +8,19 @@ const upload = (patch: Partial<UploadAsset> = {}): UploadAsset => ({
 });
 
 describe("attached upload readiness", () => {
-  it("does not submit while transport is complete but server validation is pending", () => {
-    expect(areAttachedUploadsReady([upload({ phase: "verifying" })])).toBe(false);
+  it("admits a durably transported upload while server validation continues", () => {
+    expect(areAttachedUploadsAdmissible([upload({ phase: "verifying" })])).toBe(true);
   });
 
   it("accepts a finalized local upload and an active reusable asset", () => {
-    expect(areAttachedUploadsReady([upload(), upload({ id: "asset-1", assetId: "asset-1", phase: undefined, status: "Active" })])).toBe(true);
+    expect(areAttachedUploadsAdmissible([upload(), upload({ id: "asset-1", assetId: "asset-1", phase: undefined, status: "Active" })])).toBe(true);
   });
 
   it("rejects provider assets that are still processing", () => {
-    expect(areAttachedUploadsReady([upload({ id: "asset-1", assetId: "asset-1", phase: undefined, status: "Processing" })])).toBe(false);
+    expect(areAttachedUploadsAdmissible([upload({ id: "asset-1", assetId: "asset-1", phase: undefined, status: "Processing" })])).toBe(false);
+  });
+
+  it("does not admit bytes that have not received a durable upload id", () => {
+    expect(areAttachedUploadsAdmissible([upload({ uploadId: undefined, phase: "uploading" })])).toBe(false);
   });
 });
