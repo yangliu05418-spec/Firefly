@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Library, LoaderCircle, Plus, Sparkles, Upload } from "lucide-react";
 import { api, inferUploadType } from "../../api";
+import { assetLibraryGroupsOrDefault, defaultAssetLibraryGroup } from "../../asset-library-config";
 import type { LibraryAsset, LibraryGroup, UploadAsset } from "../../types";
 import { useAssetCacheUserId } from "../../asset-cache-context";
 import { assetMetadataCache } from "../../asset-metadata-cache";
@@ -12,7 +13,7 @@ import { persistPrivateMediaStorage } from "../../private-media-cache";
 
 export function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
   const userId = useAssetCacheUserId();
-  const [groups, setGroups] = useState<LibraryGroup[]>([]);
+  const [groups, setGroups] = useState<LibraryGroup[]>([defaultAssetLibraryGroup]);
   const [assets, setAssets] = useState<LibraryAsset[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -39,7 +40,7 @@ export function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
       }
       const [groupResult, assetResult] = await freshRequest;
       if (!active) return;
-      if (groupResult.status === "fulfilled") setGroups(groupResult.value.Items ?? []);
+      if (groupResult.status === "fulfilled") setGroups(assetLibraryGroupsOrDefault(groupResult.value.Items));
       if (assetResult.status === "fulfilled") {
         const fresh = assetResult.value.Items ?? [];
         setAssets(fresh);

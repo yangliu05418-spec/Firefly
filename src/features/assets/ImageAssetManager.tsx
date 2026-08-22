@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, CheckSquare2, ImageIcon, LayoutGrid, LoaderCircle, Pencil, Plus, Search, Square, Trash2, Upload } from "lucide-react";
 import { api, inferUploadType } from "../../api";
+import { assetLibraryGroupsOrDefault, defaultAssetLibraryGroup } from "../../asset-library-config";
 import { assetCategories, assetCategoryLabels } from "../../asset-categories";
 import { useAssetCacheUserId } from "../../asset-cache-context";
 import { assetMetadataCache, filterCachedAssets } from "../../asset-metadata-cache";
@@ -14,7 +15,7 @@ import { persistPrivateMediaStorage } from "../../private-media-cache";
 export function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: LibraryAsset) => void }) {
   const userId = useAssetCacheUserId();
   const [assets, setAssets] = useState<LibraryAsset[]>([]);
-  const [group, setGroup] = useState<LibraryGroup | null>(null);
+  const [group, setGroup] = useState<LibraryGroup>(defaultAssetLibraryGroup);
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<"all" | AssetCategory>("all");
   const [page, setPage] = useState(1);
@@ -90,8 +91,8 @@ export function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: 
 
   useEffect(() => {
     void api.get<{ Items?: LibraryGroup[] }>("/api/assets/groups")
-      .then((result) => setGroup(result.Items?.[0] ?? null))
-      .catch((loadError) => setError(loadError instanceof Error ? loadError.message : "素材空间暂时不可用"));
+      .then((result) => setGroup(assetLibraryGroupsOrDefault(result.Items)[0]))
+      .catch(() => undefined);
   }, []);
 
   useEffect(() => () => {
@@ -128,7 +129,7 @@ export function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: 
   const uploadImages = async (files?: FileList | null) => {
     const selectedFiles = Array.from(files ?? []);
     const images = selectedFiles.filter((file) => inferUploadType(file) === "image");
-    if (!images.length || !group) {
+    if (!images.length) {
       if (selectedFiles.length) setError("所选文件中没有受支持的图片");
       return;
     }
@@ -275,7 +276,7 @@ export function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: 
       <div>
         {assets.length > 0 && <button className="quiet" onClick={toggleAll}>{allSelected ? <CheckSquare2 /> : <Square />}{allSelected ? "取消全选" : "全选当前页"}</button>}
         {selected.size > 0 && <button className="quiet danger" onClick={() => setConfirmDelete(true)}><Trash2 /> 删除 {selected.size} 项</button>}
-        <button className="asset-upload" disabled={!group || uploading} onClick={openFilePicker}>{uploading ? <LoaderCircle className="spin" /> : <Upload />}{progress ? `上传 ${progress.done}/${progress.total}` : "上传图片"}</button>
+        <button className="asset-upload" disabled={uploading} onClick={openFilePicker}>{uploading ? <LoaderCircle className="spin" /> : <Upload />}{progress ? `上传 ${progress.done}/${progress.total}` : "上传图片"}</button>
         <input ref={fileInput} hidden multiple type="file" accept="image/*" onChange={(event) => void uploadImages(event.target.files)} />
       </div>
     </div>
@@ -284,7 +285,7 @@ export function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: 
       <ImageIcon />
       <h2>{query ? "没有匹配的图片" : category === "all" ? "把常用参考图放在这里" : `${assetCategoryLabels[category]}标签下还没有图片`}</h2>
       <p>{query ? "换一个关键词，或清除搜索。" : "支持一次选择多张图片；上传时会自动归入当前标签。"}</p>
-      {query ? <button onClick={() => setQuery("")}>清除搜索</button> : <button disabled={!group} onClick={openFilePicker}><Upload /> 上传第一批图片</button>}
+      {query ? <button onClick={() => setQuery("")}>清除搜索</button> : <button onClick={openFilePicker}><Upload /> 上传第一批图片</button>}
     </div> : <>
       <div className="image-assets__grid">{assets.map((asset) => {
         const preview = assetPreviewSource(asset, pendingPreviews.get(asset.Id));
