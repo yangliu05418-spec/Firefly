@@ -330,7 +330,9 @@ test("authenticated Canvas V2 opens, creates a node and preserves the app shell"
   await page.getByRole("button", { name: "快捷键" }).click();
   const shortcutDialog = page.getByRole("dialog");
   await expect(page.getByRole("heading", { name: "画布快捷键" })).toBeVisible();
-  await page.waitForTimeout(220);
+  await shortcutDialog.evaluate(async (element) => {
+    await Promise.all(element.getAnimations({ subtree: true }).map((animation) => animation.finished));
+  });
   const shortcutBox = await shortcutDialog.boundingBox();
   expect(shortcutBox?.x).toBe(0); expect(shortcutBox?.width).toBe(page.viewportSize()?.width);
   await page.keyboard.press("Escape");
@@ -414,7 +416,9 @@ test("node menus stay anchored, text expands outside the flow transform, and ref
   await source.getByTitle("放大编辑").click();
   const editorDialog = page.getByRole("dialog", { name: "放大编辑文本" });
   await expect(editorDialog).toBeVisible();
-  await page.waitForTimeout(220);
+  await editorDialog.evaluate(async (element) => {
+    await Promise.all(element.getAnimations({ subtree: true }).map((animation) => animation.finished));
+  });
   const editorBox = await editorDialog.boundingBox();
   expect(editorBox?.x).toBe(0); expect(editorBox?.width).toBe(page.viewportSize()?.width);
   await expect(editorDialog.getByLabel("文本节点内容")).toContainText("镜头从雨中的背影开始");
