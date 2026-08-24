@@ -7,38 +7,7 @@ let serverTranscodeDisabledUntil = 0;
 
 export const isPermanentTosTranscodeFailure = (message: string) => /assume role access denied/i.test(message);
 
-export const transcodePreview = async (sourceKey: string, targetKey: string, onPart?: (partNumber: number, bytes: number, requestId?: string) => void, observer: VideoTranscodeObserver = {}) => {
-  let existing: Awaited<ReturnType<typeof headObject>> | null = null;
-  try { existing = await headObject(targetKey); }
-  catch (error) { if ((error as { statusCode?: number }).statusCode !== 404) throw error; }
-  if (existing) {
-    try { await verifyProgressiveMp4(targetKey); return existing; }
-    catch (error) {
-      if (!(error as { message?: string }).message?.startsWith("预览文件不是渐进式 MP4")) throw error;
-      await deleteObject(targetKey).catch(() => undefined);
-    }
-  }
-  await abortIncompleteUploadsForKey(targetKey);
-  if (Date.now() >= serverTranscodeDisabledUntil) {
-    try {
-      const head = await transcodeVideoOnTos(sourceKey, targetKey, observer);
-      await verifyProgressiveMp4(targetKey);
-      serverTranscodeDisabledUntil = 0;
-      return head;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "TOS 服务端转码失败";
-      // A missing TOS processing role cannot recover by retrying every job. Skip
-      // the known-broken control-plane path until the worker is restarted after
-      // its IAM configuration has been corrected.
-      if (isPermanentTosTranscodeFailure(message)) serverTranscodeDisabledUntil = Number.POSITIVE_INFINITY;
-      else serverTranscodeDisabledUntil = Date.now() + serverTranscodeCooldownMs;
-      observer.stateChanged?.("fallback", "worker_multipart", -1, message);
-      await deleteObject(targetKey).catch(() => undefined);
-    }
-  } else {
-    observer.stateChanged?.("fallback", "worker_multipart", -1, "TOS 服务端转码权限冷却中，直接使用本地流式快启转码");
-  }
-  const sourceUrl = signedObjectUrl(sourceKey, { expires: Math.max(1800, Math.ceil(config.tosSourceStreamTimeoutMs / 1000) + 300), fileName: "source.mp4" });
+const transcodePreviewLocally = async (sourceUrl: string, targetKey: string, onPart?: (partNumber: number, bytes: number, requestId?: string) => void) => {
   const maxRate = `${Math.max(500, Math.floor(config.tosPreviewMaxBitrate / 1000))}k`;
   const ffmpeg = spawn("ffmpeg", [
     "-hide_banner", "-loglevel", "error", "-nostdin",
@@ -67,9 +36,6 @@ export const transcodePreview = async (sourceKey: string, targetKey: string, onP
 
   try {
     const [head] = await Promise.all([
-      // Preview generation crosses AWS -> TOS Beijing. Keep parts at TOS's 5 MiB
-      // minimum so a slow international upload still completes within the SDK's
-      // per-request hard timeout. The normal browser upload path remains 16 MiB.
       streamObjectToTos(targetKey, ffmpeg.stdout, "preview.mp4", "video/mp4", onPart, 5 * 1024 * 1024),
       completed
     ]);
@@ -79,4 +45,51 @@ export const transcodePreview = async (sourceKey: string, targetKey: string, onP
     await deleteObject(targetKey).catch(() => undefined);
     throw error;
   } finally { clearTimeout(timer); }
+};
+
+const existingPreview = async (targetKey: string) => {
+  let existing: Awaited<ReturnType<typeof headObject>> | null = null;
+  try { existing = await headObject(targetKey); }
+  catch (error) { if ((error as { statusCode?: number }).statusCode !== 404) throw error; }
+  if (!existing) return null;
+  try { await verifyProgressiveMp4(targetKey); return existing; }
+  catch (error) {
+    if (!(error as { message?: string }).message?.startsWith("预览文件不是渐进式 MP4")) throw error;
+    await deleteObject(targetKey).catch(() => undefined);
+    return null;
+  }
+};
+
+export const transcodePreviewFromUrl = async (sourceUrl: string, targetKey: string, onPart?: (partNumber: number, bytes: number, requestId?: string) => void) => {
+  const existing = await existingPreview(targetKey);
+  if (existing) return existing;
+  await abortIncompleteUploadsForKey(targetKey);
+  return transcodePreviewLocally(sourceUrl, targetKey, onPart);
+};
+
+export const transcodePreview = async (sourceKey: string, targetKey: string, onPart?: (partNumber: number, bytes: number, requestId?: string) => void, observer: VideoTranscodeObserver = {}) => {
+  const existing = await existingPreview(targetKey);
+  if (existing) return existing;
+  await abortIncompleteUploadsForKey(targetKey);
+  if (Date.now() >= serverTranscodeDisabledUntil) {
+    try {
+      const head = await transcodeVideoOnTos(sourceKey, targetKey, observer);
+      await verifyProgressiveMp4(targetKey);
+      serverTranscodeDisabledUntil = 0;
+      return head;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "TOS 服务端转码失败";
+      // A missing TOS processing role cannot recover by retrying every job. Skip
+      // the known-broken control-plane path until the worker is restarted after
+      // its IAM configuration has been corrected.
+      if (isPermanentTosTranscodeFailure(message)) serverTranscodeDisabledUntil = Number.POSITIVE_INFINITY;
+      else serverTranscodeDisabledUntil = Date.now() + serverTranscodeCooldownMs;
+      observer.stateChanged?.("fallback", "worker_multipart", -1, message);
+      await deleteObject(targetKey).catch(() => undefined);
+    }
+  } else {
+    observer.stateChanged?.("fallback", "worker_multipart", -1, "TOS 服务端转码权限冷却中，直接使用本地流式快启转码");
+  }
+  const sourceUrl = signedObjectUrl(sourceKey, { expires: Math.max(1800, Math.ceil(config.tosSourceStreamTimeoutMs / 1000) + 300), fileName: "source.mp4" });
+  return transcodePreviewLocally(sourceUrl, targetKey, onPart);
 };

@@ -74,6 +74,16 @@ describe("publicTask media exposure", () => {
     expect(task.mediaSource).toBeUndefined();
   });
 
+  it("opens a browser-compatible TOS preview while the original is still archiving", () => {
+    const task = publicTask(makeTask("archiving"), { stableMediaReady: false, stablePreviewReady: true });
+
+    expect(task.mediaStatus).toBe("archiving");
+    expect(task.videoUrl).toBe("/api/generations/task-1/media?rev=3");
+    expect(task.downloadUrl).toBeUndefined();
+    expect(task.temporaryVideoUrl).toBeUndefined();
+    expect(task.mediaSource).toBe("tos");
+  });
+
   it("never exposes media for non-succeeded tasks", () => {
     const task = publicTask(makeTask("ready", { status: "running" }));
     expect(task.videoUrl).toBeUndefined();

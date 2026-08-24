@@ -4,9 +4,9 @@ import { Redis } from "ioredis";
 import { config } from "./config.js";
 import { users } from "./store.js";
 import { assetQueue, mediaQueue, previewQueue, readTask, saveTask, uploadFinalizationQueue } from "./redis.js";
-import { createPoster, deleteObject, fetchObjectFromUrl, optimizePlaybackObject, outputObjectKey, posterObjectKey, previewObjectKey, streamObjectFromUrl, verifyProgressiveMp4, verifyStoredObject } from "./tos.js";
+import { createPoster, deleteObject, fetchObjectFromUrl, optimizePlaybackObject, outputObjectKey, posterObjectKey, previewObjectKey, rangedObjectFromUrl, verifyProgressiveMp4, verifyStoredObject } from "./tos.js";
 import { MAX_MEDIA_RECOVERY_ATTEMPTS } from "./db.js";
-import { transcodePreview } from "./preview-transcode.js";
+import { transcodePreview, transcodePreviewFromUrl } from "./preview-transcode.js";
 import { closeWorkersWithin } from "./shutdown.js";
 import { AssetCreateUnknownError, AssetUploadPendingError, markAssetIngestFailed, registerQueuedAsset } from "./asset-ingest.js";
 import { deleteQueuedProviderAsset } from "./asset-cleanup.js";
@@ -15,6 +15,7 @@ import { startWorkerHeartbeat } from "./worker-heartbeat.js";
 import { finalizeQueuedUpload } from "./upload-finalization.js";
 import { coordinateUploadFinalization } from "./upload-finalization-coordinator.js";
 import { copyCreationSnapshotReference, deleteCreationSnapshotReference } from "./creation-reference-media.js";
+import { archiveTransferStrategy } from "./archive-state.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const numberHeader = (value: unknown) => Number(value ?? 0) || 0;
@@ -22,6 +23,7 @@ const recoveryBucketMs = 15 * 60 * 1000;
 const posterRecoveryBucketMs = 15 * 60 * 1000;
 const previewRecoveryBucketMs = 15 * 60 * 1000;
 const uploadFinalizationDeadlineMs = 15 * 60 * 1000;
+const previewLeaseMs = config.tosTranscodeDeadlineMs + config.tosSourceStreamTimeoutMs + 60_000;
 
 const outputFormatFor = (task: { request?: unknown }) => (task.request as { outputFormat?: unknown } | undefined)?.outputFormat === "mov" ? "mov" as const : "mp4" as const;
 const enqueuePosterRecovery = async (taskId: string) => mediaQueue.add("create-poster", { taskId }, {
@@ -56,27 +58,30 @@ const finalizeCanvasVideoPreview = async (taskId: string) => {
   if (completedJob) await connection.publish(`canvas:events:${canvasJob.canvasId}`, JSON.stringify({ type: "canvas_job", job: completedJob }));
 };
 
-const createTaskPreview = async (taskId: string) => {
+const createTaskPreview = async (taskId: string, sourceUrl?: string) => {
   if (!config.tosPreviewTranscodeEnabled) return false;
   const task = await readTask(taskId, true);
   if (!task || task.deletedAt || !task.ownerId) return false;
   if (users.readTaskMedia(taskId, "preview")) { await finalizeCanvasVideoPreview(taskId); return true; }
+  const leaseKey = `media:preview:lease:${taskId}`;
+  const leaseToken = crypto.randomUUID();
+  const acquired = await connection.set(leaseKey, leaseToken, "PX", previewLeaseMs, "NX");
+  if (!acquired) throw new Error("该成片的兼容预览正在处理中");
+  try {
   const output = users.readTaskMedia(taskId, "output");
-  if (!output) return false;
+  if (!output && !sourceUrl) return false;
   const startedAt = Date.now();
   const previewKey = previewObjectKey(task.ownerId, task.id);
-  console.info(JSON.stringify({ type: "tos_preview_started", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, sourceBytes: output.size }));
+  console.info(JSON.stringify({ type: "tos_preview_started", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, source: sourceUrl ? "provider" : "tos", sourceBytes: output?.size }));
   let mediaVerified = false;
   try {
-    const previewHead = await transcodePreview(
-      output.objectKey,
-      previewKey,
-      (partNumber, bytes, requestId) => console.info(JSON.stringify({ type: "tos_preview_part_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, partNumber, bytes, requestId })),
-      {
+    const onPart = (partNumber: number, bytes: number, requestId?: string) => console.info(JSON.stringify({ type: "tos_preview_part_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, partNumber, bytes, requestId }));
+    const previewHead = sourceUrl
+      ? await transcodePreviewFromUrl(sourceUrl, previewKey, onPart)
+      : await transcodePreview(output!.objectKey, previewKey, onPart, {
         jobCreated: (jobId, requestId) => console.info(JSON.stringify({ type: "tos_preview_transcode_created", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, jobId, requestId })),
         stateChanged: (jobId, state, code, message, requestId) => console.info(JSON.stringify({ type: "tos_preview_transcode_state", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, jobId, state, code, message, requestId }))
-      }
-    );
+      });
     const optimized = await optimizePlaybackObject(previewKey, { contentType: "video/mp4", fileName: "preview.mp4", cacheSeconds: config.tosPreviewTtlSeconds });
     const structure = await verifyProgressiveMp4(previewKey); mediaVerified = true;
     const previewData = optimized.data as unknown as { contentLength?: number; etag?: string };
@@ -86,11 +91,19 @@ const createTaskPreview = async (taskId: string) => {
     const committed = users.commitTaskMediaIfActive(task.id, { id: `${task.id}:preview`, ownerId: task.ownerId, taskId: task.id, kind: "preview", objectKey: previewKey, status: "ready", fileName: "preview.mp4", contentType: "video/mp4", size, etag: String(previewData.etag ?? previewHeaders.etag ?? "").replace(/^"|"$/g, ""), createdAt: now, updatedAt: now });
     if (!committed) { await deleteObject(previewKey); return false; }
     await finalizeCanvasVideoPreview(task.id);
-    console.info(JSON.stringify({ type: "tos_preview_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, sourceBytes: output.size, previewBytes: size, ratio: output.size ? Number((size / output.size).toFixed(3)) : undefined, atoms: structure.atoms, elapsedMs: Date.now() - startedAt, requestId: previewHead.requestId }));
+    console.info(JSON.stringify({ type: "tos_preview_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, source: sourceUrl ? "provider" : "tos", sourceBytes: output?.size, previewBytes: size, ratio: output?.size ? Number((size / output.size).toFixed(3)) : undefined, atoms: structure.atoms, elapsedMs: Date.now() - startedAt, requestId: previewHead.requestId }));
     return true;
   } catch (error) {
     if (!mediaVerified) await deleteObject(previewKey).catch(() => undefined);
     throw error;
+  }
+  } finally {
+    await connection.eval(
+      "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+      1,
+      leaseKey,
+      leaseToken,
+    ).catch(() => undefined);
   }
 };
 
@@ -124,21 +137,21 @@ const enqueueArchiveRecovery = async (task: { id: string; sourceVideoUrl?: strin
   return true;
 };
 
-const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputFormat: "mp4" | "mov"; existingObjectOnly?: boolean }, attempt: number, finalAttempt: boolean) => {
+const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputFormat: "mp4" | "mov"; existingObjectOnly?: boolean }, attempt: number) => {
   const task = await readTask(data.taskId, true);
   if (!task || task.deletedAt || !task.ownerId) return;
   if (task.mediaStatus !== "archiving") await saveTask({ ...task, mediaStatus: "archiving", error: undefined, updatedAt: Date.now() });
   const startedAt = Date.now();
   const objectKey = outputObjectKey(task.ownerId, task.id, data.outputFormat);
-  const strategy = data.existingObjectOnly ? "existing_object" : finalAttempt ? "stream_multipart" : "url_fetch";
+  const strategy = archiveTransferStrategy(attempt, data.existingObjectOnly);
   console.info(JSON.stringify({ type: "tos_fetch_started", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, strategy }));
   try {
     if (data.existingObjectOnly) {
       await verifyStoredObject(objectKey, data.outputFormat === "mov" ? "video/quicktime" : "video/mp4");
     } else if (!data.sourceUrl) {
       throw new Error("上游临时地址已过期，且 TOS 中没有可恢复的成片");
-    } else if (finalAttempt) {
-      await streamObjectFromUrl(objectKey, data.sourceUrl, `result.${data.outputFormat}`, data.outputFormat === "mov" ? "video/quicktime" : "video/mp4", (partNumber, bytes) => console.info(JSON.stringify({ type: "tos_stream_part_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, partNumber, bytes })), 5 * 1024 * 1024);
+    } else if (strategy === "stream_multipart") {
+      await rangedObjectFromUrl(objectKey, data.sourceUrl, `result.${data.outputFormat}`, data.outputFormat === "mov" ? "video/quicktime" : "video/mp4", (partNumber, bytes) => console.info(JSON.stringify({ type: "tos_range_part_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, partNumber, bytes })), 5 * 1024 * 1024);
     } else {
       await fetchObjectFromUrl(objectKey, data.sourceUrl, {
         taskCreated: (fetchTaskId) => {
@@ -242,9 +255,8 @@ const deletePendingMedia = async (taskId?: string) => {
 
 const worker = new Worker("media", async (job) => {
   if (job.name === "archive-output") {
-    const attempts = job.opts.attempts ?? 1;
     const attempt = job.attemptsMade + 1;
-    return archiveOutput(job.data, attempt, attempt >= attempts);
+    return archiveOutput(job.data, attempt);
   }
   if (job.name === "delete-task-media") return deletePendingMedia(job.data.taskId);
   if (job.name === "reconcile-deletes") return deletePendingMedia();
@@ -271,7 +283,7 @@ const uploadFinalizationWorker = new Worker("upload-finalization", async (job) =
 
 const previewWorker = new Worker("preview", async (job) => {
   if (job.name !== "create-preview") throw new Error(`Unknown preview job: ${job.name}`);
-  return createTaskPreview(job.data.taskId);
+  return createTaskPreview(job.data.taskId, job.data.sourceUrl);
 }, { connection, concurrency: config.tosPreviewConcurrency, lockDuration: config.tosTranscodeDeadlineMs + config.tosSourceStreamTimeoutMs + 60_000 });
 
 const assetWorker = new Worker("asset-ingest", async (job) => {

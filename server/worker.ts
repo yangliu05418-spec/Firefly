@@ -4,7 +4,7 @@ import { config } from "./config.js";
 import { shouldRecoverArchiveHandoff } from "./archive-state.js";
 import type { StoredTask } from "./db.js";
 import { validateGeneration, type GenerationInput } from "./provider.js";
-import { mediaQueue, readTask, saveTask } from "./redis.js";
+import { mediaQueue, previewQueue, readTask, saveTask } from "./redis.js";
 import { AssetRegistrationRejected, isRetryableAssetRejection, prepareProviderAssets } from "./asset-registration.js";
 import { users } from "./store.js";
 import { closeWorkersWithin } from "./shutdown.js";
@@ -115,7 +115,12 @@ const processGenerationJob = async (job: Job<{ input: unknown }>) => {
     await saveTask(completed);
     console.info(JSON.stringify({ type: "generation_succeeded", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, providerId: task.providerId }));
     if (config.mediaStorageBackend === "tos") {
-      await mediaQueue.add("archive-output", { taskId: task.id, sourceUrl: sourceVideoUrl, outputFormat: input.outputFormat }, { jobId: `archive-${task.id}`, attempts: 4, backoff: { type: "exponential", delay: 5000, jitter: .5 }, removeOnComplete: { age: 7 * 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } });
+      await Promise.all([
+        mediaQueue.add("archive-output", { taskId: task.id, sourceUrl: sourceVideoUrl, outputFormat: input.outputFormat }, { jobId: `archive-${task.id}`, attempts: 4, backoff: { type: "exponential", delay: 5000, jitter: .5 }, removeOnComplete: { age: 7 * 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } }),
+        config.tosPreviewTranscodeEnabled
+          ? previewQueue.add("create-preview", { taskId: task.id, sourceUrl: sourceVideoUrl }, { jobId: `preview-source-${task.id}`, attempts: 3, backoff: { type: "exponential", delay: 15_000, jitter: .5 }, priority: 1, removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } })
+          : Promise.resolve(),
+      ]);
     } else {
       await saveTask({ ...completed, mediaStatus: "fallback", mediaRevision: (completed.mediaRevision ?? 0) + 1 });
     }
