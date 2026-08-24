@@ -272,6 +272,7 @@ export const streamObjectToTos = async (
     uploadId = created.data.UploadId;
     const parts: { partNumber: number; eTag: string }[] = [];
     let pending = Buffer.alloc(0); let transferred = 0;
+    const requestDeadlineMs = Math.min(config.tosUploadRequestTimeoutMs, 30_000);
     const upload = async (body: Buffer) => {
       const partNumber = parts.length + 1;
       let eTag = "";
@@ -279,7 +280,7 @@ export const streamObjectToTos = async (
       let lastError: unknown;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), config.tosUploadRequestTimeoutMs);
+        const timer = setTimeout(() => controller.abort(), requestDeadlineMs);
         try {
           const url = signUploadPart(key, uploadId, partNumber);
           const response = await fetch(url, {
@@ -299,7 +300,7 @@ export const streamObjectToTos = async (
         } finally { clearTimeout(timer); }
       }
       if (!eTag) {
-        if ((lastError as Error | undefined)?.name === "AbortError") throw new Error(`TOS 分片上传超过 ${Math.round(config.tosUploadRequestTimeoutMs / 1000)} 秒`);
+        if ((lastError as Error | undefined)?.name === "AbortError") throw new Error(`TOS 分片上传超过 ${Math.round(requestDeadlineMs / 1000)} 秒`);
         throw lastError ?? new Error("TOS 分片上传失败");
       }
       parts.push({ partNumber, eTag });
@@ -351,6 +352,130 @@ export const streamObjectFromUrl = async (
     if ((error as Error).name === "AbortError") throw new Error(`上游流式归档超过 ${Math.round(config.tosSourceStreamTimeoutMs / 1000)} 秒`);
     throw error;
   } finally { clearTimeout(sourceTimer); }
+};
+
+export const sourceSizeFromContentRange = (value: string | null) => {
+  const match = value?.match(/^bytes\s+0-0\/(\d+)$/i);
+  const size = match ? Number(match[1]) : 0;
+  return Number.isSafeInteger(size) && size > 0 ? size : 0;
+};
+
+export const rangedSourceParts = (totalSize: number, partSize: number) => {
+  if (!Number.isSafeInteger(totalSize) || totalSize <= 0) throw new Error("媒体总大小无效");
+  if (!Number.isSafeInteger(partSize) || partSize <= 0) throw new Error("媒体分片大小无效");
+  return Array.from({ length: Math.ceil(totalSize / partSize) }, (_, index) => {
+    const start = index * partSize;
+    const end = Math.min(totalSize - 1, start + partSize - 1);
+    return { partNumber: index + 1, start, end, size: end - start + 1 };
+  });
+};
+
+export const rangedObjectFromUrl = async (
+  key: string,
+  url: string,
+  fileName: string,
+  contentTypeHint: string,
+  onPart?: (partNumber: number, bytes: number) => void,
+  partSize = 5 * 1024 * 1024,
+  concurrency = config.tosUploadConcurrency,
+) => {
+  requireTos();
+  if (!Number.isSafeInteger(partSize) || partSize < 5 * 1024 * 1024) throw new Error("TOS Multipart 分片不得小于 5 MiB");
+  try { return await verifyStoredObject(key); }
+  catch (error) { if ((error as { statusCode?: number }).statusCode !== 404) throw error; }
+
+  const probeController = new AbortController();
+  const probeTimer = setTimeout(() => probeController.abort(), Math.min(config.tosSourceStreamTimeoutMs, 30_000));
+  let probe: Response;
+  try {
+    probe = await fetch(url, { headers: { range: "bytes=0-0" }, signal: probeController.signal });
+    if (probe.status !== 206) throw new Error(`上游成片不支持 Range 归档 (${probe.status})`);
+    await probe.arrayBuffer();
+  } finally { clearTimeout(probeTimer); }
+  const totalSize = sourceSizeFromContentRange(probe.headers.get("content-range"));
+  if (!totalSize) throw new Error("上游成片 Range 响应缺少有效总大小");
+  const contentType = probe.headers.get("content-type") || contentTypeHint;
+  const ranges = rangedSourceParts(totalSize, partSize);
+  const partCount = ranges.length;
+  const workerCount = Math.min(Math.max(1, concurrency), partCount);
+  const partDeadlineMs = Math.min(config.tosUploadRequestTimeoutMs, 30_000);
+  let uploadId = "";
+  try {
+    const created = await tos.createMultipartUpload({ bucket: config.tosBucket, key, contentType, contentDisposition: `inline; filename*=UTF-8''${encodeURIComponent(fileName)}`, forbidOverwrite: true });
+    uploadId = created.data.UploadId;
+    const parts = new Array<{ partNumber: number; eTag: string }>(partCount);
+    let cursor = 0;
+    let transferred = 0;
+    const transferNext = async (): Promise<void> => {
+      const index = cursor++;
+      if (index >= partCount) return;
+      const { partNumber, start, end, size: expectedBytes } = ranges[index]!;
+      let body: Uint8Array | undefined;
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), partDeadlineMs);
+        try {
+          const source = await fetch(url, { headers: { range: `bytes=${start}-${end}` }, signal: controller.signal });
+          if (source.status !== 206) throw new Error(`上游 Range 分片读取失败 (${source.status})`);
+          body = new Uint8Array(await source.arrayBuffer());
+          if (body.byteLength !== expectedBytes) throw new Error(`上游 Range 分片大小不一致 (${body.byteLength}/${expectedBytes})`);
+          lastError = undefined;
+          break;
+        } catch (error) {
+          lastError = error;
+          if (attempt < 2) await delay(1000 * (2 ** attempt));
+        } finally { clearTimeout(timer); }
+      }
+      if (lastError) {
+        if ((lastError as Error).name === "AbortError") throw new Error(`上游 Range 分片读取超过 ${Math.round(partDeadlineMs / 1000)} 秒`);
+        throw lastError;
+      }
+      if (!body) throw new Error("上游 Range 分片读取为空");
+      const uploadBody = Uint8Array.from(body);
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), partDeadlineMs);
+        try {
+          const target = await fetch(signUploadPart(key, uploadId, partNumber), {
+            method: "PUT", body: uploadBody, headers: { "content-length": String(uploadBody.byteLength) }, signal: controller.signal,
+          });
+          if (!target.ok) throw new Error(`TOS 分片上传失败 (${target.status})`);
+          const eTag = (target.headers.get("etag") ?? "").replace(/^"|"$/g, "");
+          if (!eTag) throw new Error("TOS 分片上传缺少 ETag");
+          parts[index] = { partNumber, eTag };
+          transferred += body.byteLength;
+          onPart?.(partNumber, transferred);
+          lastError = undefined;
+          break;
+        } catch (error) {
+          lastError = error;
+          if (attempt < 2) await delay(1000 * (2 ** attempt));
+        } finally { clearTimeout(timer); }
+      }
+      if (lastError) {
+        if ((lastError as Error).name === "AbortError") throw new Error(`TOS Range 分片上传超过 ${Math.round(partDeadlineMs / 1000)} 秒`);
+        throw lastError;
+      }
+      await transferNext();
+    };
+    const transfers = await Promise.allSettled(Array.from({ length: workerCount }, () => transferNext()));
+    const failed = transfers.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failed) throw failed.reason;
+    try {
+      await tos.completeMultipartUpload({ bucket: config.tosBucket, key, uploadId, parts, forbidOverwrite: true });
+    } catch (error) {
+      try {
+        const reconciled = await verifyStoredObject(key);
+        uploadId = "";
+        return reconciled;
+      } catch { throw error; }
+    }
+    uploadId = "";
+    return await verifyStoredObject(key);
+  } finally {
+    if (uploadId) await tos.abortMultipartUpload({ bucket: config.tosBucket, key, uploadId }).catch(() => undefined);
+  }
 };
 
 export const createPoster = async (sourceKey: string, targetKey: string) => {

@@ -9,27 +9,28 @@ import type { StoredTask } from "./db.js";
  */
 export const publicTask = (
   { ownerId: _ownerId, request: _request, sourceVideoUrl, sourceVideoExpiresAt, deletedAt: _deletedAt, ...task }: StoredTask,
-  { stableMediaReady = true }: { stableMediaReady?: boolean } = {},
+  { stableMediaReady = true, stablePreviewReady = false }: { stableMediaReady?: boolean; stablePreviewReady?: boolean } = {},
 ) => {
   const revision = task.mediaRevision ?? 0;
-  const stable = task.status === "succeeded" && task.mediaStatus === "ready" && stableMediaReady;
+  const downloadable = task.status === "succeeded" && task.mediaStatus === "ready" && stableMediaReady;
+  const previewable = task.status === "succeeded" && (downloadable || stablePreviewReady);
   const mediaStatus = task.status === "succeeded" && task.mediaStatus === "ready" && !stableMediaReady
     ? "archiving" as const
     : task.mediaStatus;
   const temporary =
     task.status === "succeeded" &&
     Boolean(sourceVideoUrl) &&
-    (!stable || task.mediaStatus === "archiving" || task.mediaStatus === "fallback" || task.mediaStatus === "failed") &&
+    !previewable &&
     (!sourceVideoExpiresAt || sourceVideoExpiresAt > Date.now());
   return {
     ...task,
     mediaStatus,
     caseId: task.id,
-    videoUrl: stable ? `/api/generations/${task.id}/media?rev=${revision}` : undefined,
-    downloadUrl: stable ? `/api/generations/${task.id}/download?rev=${revision}` : undefined,
-    posterUrl: stable ? `/api/generations/${task.id}/poster?rev=${revision}` : undefined,
+    videoUrl: previewable ? `/api/generations/${task.id}/media?rev=${revision}` : undefined,
+    downloadUrl: downloadable ? `/api/generations/${task.id}/download?rev=${revision}` : undefined,
+    posterUrl: downloadable ? `/api/generations/${task.id}/poster?rev=${revision}` : undefined,
     temporaryVideoUrl: temporary ? sourceVideoUrl : undefined,
     temporaryVideoExpiresAt: temporary ? sourceVideoExpiresAt : undefined,
-    mediaSource: stable ? ("tos" as const) : undefined
+    mediaSource: previewable ? ("tos" as const) : undefined
   };
 };

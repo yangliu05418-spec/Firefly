@@ -78,6 +78,7 @@ const respondError = (res: express.Response, error: unknown, status = 400) => {
 };
 const param = (value: string | string[]) => Array.isArray(value) ? value[0] : value;
 const publicGenerationTask = (task: StoredTask) => {
+  const stablePreviewReady = tosEnabled() && config.tosPreviewTranscodeEnabled && Boolean(users.readTaskMedia(task.id, "preview"));
   const stableMediaReady = task.status !== "succeeded" || task.mediaStatus !== "ready"
     ? true
     : !tosEnabled()
@@ -85,7 +86,7 @@ const publicGenerationTask = (task: StoredTask) => {
       : config.tosPreviewTranscodeEnabled
         ? Boolean(users.readTaskMedia(task.id, "preview"))
         : Boolean(users.readTaskMedia(task.id, "output"));
-  return publicTask(task, { stableMediaReady });
+  return publicTask(task, { stableMediaReady, stablePreviewReady });
 };
 const publicCreationSession = ({ ownerId: _ownerId, deletedAt: _deletedAt, ...session }: CreationSession) => session;
 const createCreationSession = (ownerId: string, title = "新创作") => {
@@ -731,11 +732,9 @@ app.get("/api/generations/:id/media", requireAuth, async (req, res) => {
   try {
     const task = await accessibleTask(req, res);
     if (!task || task.status !== "succeeded") return res.status(404).json({ error: "成片不存在或尚未就绪" });
-    const media = task.mediaStatus === "ready"
-      ? config.tosPreviewTranscodeEnabled
-        ? users.readTaskMedia(task.id, "preview")
-        : users.readTaskMedia(task.id, "preview") ?? users.readTaskMedia(task.id, "output")
-      : null;
+    const media = config.tosPreviewTranscodeEnabled
+      ? users.readTaskMedia(task.id, "preview")
+      : task.mediaStatus === "ready" ? users.readTaskMedia(task.id, "preview") ?? users.readTaskMedia(task.id, "output") : null;
     if (!media) return res.status(425).json({ error: "成片正在归档到TOS，请稍后重试" });
     const target = await stablePreviewUrl({ objectKey: media.objectKey, fileName: media.fileName }); const source = "tos" as const;
     res.setHeader("Cache-Control", previewRedirectCacheHeader);
