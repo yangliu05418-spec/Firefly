@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AudioLines, Check, Library, LoaderCircle, Video } from "lucide-react";
 import { api } from "../../api";
 import { useAssetCacheUserId } from "../../asset-cache-context";
-import { createPromptAssetToken, promptNodeText, renderPromptValue } from "../../prompt-editor-dom";
+import { createPromptAssetToken, focusPromptEditorAtEnd, promptNodeText, refreshPromptAssetTokens, renderPromptValue } from "../../prompt-editor-dom";
 import { loadPromptLibraryCacheFirst } from "../../prompt-library-cache";
 import { promptAssetLabel, referenceBindingId } from "../../prompt-references";
 import { clearEditorSelection } from "../../prompt-selection";
@@ -23,9 +23,15 @@ type PromptEditorProps = {
 export function PromptEditor({ value, placeholder, assets, disabled, attach, change, focusSignal }: PromptEditorProps) {
   const userId = useAssetCacheUserId();
   const editor = useRef<HTMLDivElement>(null); const mentionRange = useRef<Range | null>(null);
+  const renderedRestoreSignal = useRef<number | undefined>(undefined);
   const [open, setOpen] = useState(false); const [query, setQuery] = useState(""); const [active, setActive] = useState(0); const [anchor, setAnchor] = useState({ left: 12, top: 12, above: false });
   const [library, setLibrary] = useState<UploadAsset[]>([]); const [libraryLoading, setLibraryLoading] = useState(false); const [libraryError, setLibraryError] = useState(false); const loadedLibrary = useRef(false); const libraryRequest = useRef(0);
-  const sync = () => { if (editor.current) change(Array.from(editor.current.childNodes).map(promptNodeText).join("").replace(/\n{3,}/g, "\n\n")); };
+  const sync = () => {
+    if (!editor.current) return "";
+    const next = Array.from(editor.current.childNodes).map(promptNodeText).join("").replace(/\n{3,}/g, "\n\n");
+    change(next);
+    return next;
+  };
   const candidates = useMemo(() => {
     const ready = assets.filter((asset) => asset.progress === 100);
     const merged = [...ready, ...library.filter((candidate) => !ready.some((asset) => asset.id === candidate.id))];
@@ -33,38 +39,34 @@ export function PromptEditor({ value, placeholder, assets, disabled, attach, cha
     return (term ? merged.filter((asset) => asset.name.toLocaleLowerCase().includes(term) || promptAssetLabel(asset, merged).toLocaleLowerCase().includes(term)) : merged).slice(0, 30);
   }, [assets, library, query]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const node = editor.current;
-    // User input owns the DOM while editing, except for an explicit one-shot
-    // restore. The restore signal intentionally replaces the focused DOM with
-    // the accepted snapshot before placing the caret at the end.
-    if (!node || (document.activeElement === node && !focusSignal)) return;
+    if (!node) return;
+    const isNewRestore = focusSignal !== undefined && renderedRestoreSignal.current !== focusSignal;
     const rendered = Array.from(node.childNodes).map(promptNodeText).join("").replace(/\n{3,}/g, "\n\n");
     const staleToken = Array.from(node.querySelectorAll<HTMLElement>("[data-asset-id]")).some((token) => {
       const asset = assets.find((candidate) => referenceBindingId(candidate) === token.dataset.assetId || candidate.id === token.dataset.assetId);
-      return token.title !== (asset?.name ?? "正在恢复素材") || Boolean(token.querySelector("img")) !== Boolean(asset?.preview);
+      const image = token.querySelector<HTMLImageElement>("img");
+      return token.title !== (asset?.name ?? "正在恢复素材")
+        || Boolean(image) !== Boolean(asset?.preview)
+        || Boolean(asset?.preview && image?.getAttribute("src") !== asset.preview);
     });
-    if (rendered !== value || staleToken) renderPromptValue(node, value, assets);
-  }, [value, assets]);
-  useEffect(() => {
-    if (!focusSignal || !editor.current) return;
-    // The restore intent is consumed immediately after Composer accepts it.
-    // Focus synchronously so that the parent clearing that one-shot intent
-    // cannot cancel a deferred animation-frame callback.
-    const node = editor.current;
-    node.focus({ preventScroll: true });
-    const selection = window.getSelection();
-    const range = document.createRange();
-    range.selectNodeContents(node);
-    range.collapse(false);
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-  }, [focusSignal]);
-  useEffect(() => {
+    if (isNewRestore || document.activeElement !== node) {
+      if (rendered !== value || staleToken) renderPromptValue(node, value, assets);
+    } else if (staleToken) refreshPromptAssetTokens(node, assets);
+    if (isNewRestore) {
+      renderedRestoreSignal.current = focusSignal;
+      focusPromptEditorAtEnd(node);
+    }
+  }, [value, assets, focusSignal]);
+  useLayoutEffect(() => {
     if (!editor.current) return;
     const attached = new Set(assets.map(referenceBindingId)); let removed = false;
     editor.current.querySelectorAll<HTMLElement>("[data-asset-id]").forEach((token) => { if (!attached.has(token.dataset.assetId ?? "")) { token.remove(); removed = true; } });
-    if (removed) sync();
+    if (removed) {
+      sync();
+      if (document.activeElement === editor.current) focusPromptEditorAtEnd(editor.current);
+    }
   }, [assets]);
   useEffect(() => () => { libraryRequest.current += 1; }, []);
 
@@ -130,5 +132,5 @@ export function PromptEditor({ value, placeholder, assets, disabled, attach, cha
     <footer>↑↓ 选择　Enter 插入　Esc 关闭</footer>
   </div>, document.body);
 
-  return <div className="prompt-editor-wrap"><div ref={editor} className="prompt-editor" contentEditable role="textbox" aria-multiline="true" aria-label="创作提示词" data-placeholder={placeholder} suppressContentEditableWarning onInput={() => { sync(); detectMention(); }} onKeyUp={(event) => !["ArrowDown", "ArrowUp", "Enter", "Escape"].includes(event.key) && detectMention()} onKeyDown={keyDown} onBlur={(event) => { clearEditorSelection(event.currentTarget); window.setTimeout(() => setOpen(false), 120); }} onPaste={(event) => { event.preventDefault(); document.execCommand("insertText", false, event.clipboardData.getData("text/plain")); }} />{popup}</div>;
+  return <div className="prompt-editor-wrap"><div ref={editor} className="prompt-editor" contentEditable role="textbox" aria-multiline="true" aria-label="创作提示词" data-placeholder={placeholder} suppressContentEditableWarning onFocus={(event) => { if (!Array.from(event.currentTarget.childNodes).map(promptNodeText).join("")) focusPromptEditorAtEnd(event.currentTarget); }} onInput={() => { sync(); detectMention(); }} onKeyUp={(event) => !["ArrowDown", "ArrowUp", "Enter", "Escape"].includes(event.key) && detectMention()} onKeyDown={keyDown} onBlur={(event) => { if (!Array.from(event.currentTarget.childNodes).map(promptNodeText).join("")) event.currentTarget.replaceChildren(); clearEditorSelection(event.currentTarget); window.setTimeout(() => setOpen(false), 120); }} onPaste={(event) => { event.preventDefault(); document.execCommand("insertText", false, event.clipboardData.getData("text/plain")); }} />{popup}</div>;
 }

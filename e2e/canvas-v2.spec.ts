@@ -153,7 +153,7 @@ async function mockAuthenticatedApi(page: Page, options: {
     if (/^\/api\/generations\/[^/]+\/reedit$/.test(path) && request.method() === "GET") {
       const task = videoHistory.find((item) => item.id === decodeURIComponent(path.split("/").at(-2)!));
       if (!task) return json(route, { error: "任务不存在" }, 404);
-      return json(route, { sourceId: task.id, sourceType: "video", sessionId: task.sessionId, snapshotVersion: 1, recoveryQuality: "exact", sourceSessionStatus: "active", omittedAssets: 0, warnings: [], adjustments: [], state: { engine: "video", prompt: task.prompt, modelId: task.model, mode: task.mode, ratio: task.ratio, resolution: task.resolution, duration: task.duration, generateAudio: false, cameraFixed: true, watermark: false, seed: 42, imageModelId: "", imageRatio: "1:1", imageResolution: "", imageCount: 1, assets: [{ id: "reedit-reference", bindingId: "reedit-reference", snapshotReferenceId: "snapshot-reference-e2e", name: "角色参考.png", type: "image", size: 128, role: "reference_image", progress: 100, phase: "ready", preview: "/api/creation-references/snapshot-reference-e2e/source?variant=thumbnail" }] } });
+      return json(route, { sourceId: task.id, sourceType: "video", sessionId: task.sessionId, snapshotVersion: 1, recoveryQuality: "exact", sourceSessionStatus: "active", omittedAssets: 0, warnings: [], adjustments: [], state: { engine: "video", prompt: task.editorPrompt ?? task.prompt, modelId: task.model, mode: task.mode, ratio: task.ratio, resolution: task.resolution, duration: task.duration, generateAudio: false, cameraFixed: true, watermark: false, seed: 42, imageModelId: "", imageRatio: "1:1", imageResolution: "", imageCount: 1, assets: [{ id: "reedit-reference", bindingId: "reedit-reference", snapshotReferenceId: "snapshot-reference-e2e", name: "角色参考.png", type: "image", size: 128, role: "reference_image", progress: 100, phase: "ready", preview: "/api/creation-references/snapshot-reference-e2e/source?variant=thumbnail" }] } });
     }
     if (path === "/api/creation-references/snapshot-reference-e2e") return json(route, { id: "snapshot-reference-e2e", bindingId: "reedit-reference", name: "角色参考.png", type: "image", size: 128, state: "ready", preview: "/api/creation-references/snapshot-reference-e2e/source?variant=thumbnail" });
     if (path === "/api/creation-references/snapshot-reference-e2e/source") return route.fulfill({ status: 200, contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><path fill="#b8d9cf" d="M0 0h8v8H0z"/></svg>' });
@@ -261,7 +261,7 @@ test("completed creation can be loaded back into the composer without a page ref
   const createdAt = Date.now() - 60_000;
   await mockAuthenticatedApi(page, { videoHistory: [{
     id: "video-reedit-e2e", sessionId: "session-e2e", caseId: "video-reedit-e2e", visibility: "private",
-    status: "failed", mediaStatus: "none", prompt: "雨夜街道上的低机位跟拍", model: videoModels[0].id,
+    status: "failed", mediaStatus: "none", prompt: "让 Image 1 在雨夜街道上低机位跟拍", editorPrompt: "让 [[firefly-ref:reedit-reference]] 在雨夜街道上低机位跟拍", model: videoModels[0].id,
     mode: "omni", ratio: "9:16", resolution: "1080p", duration: 8, error: "上游暂时繁忙", createdAt, updatedAt: createdAt,
   }] });
   await page.goto("/studio/sessions/session-e2e");
@@ -270,13 +270,21 @@ test("completed creation can be loaded back into the composer without a page ref
   await expect(editor).toBeVisible();
   await page.getByRole("button", { name: "重新编辑" }).click();
 
-  await expect(editor).toContainText("雨夜街道上的低机位跟拍");
+  await expect(editor).toContainText("在雨夜街道上低机位跟拍");
+  await expect(editor.locator(".prompt-asset-token")).toHaveText("角色参考.png");
   await expect(editor).toBeFocused();
   await expect(page.locator(".composer-draft-status")).toContainText("已载入上次创作");
   await expect(page.locator(".asset-chip")).toContainText("角色参考.png");
   await expect(page).toHaveURL(/\/studio\/sessions\/session-e2e$/);
   await expect(page.locator(".control-row")).toContainText("全能参考");
   await expect(page.locator(".control-row")).toContainText("1080p");
+
+  await editor.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
+  await editor.press("Backspace");
+  await expect(editor).toHaveText("");
+  await editor.pressSequentially("改成清晨的手持跟拍");
+  await expect(editor).toHaveText("改成清晨的手持跟拍");
+  await expect(editor).toBeFocused();
 });
 
 test("re-edit protects an unsent draft, supports undo, and reuses one fallback session without submitting", async ({ page }) => {
