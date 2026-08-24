@@ -287,6 +287,27 @@ test("completed creation can be loaded back into the composer without a page ref
   await expect(editor).toBeFocused();
 });
 
+test("video text-mode re-edit keeps a long prompt full width in the dock and on mobile", async ({ page }) => {
+  const createdAt = Date.now() - 60_000;
+  const longPrompt = "一段发生在普罗旺斯夏日午后的无字视觉故事。镜头从室内桌面的浅景深特写开始，跟随人物穿过门廊与花田，最终上升拉开，呈现整个金色山谷。";
+  await mockAuthenticatedApi(page, { videoHistory: [{
+    id: "video-text-reedit-width", sessionId: "session-e2e", caseId: "video-text-reedit-width", visibility: "private",
+    status: "failed", mediaStatus: "none", prompt: longPrompt, model: videoModels[0].id,
+    mode: "text", ratio: "16:9", resolution: "1080p", duration: 8, error: "上游暂时繁忙", createdAt, updatedAt: createdAt,
+  }] });
+  await page.goto("/studio/sessions/session-e2e");
+  await page.getByRole("button", { name: "重新编辑" }).click();
+
+  const editor = page.getByRole("textbox", { name: "创作提示词" });
+  await expect(editor).toHaveText(longPrompt);
+  const desktop = await page.locator(".prompt-row").evaluate((row) => ({ row: row.getBoundingClientRect().width, editor: row.querySelector<HTMLElement>(".prompt-editor")!.getBoundingClientRect().width }));
+  expect(desktop.editor).toBeGreaterThan(desktop.row * 0.9);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mobile = await page.locator(".prompt-row").evaluate((row) => ({ row: row.getBoundingClientRect().width, editor: row.querySelector<HTMLElement>(".prompt-editor")!.getBoundingClientRect().width }));
+  expect(mobile.editor).toBeGreaterThan(mobile.row * 0.9);
+});
+
 test("re-edit protects an unsent draft, supports undo, and reuses one fallback session without submitting", async ({ page }) => {
   const createdAt = Date.now() - 60_000;
   const mock = await mockAuthenticatedApi(page, { videoHistory: [{
