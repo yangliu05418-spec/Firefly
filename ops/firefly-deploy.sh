@@ -246,6 +246,19 @@ if [ "$worker_ready_count" -lt 3 ]; then failure_event=failed_worker_readiness; 
 
 if ! switch_upstream "$next_port"; then failure_event=failed_nginx; cleanup_candidate; exit 1; fi
 switched=1
+
+# Validate the real production image/video re-edit contracts against the live
+# database while the previous workers are still recoverable. The command is
+# read-only and never submits Provider work or exposes prompts in its output.
+if /usr/bin/docker run --rm --network "$network" --env-file "$app_env" --env-file "$feishu_env" \
+  -e FIREFLY_REVISION="$revision" -e FIREFLY_IMAGE_DIGEST="${image##*@}" \
+  -v /srv/firefly/data:/data:rw "$image" node dist-server/reedit-smoke.js; then
+  :
+else
+  failure_event=failed_reedit_smoke
+  exit 1
+fi
+
 stop_old_workers
 
 failures=0

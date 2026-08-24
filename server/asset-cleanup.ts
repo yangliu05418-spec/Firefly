@@ -15,6 +15,20 @@ const defaultDependencies = () => productionDependencies ??= {
   callAsset: callAssetApi
 };
 
+export const deleteProviderAssetSafely = async (providerAssetId: string, callAsset: typeof callAssetApi = callAssetApi) => {
+  try {
+    await callAsset("DeleteAsset", { Id: providerAssetId });
+  } catch (deleteError) {
+    if (isMissingProviderAssetError(deleteError)) return;
+    try { await callAsset("GetAsset", { Id: providerAssetId }); }
+    catch (readError) {
+      if (isMissingProviderAssetError(readError)) return;
+      throw readError;
+    }
+    throw deleteError;
+  }
+};
+
 /**
  * Delete a provider asset after the local soft-delete has already committed.
  * The tombstone keeps providerAssetId until deletion is confirmed, making the
@@ -25,24 +39,7 @@ export const deleteQueuedProviderAsset = async (assetId: string, deps: AssetClea
   if (!asset?.deletedAt || !asset.providerAssetId) return;
   const providerAssetId = asset.providerAssetId;
 
-  try {
-    await deps.callAsset("DeleteAsset", { Id: providerAssetId });
-  } catch (deleteError) {
-    if (!isMissingProviderAssetError(deleteError)) {
-      try {
-        // DeleteAsset has no idempotency token. A lost response is reconciled by a read
-        // before BullMQ retries the mutation.
-        await deps.callAsset("GetAsset", { Id: providerAssetId });
-      } catch (readError) {
-        if (!isMissingProviderAssetError(readError)) throw readError;
-        deps.clearProviderId(asset.id, providerAssetId);
-        console.info(JSON.stringify({ type: "asset_provider_delete_reconciled", at: new Date().toISOString(), assetId: asset.id, ownerId: asset.ownerId, providerAssetId }));
-        return;
-      }
-      throw deleteError;
-    }
-  }
-
+  await deleteProviderAssetSafely(providerAssetId, deps.callAsset);
   deps.clearProviderId(asset.id, providerAssetId);
   console.info(JSON.stringify({ type: "asset_provider_delete_completed", at: new Date().toISOString(), assetId: asset.id, ownerId: asset.ownerId, providerAssetId }));
 };

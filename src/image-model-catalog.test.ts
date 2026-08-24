@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createImageModelCatalogCache, createSharedImageModelCatalogLoader, loadImageModelCatalogCacheFirst, type ImageModelCatalog, type ImageModelCatalogStore } from "./image-model-catalog";
 
 const catalog = (id = "image-1"): ImageModelCatalog => ({
-  Items: [{ id, name: `模型 ${id}`, resolutions: ["1024"], defaultResolution: "1024", maxCount: 4 }],
+  Items: [{ id, name: `模型 ${id}`, resolutions: ["1024"], defaultResolution: "1024", maxCount: 4, maxReferences: 4 }],
   Ratios: ["1:1", "16:9"],
   DefaultModel: id,
 });

@@ -33,6 +33,8 @@ const main = async () => {
   let backupAgeMs = Number.POSITIVE_INFINITY;
   let tos = { configured: false, reachable: false };
   let workerHealth: WorkerHealthSnapshot | undefined;
+  let creationReferences = { promoting: 0, stalled: 0, failedRecent: 0 };
+  let reeditMetrics = { started: 0, failed: 0, failureRate: 0 };
   try {
     await redis.ping().catch(() => { reasons.push("redis_unavailable"); });
     try {
@@ -47,8 +49,27 @@ const main = async () => {
       `).get(Date.now() - 2 * 60_000) as { pending: number | null; stalled: number | null };
       outboxCounts = { pending: outbox.pending ?? 0, stalled: outbox.stalled ?? 0 };
       if (outboxCounts.stalled > 0) reasons.push("async_outbox_stalled");
+      const references = database.prepare(`
+        SELECT
+          SUM(CASE WHEN references.status = 'promoting' THEN 1 ELSE 0 END) AS promoting,
+          SUM(CASE WHEN references.status = 'promoting' AND references.updated_at < ? THEN 1 ELSE 0 END) AS stalled,
+          SUM(CASE WHEN references.status = 'unavailable' AND references.updated_at >= ? THEN 1 ELSE 0 END) AS failed_recent
+        FROM creation_snapshot_references AS references
+        JOIN creation_snapshots AS snapshots
+          ON snapshots.source_type = references.source_type AND snapshots.source_id = references.source_id
+        WHERE references.status != 'unavailable' OR snapshots.recovery_quality = 'exact'
+      `).get(Date.now() - 30 * 60_000, Date.now() - 24 * 60 * 60_000) as { promoting: number | null; stalled: number | null; failed_recent: number | null };
+      creationReferences = { promoting: references.promoting ?? 0, stalled: references.stalled ?? 0, failedRecent: references.failed_recent ?? 0 };
+      if (creationReferences.stalled > 0) reasons.push("creation_reference_archive_stalled");
+      if (creationReferences.failedRecent > 0) reasons.push("creation_reference_archive_failed");
     } catch { reasons.push("sqlite_unavailable"); }
     try {
+      const minutes = Array.from({ length: 5 }, (_, index) => Math.floor(Date.now() / 60_000) - index);
+      const metricValues = await redis.mget(...minutes.flatMap((minute) => [`metrics:reedit:${minute}:started`, `metrics:reedit:${minute}:failed`]));
+      reeditMetrics.started = metricValues.filter((_value, index) => index % 2 === 0).reduce((sum, value) => sum + Number(value ?? 0), 0);
+      reeditMetrics.failed = metricValues.filter((_value, index) => index % 2 === 1).reduce((sum, value) => sum + Number(value ?? 0), 0);
+      reeditMetrics.failureRate = reeditMetrics.started ? Number((reeditMetrics.failed / reeditMetrics.started).toFixed(4)) : 0;
+      if (reeditMetrics.started > 0 && reeditMetrics.failureRate > 0.05) reasons.push("reedit_failure_rate_high");
       const [generationCounts, mediaCounts, previewCounts, assetCounts, imageCounts, canvasCounts, uploadCounts] = await Promise.all([
         generation.getJobCounts("wait", "active", "failed"), media.getJobCounts("wait", "active", "failed"), preview.getJobCounts("wait", "active", "failed"), assets.getJobCounts("wait", "active", "failed"), images.getJobCounts("wait", "active", "failed"), canvas.getJobCounts("wait", "active", "failed"), uploads.getJobCounts("wait", "active", "failed")
       ]);
@@ -71,7 +92,7 @@ const main = async () => {
     redis.disconnect();
   }
   const blockingReasons = reasons;
-  const result = { type: "health_audit", at: new Date().toISOString(), ok: blockingReasons.length === 0, state: blockingReasons.sort().join(",") || "ok", warnings: [], backupAgeSeconds: Number.isFinite(backupAgeMs) ? Math.round(backupAgeMs / 1000) : null, queueCounts, outboxCounts, workerHealth, tos, revision: config.revision, imageDigest: config.imageDigest };
+  const result = { type: "health_audit", at: new Date().toISOString(), ok: blockingReasons.length === 0, state: blockingReasons.sort().join(",") || "ok", warnings: [], backupAgeSeconds: Number.isFinite(backupAgeMs) ? Math.round(backupAgeMs / 1000) : null, queueCounts, outboxCounts, creationReferences, reeditMetrics, workerHealth, tos, revision: config.revision, imageDigest: config.imageDigest };
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (!result.ok) process.exitCode = 1;
 };

@@ -1,11 +1,13 @@
 import { api, ApiError } from "./api";
 import type { LibraryAsset, UploadAsset } from "./types";
 
-type UploadState = { id: string; uploadId?: string; name: string; type: UploadAsset["type"]; size: number; state: "processing" | "ready" };
+type UploadState = { id: string; uploadId?: string; name: string; type: UploadAsset["type"]; size: number; state: "processing" | "ready"; expiresAt?: number };
+type SnapshotReferenceState = { id: string; bindingId: string; name: string; type: UploadAsset["type"]; size: number; state: "processing" | "ready" | "unavailable"; preview?: string };
 
 export type ComposerDraftRecoveryDeps = {
   getUpload(id: string): Promise<UploadState>;
   getAsset(id: string): Promise<LibraryAsset>;
+  getSnapshotReference(id: string): Promise<SnapshotReferenceState>;
   wait(ms: number, signal?: AbortSignal): Promise<void>;
   now(): number;
 };
@@ -19,6 +21,7 @@ const defaultWait = (ms: number, signal?: AbortSignal) => new Promise<void>((res
 const defaultDeps: ComposerDraftRecoveryDeps = {
   getUpload: (id) => api.get<UploadState>(`/api/uploads/${encodeURIComponent(id)}`),
   getAsset: (id) => api.get<LibraryAsset>(`/api/assets/${encodeURIComponent(id)}`),
+  getSnapshotReference: (id) => api.get<SnapshotReferenceState>(`/api/creation-references/${encodeURIComponent(id)}`),
   wait: defaultWait,
   now: () => Date.now(),
 };
@@ -36,7 +39,20 @@ export const recoverComposerDraftAsset = async (
   while (deps.now() < deadline) {
     if (signal?.aborted) throw new DOMException("已取消恢复", "AbortError");
     try {
-      if (cached.assetId) {
+      if (cached.snapshotReferenceId) {
+        const reference = await deps.getSnapshotReference(cached.snapshotReferenceId);
+        if (reference.state === "unavailable") return null;
+        if (reference.state === "ready") return {
+          ...cached,
+          bindingId: reference.bindingId || cached.bindingId,
+          name: reference.name || cached.name,
+          type: reference.type,
+          size: reference.size,
+          progress: 100,
+          phase: "ready",
+          preview: reference.preview,
+        };
+      } else if (cached.assetId) {
         const asset = await deps.getAsset(cached.assetId);
         if (asset.Status === "Failed") return null;
         if (asset.Status === "Active") return {
@@ -60,6 +76,7 @@ export const recoverComposerDraftAsset = async (
           name: upload.name || cached.name,
           type: upload.type,
           size: upload.size,
+          expiresAt: upload.expiresAt ?? cached.expiresAt,
           progress: 100,
           phase: "ready",
         };

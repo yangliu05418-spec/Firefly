@@ -17,6 +17,7 @@ import { generationReplayAction } from "./generation-replay.js";
 import { canKeepPreparingReference, UploadReferencePendingError } from "./asset-upload-admission.js";
 import { requeueExhaustedAsyncJob } from "./async-job-outbox.js";
 import { AssetApiError } from "./asset-api.js";
+import { resolveCreationSnapshotReferences } from "./creation-reference-media.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const archiveRecoveryBucketMs = 15 * 60 * 1000;
@@ -49,6 +50,7 @@ const processGenerationJob = async (job: Job<{ input: unknown }>) => {
       return;
     }
     if (!task.ownerId) throw new UnrecoverableError("任务缺少素材所有者信息");
+    input = resolveCreationSnapshotReferences(input, task.ownerId);
     input = resolveCanvasGenerationReferences(input, task.ownerId);
     try { input = await prepareProviderAssets(input, task.ownerId); }
     catch (error) {

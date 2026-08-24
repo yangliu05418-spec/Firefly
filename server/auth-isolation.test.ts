@@ -89,6 +89,33 @@ describe("enterprise identity and isolation", () => {
     store.close();
   });
 
+  it("persists an immutable creation snapshot atomically and tombstones its task references on delete", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-creation-snapshot-")); directories.push(directory);
+    const store = openStore(path.join(directory, "firefly.db"));
+    const owner = store.upsertFromFeishu({ openId: "ou_snapshot", unionId: "on_snapshot", tenantKey: "tenant-dokuai", email: "snapshot@dokuai.tv", name: "Snapshot", avatarUrl: "" });
+    const session = store.createCreationSession({ id: "session-snapshot", ownerId: owner.id, title: "新创作", createdAt: 1, updatedAt: 1 });
+    const storedTask = task({ id: "task-snapshot", sessionId: session.id, ownerId: owner.id, visibility: "private" });
+    const snapshot = {
+      snapshot: { sourceType: "video" as const, sourceId: storedTask.id, ownerId: owner.id, sessionId: session.id, editorPrompt: "[[firefly-ref:binding-1]]", providerPrompt: "Image 1", parameters: { model: "model" }, bindingVersion: 1, recoveryQuality: "exact" as const, createdAt: 2, updatedAt: 2 },
+      references: [{ id: "reference-snapshot", sourceType: "video" as const, sourceId: storedTask.id, ownerId: owner.id, bindingId: "binding-1", position: 0, mediaType: "image" as const, role: "reference_image" as const, displayName: "角色.png", sourceObjectKey: "inputs/source.png", objectKey: "task-inputs/reference.png", contentType: "image/png", size: 10, etag: "etag", status: "promoting" as const, createdAt: 2, updatedAt: 2 }],
+    };
+    expect(store.admitTaskWithinLimit(storedTask, 4, undefined, snapshot).status).toBe("created");
+    expect(store.readCreationSnapshot("video", storedTask.id)).toMatchObject({ editorPrompt: snapshot.snapshot.editorPrompt, providerPrompt: "Image 1" });
+    expect(store.listCreationSnapshotReferences("video", storedTask.id)).toEqual([expect.objectContaining({ bindingId: "binding-1", ownerId: owner.id, status: "promoting" })]);
+    store.updateCreationSnapshotReference("reference-snapshot", { providerAssetId: "asset-provider-snapshot" });
+    expect(store.readCreationSnapshotReference("reference-snapshot")?.providerAssetId).toBe("asset-provider-snapshot");
+    expect(store.createCreationSnapshotIfMissing(snapshot).status).toBe("existing");
+    const firstFallback = store.admitReeditSession(owner.id, "video", storedTask.id, { id: "fallback-1", ownerId: owner.id, title: "重新编辑", createdAt: 3, updatedAt: 3 });
+    const repeatedFallback = store.admitReeditSession(owner.id, "video", storedTask.id, { id: "fallback-2", ownerId: owner.id, title: "重复", createdAt: 4, updatedAt: 4 });
+    expect(repeatedFallback.session.id).toBe(firstFallback.session.id);
+    expect(store.readCreationSession("fallback-2")).toBeNull();
+    expect(store.softDeleteTask(storedTask.id, owner.id)).toBe(true);
+    expect(store.readCreationSnapshotReference("reference-snapshot")).toMatchObject({ status: "delete_pending", providerAssetId: "asset-provider-snapshot" });
+    expect(store.updateCreationSnapshotReference("reference-snapshot", { status: "ready", expectedStatus: "promoting" })).toBeNull();
+    expect(store.readCreationSnapshotReference("reference-snapshot")?.status).toBe("delete_pending");
+    store.close();
+  });
+
   it("isolates creation sessions while leaving archived tasks globally discoverable", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-sessions-")); directories.push(directory);
     const store = openStore(path.join(directory, "firefly.db"));

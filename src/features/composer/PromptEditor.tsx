@@ -5,7 +5,7 @@ import { api } from "../../api";
 import { useAssetCacheUserId } from "../../asset-cache-context";
 import { createPromptAssetToken, promptNodeText, renderPromptValue } from "../../prompt-editor-dom";
 import { loadPromptLibraryCacheFirst } from "../../prompt-library-cache";
-import { promptAssetLabel } from "../../prompt-references";
+import { promptAssetLabel, referenceBindingId } from "../../prompt-references";
 import { clearEditorSelection } from "../../prompt-selection";
 import { RecoveringThumbnail } from "../../recovering-image";
 import type { LibraryAsset, UploadAsset } from "../../types";
@@ -35,32 +35,34 @@ export function PromptEditor({ value, placeholder, assets, disabled, attach, cha
 
   useEffect(() => {
     const node = editor.current;
-    if (!node || document.activeElement === node) return;
+    // User input owns the DOM while editing, except for an explicit one-shot
+    // restore. The restore signal intentionally replaces the focused DOM with
+    // the accepted snapshot before placing the caret at the end.
+    if (!node || (document.activeElement === node && !focusSignal)) return;
     const rendered = Array.from(node.childNodes).map(promptNodeText).join("").replace(/\n{3,}/g, "\n\n");
     const staleToken = Array.from(node.querySelectorAll<HTMLElement>("[data-asset-id]")).some((token) => {
-      const asset = assets.find((candidate) => candidate.id === token.dataset.assetId);
+      const asset = assets.find((candidate) => referenceBindingId(candidate) === token.dataset.assetId || candidate.id === token.dataset.assetId);
       return token.title !== (asset?.name ?? "正在恢复素材") || Boolean(token.querySelector("img")) !== Boolean(asset?.preview);
     });
     if (rendered !== value || staleToken) renderPromptValue(node, value, assets);
   }, [value, assets]);
   useEffect(() => {
     if (!focusSignal || !editor.current) return;
-    const frame = window.requestAnimationFrame(() => {
-      const node = editor.current;
-      if (!node) return;
-      node.focus({ preventScroll: true });
-      const selection = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(node);
-      range.collapse(false);
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-    });
-    return () => window.cancelAnimationFrame(frame);
+    // The restore intent is consumed immediately after Composer accepts it.
+    // Focus synchronously so that the parent clearing that one-shot intent
+    // cannot cancel a deferred animation-frame callback.
+    const node = editor.current;
+    node.focus({ preventScroll: true });
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    range.collapse(false);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
   }, [focusSignal]);
   useEffect(() => {
     if (!editor.current) return;
-    const attached = new Set(assets.map((asset) => asset.id)); let removed = false;
+    const attached = new Set(assets.map(referenceBindingId)); let removed = false;
     editor.current.querySelectorAll<HTMLElement>("[data-asset-id]").forEach((token) => { if (!attached.has(token.dataset.assetId ?? "")) { token.remove(); removed = true; } });
     if (removed) sync();
   }, [assets]);
@@ -106,7 +108,7 @@ export function PromptEditor({ value, placeholder, assets, disabled, attach, cha
   const selectAsset = (candidate: UploadAsset) => {
     const asset = attach(candidate); const range = mentionRange.current;
     if (!asset || !range || !editor.current) return;
-    const token = createPromptAssetToken(asset, asset.id);
+    const token = createPromptAssetToken(asset, referenceBindingId(asset));
     range.deleteContents(); range.insertNode(token); const space = document.createTextNode("\u00a0"); token.after(space);
     const selection = window.getSelection(); const caret = document.createRange(); caret.setStartAfter(space); caret.collapse(true); selection?.removeAllRanges(); selection?.addRange(caret);
     setOpen(false); setQuery(""); mentionRange.current = null; sync(); editor.current.focus();

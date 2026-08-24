@@ -1,9 +1,11 @@
 import { z } from "zod";
 import { config } from "./config.js";
 import { getModel } from "./capabilities.js";
+import { containsInternalPromptMarker } from "./creation-snapshots.js";
 
 export const GenerationSchema = z.object({
   prompt: z.string().trim().max(5000).default(""),
+  editorPrompt: z.string().max(5000).optional(),
   model: z.string(),
   mode: z.enum(["omni", "first_frame", "first_last", "edit", "extend", "text"]),
   ratio: z.string(),
@@ -16,14 +18,20 @@ export const GenerationSchema = z.object({
   outputFormat: z.enum(["mp4", "mov"]).default("mp4"),
   assets: z.array(z.object({
     id: z.string(),
+    bindingId: z.string().min(1).max(200).optional(),
     type: z.enum(["image", "video", "audio"]),
     role: z.enum(["reference_image", "reference_video", "reference_audio", "first_frame", "last_frame"]),
     url: z.string().url().optional(),
     uploadId: z.string().min(20).max(100).optional(),
     assetId: z.string().regex(/^asset-/).optional(),
     canvasProjectAssetId: z.string().min(1).max(180).optional(),
+    snapshotReferenceId: z.string().min(32).max(128).optional(),
     name: z.string()
-  }).refine((asset) => Boolean(asset.url || asset.uploadId || asset.assetId || asset.canvasProjectAssetId), "素材缺少可用地址"))
+  })
+    .refine((asset) => Boolean(asset.url || asset.uploadId || asset.assetId || asset.canvasProjectAssetId || asset.snapshotReferenceId), "素材缺少可用地址")
+    .refine((asset) => asset.type === "image"
+      ? ["reference_image", "first_frame", "last_frame"].includes(asset.role)
+      : asset.role === `reference_${asset.type}`, "素材类型与引用角色不一致"))
   .default([])
 });
 export type GenerationInput = z.infer<typeof GenerationSchema>;
@@ -103,6 +111,10 @@ const providerJson = async <T>(response: Response): Promise<T> => {
 export const buildProviderPayload = (input: GenerationInput) => {
   const model = getModel(input.model);
   if (!model) throw new Error("未找到所选模型");
+  if (containsInternalPromptMarker(input.prompt)) {
+    console.error(JSON.stringify({ type: "provider_prompt_marker_blocked", at: new Date().toISOString(), model: input.model }));
+    throw new Error("提示词包含未解析的内部素材引用");
+  }
   const content: Record<string, unknown>[] = [];
   if (input.prompt) content.push({ type: "text", text: input.prompt });
   for (const asset of input.assets) {

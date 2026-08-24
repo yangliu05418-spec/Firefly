@@ -19,6 +19,7 @@ export type ImageGenerationProcessorDependencies = {
   readTask: (id: string) => ImageGenerationTask | null;
   readUpload: typeof users.readUpload;
   readUploadState: typeof users.readUploadState;
+  readSnapshotReference: typeof users.readCreationSnapshotReference;
   updateTask: typeof users.updateImageGeneration;
   signReference: (objectKey: string) => string;
   generate: typeof generateSingleImage;
@@ -32,6 +33,7 @@ const defaultDependencies = () => productionDependencies ??= {
   readTask: (id) => users.readImageGeneration(id),
   readUpload: users.readUpload.bind(users),
   readUploadState: users.readUploadState.bind(users),
+  readSnapshotReference: users.readCreationSnapshotReference.bind(users),
   updateTask: users.updateImageGeneration.bind(users),
   signReference: signedProviderObjectUrl,
   generate: generateSingleImage,
@@ -58,7 +60,18 @@ export const processImageGenerationAttempt = async (
   if (!task || task.status !== "running") return;
   if (task.ownerId !== job.data.ownerId) throw new UnrecoverableError("图片任务所有者校验失败");
 
-  const references = job.data.referenceUploadIds.map((uploadId) => {
+  const referenceSources: Array<{ uploadId?: string; snapshotReferenceId?: string }> =
+    job.data.references ?? (job.data.referenceUploadIds ?? []).map((uploadId) => ({ uploadId }));
+  const references = referenceSources.map((source) => {
+    if (source.snapshotReferenceId) {
+      const snapshotReference = deps.readSnapshotReference(source.snapshotReferenceId);
+      if (!snapshotReference || snapshotReference.ownerId !== job.data.ownerId || snapshotReference.status !== "ready" || !snapshotReference.objectKey || snapshotReference.mediaType !== "image") {
+        throw new UnrecoverableError("参考素材不存在或尚未归档完成");
+      }
+      return deps.signReference(snapshotReference.objectKey);
+    }
+    const uploadId = source.uploadId;
+    if (!uploadId) throw new UnrecoverableError("参考素材缺少可用来源");
     const media = deps.readUpload(uploadId);
     if (!media) {
       const pending = deps.readUploadState(uploadId);

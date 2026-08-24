@@ -29,7 +29,8 @@ const validModel = (value: unknown): value is ImageModel => {
     && typeof model.name === "string" && model.name.length > 0
     && nonEmptyStrings(model.resolutions)
     && typeof model.defaultResolution === "string" && model.resolutions.includes(model.defaultResolution)
-    && Number.isInteger(model.maxCount) && Number(model.maxCount) > 0;
+    && Number.isInteger(model.maxCount) && Number(model.maxCount) > 0
+    && Number.isInteger(model.maxReferences) && Number(model.maxReferences) >= 0;
 };
 
 export const normalizeImageModelCatalog = (value: unknown): ImageModelCatalog | undefined => {

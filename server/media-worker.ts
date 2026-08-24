@@ -14,6 +14,7 @@ import { CanvasAssetUploadPendingError, copyPreparedCanvasAsset } from "./canvas
 import { startWorkerHeartbeat } from "./worker-heartbeat.js";
 import { finalizeQueuedUpload } from "./upload-finalization.js";
 import { coordinateUploadFinalization } from "./upload-finalization-coordinator.js";
+import { copyCreationSnapshotReference, deleteCreationSnapshotReference } from "./creation-reference-media.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const numberHeader = (value: unknown) => Number(value ?? 0) || 0;
@@ -228,6 +229,14 @@ const deletePendingMedia = async (taskId?: string) => {
       firstError ??= error;
     }
   }
+  const references = users.pendingCreationReferenceDeletes(100).filter((reference) => !taskId || reference.sourceId === taskId);
+  for (const reference of references) {
+    try { await deleteCreationSnapshotReference(reference.id); }
+    catch (error) {
+      console.warn(JSON.stringify({ type: "reedit_reference_delete_failed", at: new Date().toISOString(), taskId: reference.sourceId, sourceType: reference.sourceType, userId: reference.ownerId, referenceId: reference.id, code: (error as { code?: string }).code ?? "unknown" }));
+      firstError ??= error;
+    }
+  }
   if (firstError) throw firstError;
 };
 
@@ -242,6 +251,8 @@ const worker = new Worker("media", async (job) => {
   if (job.name === "create-poster") return createTaskPoster(job.data.taskId);
   if (job.name === "delete-canvas-assets") return deleteCanvasAssets(job.data.canvasId);
   if (job.name === "copy-canvas-asset") return copyPreparedCanvasAsset(job.data.assetId);
+  if (job.name === "promote-creation-reference") return config.taskReferenceArchiveEnabled ? copyCreationSnapshotReference(job.data.referenceId) : undefined;
+  if (job.name === "delete-creation-reference") return deleteCreationSnapshotReference(job.data.referenceId);
   throw new Error(`Unknown media job: ${job.name}`);
 }, { connection, concurrency: 2, lockDuration: 120000 });
 
@@ -301,6 +312,15 @@ uploadFinalizationWorker.on("failed", (job, error) => {
 });
 
 worker.on("failed", async (job, error) => {
+  if (job?.name === "promote-creation-reference") {
+    if (job.attemptsMade < (job.opts.attempts ?? 1)) return;
+    const reference = users.readCreationSnapshotReference(job.data.referenceId);
+    if (reference?.status === "promoting") {
+      users.updateCreationSnapshotReference(reference.id, { status: "unavailable", lastError: error.message.slice(0, 500), expectedStatus: "promoting" });
+      console.error(JSON.stringify({ type: "reedit_reference_promotion_failed", at: new Date().toISOString(), taskId: reference.sourceId, sourceType: reference.sourceType, userId: reference.ownerId, referenceId: reference.id, attempts: job.attemptsMade, code: (error as { code?: string }).code ?? "unknown" }));
+    }
+    return;
+  }
   if (job?.name === "copy-canvas-asset") {
     if (job.attemptsMade < (job.opts.attempts ?? 1)) return;
     if (error instanceof CanvasAssetUploadPendingError) {
@@ -399,6 +419,23 @@ const reconcileCanvasCopies = async () => {
   }
 };
 const canvasCopyReconcile = setInterval(() => void reconcileCanvasCopies().catch((error) => console.warn(JSON.stringify({ type: "canvas_copy_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }))), 60_000);
+const reconcileCreationReferences = async () => {
+  if (!config.taskReferenceArchiveEnabled) return;
+  const bucket = Math.floor(Date.now() / 60_000);
+  for (const reference of users.pendingCreationReferencePromotions(100)) {
+    await mediaQueue.add("promote-creation-reference", { referenceId: reference.id }, {
+      jobId: `promote-reference-${reference.id}-${bucket}`, attempts: 5,
+      backoff: { type: "exponential", delay: 5000, jitter: .5 }, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 },
+    });
+  }
+  for (const reference of users.pendingCreationReferenceDeletes(100)) {
+    await mediaQueue.add("delete-creation-reference", { referenceId: reference.id }, {
+      jobId: `delete-reference-${reference.id}-${bucket}`, attempts: 5,
+      backoff: { type: "exponential", delay: 5000, jitter: .5 }, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 },
+    });
+  }
+};
+const creationReferenceReconcile = setInterval(() => void reconcileCreationReferences().catch((error) => console.warn(JSON.stringify({ type: "reedit_reference_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }))), 60_000);
 void deletePendingMedia().catch((error) => console.warn(JSON.stringify({ type: "tos_delete_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" })));
 void deleteCanvasAssets().catch((error) => console.warn(JSON.stringify({ type: "canvas_asset_cleanup_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" })));
 void reconcileArchives().catch(() => undefined);
@@ -407,13 +444,14 @@ void deprioritizeExistingPreviewBacklog().then(reconcilePreviews).catch((error) 
 void reconcileAssets().catch(() => undefined);
 void reconcileUploadFinalizations().catch(() => undefined);
 void reconcileCanvasCopies().catch(() => undefined);
+void reconcileCreationReferences().catch(() => undefined);
 
 let shuttingDown = false;
 const shutdown = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
   await heartbeat.stop();
-  clearInterval(reconcile); clearInterval(archiveReconcile); clearInterval(posterReconcile); clearInterval(previewReconcile); clearInterval(assetReconcile); clearInterval(uploadFinalizeReconcile); clearInterval(canvasCopyReconcile);
+  clearInterval(reconcile); clearInterval(archiveReconcile); clearInterval(posterReconcile); clearInterval(previewReconcile); clearInterval(assetReconcile); clearInterval(uploadFinalizeReconcile); clearInterval(canvasCopyReconcile); clearInterval(creationReferenceReconcile);
   const graceful = await closeWorkersWithin([worker, previewWorker, assetWorker, uploadFinalizationWorker], config.shutdownGraceMs);
   console.info(JSON.stringify({ type: "worker_shutdown", at: new Date().toISOString(), worker: "media", graceful }));
   await connection.quit(); users.close(); process.exit(0);

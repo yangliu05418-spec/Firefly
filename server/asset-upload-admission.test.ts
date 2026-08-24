@@ -6,14 +6,15 @@ const media = (status: MediaObject["status"], ownerId = "owner-1"): MediaObject 
 
 describe("asset upload admission", () => {
   it("admits both transported and fully validated inputs", () => {
-    expect(canCreatePendingAsset(media("uploading"), "owner-1")).toBe(true);
-    expect(canCreatePendingAsset(media("ready"), "owner-1")).toBe(true);
+    expect(canCreatePendingAsset(media("uploading"), "owner-1", 7, 2)).toBe(true);
+    expect(canCreatePendingAsset(media("ready"), "owner-1", 7, 2)).toBe(true);
   });
 
   it("rejects deleted, missing and cross-user inputs", () => {
-    expect(canCreatePendingAsset(media("deleted"), "owner-1")).toBe(false);
-    expect(canCreatePendingAsset(media("uploading", "owner-2"), "owner-1")).toBe(false);
-    expect(canCreatePendingAsset(null, "owner-1")).toBe(false);
+    expect(canCreatePendingAsset(media("deleted"), "owner-1", 7, 2)).toBe(false);
+    expect(canCreatePendingAsset(media("uploading", "owner-2"), "owner-1", 7, 2)).toBe(false);
+    expect(canCreatePendingAsset(null, "owner-1", 7, 2)).toBe(false);
+    expect(canCreatePendingAsset(media("ready"), "owner-1", 7, 8 * 24 * 60 * 60 * 1000)).toBe(false);
   });
 
   it("bounds background reference preparation", () => {

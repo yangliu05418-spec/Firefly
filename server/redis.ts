@@ -27,7 +27,9 @@ export type ImageGenerationQueuePayload = {
   ratio: string;
   resolution: string;
   count: number;
-  referenceUploadIds: string[];
+  references?: { uploadId?: string; snapshotReferenceId?: string }[];
+  /** Legacy queue payload retained while old jobs drain. */
+  referenceUploadIds?: string[];
 };
 
 export type { StoredTask } from "./db.js";

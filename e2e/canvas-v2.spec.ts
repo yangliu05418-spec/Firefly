@@ -36,7 +36,7 @@ const projectImageAsset: CanvasProjectAsset = {
   mediaUrl: "/api/canvas-project-assets/project-library-image/media", downloadUrl: "/api/canvas-project-assets/project-library-image/media?download=1",
 };
 const videoModels = [{ id: "dreamina-seedance-2-5-260628", name: "Seedance 2.5", note: "旗舰模型", modes: ["omni", "text"], resolutions: ["720p", "1080p"], ratios: ["adaptive", "16:9", "9:16"], duration: [4, 30], imageLimit: 30, videoLimit: 10, audioLimit: 10, audioOnly: true, supportsAudio: true, outputFormats: ["mp4"] }];
-const imageModels = [{ id: "google/gemini-3.1-flash-lite-image", name: "Nano Banana 2 Lite", resolutions: ["1024"], defaultResolution: "1024", maxCount: 4 }];
+const imageModels = [{ id: "google/gemini-3.1-flash-lite-image", name: "Nano Banana 2 Lite", resolutions: ["1024"], defaultResolution: "1024", maxCount: 4, maxReferences: 4 }];
 
 const json = (route: Route, body: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
@@ -53,6 +53,7 @@ async function mockAuthenticatedApi(page: Page, options: {
   let videoHistory: Array<Record<string, unknown>> = structuredClone(options.videoHistory ?? []);
   let creationSessions = structuredClone(options.creationSessions ?? [{ id: "session-e2e", title: "新创作", createdAt: Date.now(), updatedAt: Date.now() }]);
   const postedSessionRequests: string[] = [];
+  const fallbackSessionSources: string[] = [];
   const postedGenerations: Array<Record<string, unknown>> = [];
   let releaseGenerationAdmission: () => void = () => undefined;
   const generationAdmissionGate = options.holdGenerationAdmission
@@ -99,6 +100,17 @@ async function mockAuthenticatedApi(page: Page, options: {
       const id = decodeURIComponent(path.slice("/api/creation-sessions/".length)); creationSessions = creationSessions.filter((session) => session.id !== id);
       return route.fulfill({ status: 204 });
     }
+    if (path === "/api/reedit-sessions" && request.method() === "POST") {
+      const body = request.postDataJSON() as { sourceType: "video" | "image"; sourceId: string };
+      const sourceKey = `${body.sourceType}:${body.sourceId}`;
+      fallbackSessionSources.push(sourceKey);
+      const id = `reedit-${body.sourceType}-${body.sourceId}`;
+      const existing = creationSessions.find((session) => session.id === id);
+      const session = existing ?? { id, title: "重新编辑", createdAt: Date.now(), updatedAt: Date.now() };
+      creationSessions = [session, ...creationSessions.filter((item) => item.id !== id)];
+      return json(route, session, existing ? 200 : 201);
+    }
+    if (path === "/api/reedit-events" && request.method() === "POST") return route.fulfill({ status: 204 });
     if (path === "/api/image-generations" && request.method() === "GET") {
       const sessionId = url.searchParams.get("sessionId");
       if (sessionId && options.imageSessionFailures?.includes(sessionId)) return json(route, { error: "image history unavailable" }, 503);
@@ -111,7 +123,7 @@ async function mockAuthenticatedApi(page: Page, options: {
     if (/^\/api\/image-generations\/[^/]+\/reedit$/.test(path) && request.method() === "GET") {
       const task = imageHistory.find((item) => item.id === decodeURIComponent(path.split("/").at(-2)!));
       if (!task) return json(route, { error: "图片任务不存在" }, 404);
-      return json(route, { sourceId: task.id, sourceType: "image", sessionId: task.sessionId, omittedAssets: 0, state: { engine: "image", prompt: task.prompt, modelId: videoModels[0].id, mode: "omni", ratio: "16:9", resolution: "720p", duration: 4, generateAudio: true, cameraFixed: false, watermark: false, seed: -1, imageModelId: imageModels[0].id, imageRatio: task.ratio, imageResolution: task.resolution, imageCount: task.requestedCount, assets: [] } });
+      return json(route, { sourceId: task.id, sourceType: "image", sessionId: task.sessionId, snapshotVersion: 1, recoveryQuality: "exact", sourceSessionStatus: "active", omittedAssets: 0, warnings: [], adjustments: [], state: { engine: "image", prompt: task.prompt, modelId: videoModels[0].id, mode: "omni", ratio: "16:9", resolution: "720p", duration: 4, generateAudio: true, cameraFixed: false, watermark: false, seed: -1, imageModelId: imageModels[0].id, imageRatio: task.ratio, imageResolution: task.resolution, imageCount: task.requestedCount, assets: [] } });
     }
     if (path === "/api/image-generation" && request.method() === "POST") {
       const body = request.postDataJSON() as { requestId: string; sessionId: string; prompt: string; ratio: string; resolution: string; count: number };
@@ -141,9 +153,10 @@ async function mockAuthenticatedApi(page: Page, options: {
     if (/^\/api\/generations\/[^/]+\/reedit$/.test(path) && request.method() === "GET") {
       const task = videoHistory.find((item) => item.id === decodeURIComponent(path.split("/").at(-2)!));
       if (!task) return json(route, { error: "任务不存在" }, 404);
-      return json(route, { sourceId: task.id, sourceType: "video", sessionId: task.sessionId, omittedAssets: 0, state: { engine: "video", prompt: task.prompt, modelId: task.model, mode: task.mode, ratio: task.ratio, resolution: task.resolution, duration: task.duration, generateAudio: false, cameraFixed: true, watermark: false, seed: 42, imageModelId: "", imageRatio: "1:1", imageResolution: "", imageCount: 1, assets: [{ id: "reedit-reference", uploadId: "upload-reedit-1234567890123456", name: "角色参考.png", type: "image", size: 128, role: "reference_image", progress: 100, phase: "ready", preview: "/api/uploads/upload-reedit-1234567890123456/source?variant=thumbnail" }] } });
+      return json(route, { sourceId: task.id, sourceType: "video", sessionId: task.sessionId, snapshotVersion: 1, recoveryQuality: "exact", sourceSessionStatus: "active", omittedAssets: 0, warnings: [], adjustments: [], state: { engine: "video", prompt: task.prompt, modelId: task.model, mode: task.mode, ratio: task.ratio, resolution: task.resolution, duration: task.duration, generateAudio: false, cameraFixed: true, watermark: false, seed: 42, imageModelId: "", imageRatio: "1:1", imageResolution: "", imageCount: 1, assets: [{ id: "reedit-reference", bindingId: "reedit-reference", snapshotReferenceId: "snapshot-reference-e2e", name: "角色参考.png", type: "image", size: 128, role: "reference_image", progress: 100, phase: "ready", preview: "/api/creation-references/snapshot-reference-e2e/source?variant=thumbnail" }] } });
     }
-    if (path === "/api/uploads/upload-reedit-1234567890123456/source") return route.fulfill({ status: 200, contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><path fill="#b8d9cf" d="M0 0h8v8H0z"/></svg>' });
+    if (path === "/api/creation-references/snapshot-reference-e2e") return json(route, { id: "snapshot-reference-e2e", bindingId: "reedit-reference", name: "角色参考.png", type: "image", size: 128, state: "ready", preview: "/api/creation-references/snapshot-reference-e2e/source?variant=thumbnail" });
+    if (path === "/api/creation-references/snapshot-reference-e2e/source") return route.fulfill({ status: 200, contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><path fill="#b8d9cf" d="M0 0h8v8H0z"/></svg>' });
     if (path === "/api/assets") return json(route, { Items: [], HasMore: false });
     if (path === "/api/canvas/config") return json(route, { enabled: true });
     if (path === "/api/canvases/canvas-e2e/lease" && request.method() === "POST") {
@@ -211,6 +224,7 @@ async function mockAuthenticatedApi(page: Page, options: {
     postedGenerations: () => [...postedGenerations],
     releaseGenerationAdmission,
     postedSessionRequests: () => [...postedSessionRequests],
+    fallbackSessionSources: () => [...fallbackSessionSources],
     authSessionRequests: () => authSessionRequests,
     creationSessions: () => structuredClone(creationSessions),
     storedDocument: () => structuredClone(storedDocument),
@@ -263,6 +277,42 @@ test("completed creation can be loaded back into the composer without a page ref
   await expect(page).toHaveURL(/\/studio\/sessions\/session-e2e$/);
   await expect(page.locator(".control-row")).toContainText("全能参考");
   await expect(page.locator(".control-row")).toContainText("1080p");
+});
+
+test("re-edit protects an unsent draft, supports undo, and reuses one fallback session without submitting", async ({ page }) => {
+  const createdAt = Date.now() - 60_000;
+  const mock = await mockAuthenticatedApi(page, { videoHistory: [{
+    id: "video-reedit-conflict", sessionId: "session-e2e", caseId: "video-reedit-conflict", visibility: "private",
+    status: "failed", mediaStatus: "none", prompt: "原始雨夜镜头", model: videoModels[0].id,
+    mode: "omni", ratio: "16:9", resolution: "1080p", duration: 8, error: "上游暂时繁忙", createdAt, updatedAt: createdAt,
+  }] });
+  await page.goto("/studio/sessions/session-e2e");
+  const editor = page.getByRole("textbox", { name: "创作提示词" });
+  await expect(editor).toBeVisible();
+  await editor.fill("用户尚未发送的草稿");
+  await page.waitForTimeout(500);
+
+  await page.getByRole("button", { name: "重新编辑" }).click();
+  const conflict = page.getByRole("dialog", { name: "这里有尚未发送的内容" });
+  await expect(conflict).toBeVisible();
+  await conflict.getByRole("button", { name: "取消" }).click();
+  await expect(editor).toContainText("用户尚未发送的草稿");
+
+  await page.getByRole("button", { name: "重新编辑" }).click();
+  await page.getByRole("dialog", { name: "这里有尚未发送的内容" }).getByRole("button", { name: "替换当前草稿" }).click();
+  await expect(editor).toContainText("原始雨夜镜头");
+  await page.getByRole("button", { name: "撤销替换" }).click();
+  await expect(editor).toContainText("用户尚未发送的草稿");
+
+  await page.getByRole("button", { name: "重新编辑" }).click();
+  await page.getByRole("dialog", { name: "这里有尚未发送的内容" }).getByRole("button", { name: "在新会话打开" }).click();
+  await expect(page).toHaveURL(/\/studio\/sessions\/reedit-video-video-reedit-conflict$/);
+  await expect(editor).toContainText("原始雨夜镜头");
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: "创作提示词" })).toContainText("原始雨夜镜头");
+  expect(mock.creationSessions().filter((session) => session.id === "reedit-video-video-reedit-conflict")).toHaveLength(1);
+  expect(mock.fallbackSessionSources()).toEqual(["video:video-reedit-conflict"]);
+  expect(mock.postedGenerations()).toHaveLength(0);
 });
 
 test("composer keeps uploaded assets available through the inline mention picker", async ({ page }) => {

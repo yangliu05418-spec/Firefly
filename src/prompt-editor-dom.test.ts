@@ -13,7 +13,7 @@ describe("prompt editor DOM restoration", () => {
     const token = editor.querySelector<HTMLElement>("[data-asset-id='image-1']");
     expect(token?.title).toBe("夜景参考");
     expect(token?.querySelector("img")?.getAttribute("src")).toBe("/api/assets/image-1/source");
-    expect(Array.from(editor.childNodes).map(promptNodeText).join("")).toBe(value);
+    expect(Array.from(editor.childNodes).map(promptNodeText).join("")).toBe("让 [[firefly-ref:image-1]] 中的灯光更柔和");
   });
 
   it("shows a recoverable placeholder while a cached reference is being checked", () => {

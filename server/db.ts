@@ -115,6 +115,47 @@ export type CreationSession = {
   deletedAt?: number;
 };
 
+export type CreationSourceType = "video" | "image";
+export type CreationRecoveryQuality = "exact" | "partial" | "unknown";
+export type CreationSnapshot = {
+  sourceType: CreationSourceType;
+  sourceId: string;
+  ownerId: string;
+  sessionId?: string;
+  editorPrompt: string;
+  providerPrompt: string;
+  parameters: unknown;
+  bindingVersion: number;
+  recoveryQuality: CreationRecoveryQuality;
+  createdAt: number;
+  updatedAt: number;
+};
+export type CreationSnapshotReference = {
+  id: string;
+  sourceType: CreationSourceType;
+  sourceId: string;
+  ownerId: string;
+  bindingId: string;
+  position: number;
+  mediaType: "image" | "video" | "audio";
+  role: "reference_image" | "reference_video" | "reference_audio" | "first_frame" | "last_frame";
+  displayName: string;
+  originalUploadId?: string;
+  originalAssetId?: string;
+  providerAssetId?: string;
+  sourceObjectKey?: string;
+  objectKey?: string;
+  contentType: string;
+  size: number;
+  etag: string;
+  status: "promoting" | "ready" | "unavailable" | "delete_pending" | "deleted";
+  lastError?: string;
+  createdAt: number;
+  updatedAt: number;
+  deletedAt?: number;
+};
+export type CreationSnapshotBundle = { snapshot: CreationSnapshot; references: CreationSnapshotReference[] };
+
 export type AssetCategory = "character" | "scene" | "prop" | "material";
 
 export type UserAsset = {
@@ -284,6 +325,21 @@ type CreationSessionRow = {
   id: string; owner_id: string; title: string; created_at: number; updated_at: number; deleted_at: number | null;
 };
 
+type CreationSnapshotRow = {
+  source_type: CreationSourceType; source_id: string; owner_id: string; session_id: string | null;
+  editor_prompt: string; provider_prompt: string; parameters_json: string; binding_version: number;
+  recovery_quality: CreationRecoveryQuality; created_at: number; updated_at: number;
+};
+
+type CreationSnapshotReferenceRow = {
+  id: string; source_type: CreationSourceType; source_id: string; owner_id: string; binding_id: string;
+  position: number; media_type: CreationSnapshotReference["mediaType"]; role: CreationSnapshotReference["role"];
+  display_name: string; original_upload_id: string | null; original_asset_id: string | null;
+  provider_asset_id: string | null;
+  source_object_key: string | null; object_key: string | null; content_type: string; size: number; etag: string;
+  status: CreationSnapshotReference["status"]; last_error: string | null; created_at: number; updated_at: number; deleted_at: number | null;
+};
+
 type UserAssetRow = {
   id: string; provider_asset_id: string | null; owner_id: string; group_id: string; upload_id: string | null; name: string;
   asset_type: UserAsset["assetType"]; status: UserAsset["status"]; category: AssetCategory; url: string | null;
@@ -372,6 +428,24 @@ const mapImageGeneration = (row?: ImageGenerationRow): ImageGenerationTask | nul
 
 const mapCreationSession = (row?: CreationSessionRow): CreationSession | null => row ? ({
   id: row.id, ownerId: row.owner_id, title: row.title, createdAt: row.created_at,
+  updatedAt: row.updated_at, deletedAt: row.deleted_at ?? undefined,
+}) : null;
+
+const mapCreationSnapshot = (row?: CreationSnapshotRow): CreationSnapshot | null => row ? ({
+  sourceType: row.source_type, sourceId: row.source_id, ownerId: row.owner_id,
+  sessionId: row.session_id ?? undefined, editorPrompt: row.editor_prompt, providerPrompt: row.provider_prompt,
+  parameters: JSON.parse(row.parameters_json), bindingVersion: row.binding_version,
+  recoveryQuality: row.recovery_quality, createdAt: row.created_at, updatedAt: row.updated_at,
+}) : null;
+
+const mapCreationSnapshotReference = (row?: CreationSnapshotReferenceRow): CreationSnapshotReference | null => row ? ({
+  id: row.id, sourceType: row.source_type, sourceId: row.source_id, ownerId: row.owner_id,
+  bindingId: row.binding_id, position: row.position, mediaType: row.media_type, role: row.role,
+  displayName: row.display_name, originalUploadId: row.original_upload_id ?? undefined,
+  originalAssetId: row.original_asset_id ?? undefined, providerAssetId: row.provider_asset_id ?? undefined,
+  sourceObjectKey: row.source_object_key ?? undefined,
+  objectKey: row.object_key ?? undefined, contentType: row.content_type, size: row.size, etag: row.etag,
+  status: row.status, lastError: row.last_error ?? undefined, createdAt: row.created_at,
   updatedAt: row.updated_at, deletedAt: row.deleted_at ?? undefined,
 }) : null;
 
@@ -594,6 +668,110 @@ export class UserStore {
     return rows.map((row) => mapTask(row)!);
   }
 
+  private insertCreationSnapshot(bundle: CreationSnapshotBundle) {
+    const { snapshot, references } = bundle;
+    this.database.prepare(`
+      INSERT INTO creation_snapshots
+        (source_type, source_id, owner_id, session_id, editor_prompt, provider_prompt, parameters_json, binding_version, recovery_quality, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      snapshot.sourceType, snapshot.sourceId, snapshot.ownerId, snapshot.sessionId ?? null,
+      snapshot.editorPrompt, snapshot.providerPrompt, JSON.stringify(snapshot.parameters), snapshot.bindingVersion,
+      snapshot.recoveryQuality, snapshot.createdAt, snapshot.updatedAt,
+    );
+    const insertReference = this.database.prepare(`
+      INSERT INTO creation_snapshot_references
+        (id, source_type, source_id, owner_id, binding_id, position, media_type, role, display_name,
+         original_upload_id, original_asset_id, source_object_key, object_key, content_type, size, etag,
+         provider_asset_id, status, last_error, created_at, updated_at, deleted_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const reference of references) insertReference.run(
+      reference.id, reference.sourceType, reference.sourceId, reference.ownerId, reference.bindingId,
+      reference.position, reference.mediaType, reference.role, reference.displayName,
+      reference.originalUploadId ?? null, reference.originalAssetId ?? null, reference.sourceObjectKey ?? null,
+      reference.objectKey ?? null, reference.contentType, reference.size, reference.etag, reference.providerAssetId ?? null, reference.status,
+      reference.lastError ?? null, reference.createdAt, reference.updatedAt, reference.deletedAt ?? null,
+    );
+    return bundle;
+  }
+
+  createCreationSnapshot(bundle: CreationSnapshotBundle) {
+    return this.database.transaction(() => this.insertCreationSnapshot(bundle))();
+  }
+
+  createCreationSnapshotIfMissing(bundle: CreationSnapshotBundle) {
+    return this.database.transaction(() => {
+      const existing = this.readCreationSnapshot(bundle.snapshot.sourceType, bundle.snapshot.sourceId);
+      if (existing) return { status: "existing" as const, snapshot: existing };
+      this.insertCreationSnapshot(bundle);
+      return { status: "created" as const, snapshot: bundle.snapshot };
+    }).immediate();
+  }
+
+  readCreationSnapshot(sourceType: CreationSourceType, sourceId: string) {
+    return mapCreationSnapshot(this.database.prepare("SELECT * FROM creation_snapshots WHERE source_type = ? AND source_id = ?").get(sourceType, sourceId) as CreationSnapshotRow | undefined);
+  }
+
+  listCreationSnapshotReferences(sourceType: CreationSourceType, sourceId: string) {
+    return (this.database.prepare("SELECT * FROM creation_snapshot_references WHERE source_type = ? AND source_id = ? AND status != 'deleted' ORDER BY position ASC").all(sourceType, sourceId) as CreationSnapshotReferenceRow[])
+      .map((row) => mapCreationSnapshotReference(row)!);
+  }
+
+  listVideoTasksWithoutCreationSnapshots(limit = 100) {
+    return (this.database.prepare(`
+      SELECT generation_tasks.* FROM generation_tasks
+      LEFT JOIN creation_snapshots ON creation_snapshots.source_type = 'video' AND creation_snapshots.source_id = generation_tasks.id
+      WHERE generation_tasks.owner_id IS NOT NULL AND generation_tasks.deleted_at IS NULL
+        AND generation_tasks.status IN ('succeeded', 'failed') AND creation_snapshots.source_id IS NULL
+      ORDER BY generation_tasks.created_at ASC LIMIT ?
+    `).all(limit) as TaskRow[]).map((row) => mapTask(row)!);
+  }
+
+  listImageTasksWithoutCreationSnapshots(limit = 100) {
+    return (this.database.prepare(`
+      SELECT image_generation_tasks.* FROM image_generation_tasks
+      LEFT JOIN creation_snapshots ON creation_snapshots.source_type = 'image' AND creation_snapshots.source_id = image_generation_tasks.id
+      WHERE image_generation_tasks.deleted_at IS NULL AND image_generation_tasks.status IN ('succeeded', 'failed')
+        AND creation_snapshots.source_id IS NULL
+      ORDER BY image_generation_tasks.created_at ASC LIMIT ?
+    `).all(limit) as ImageGenerationRow[]).map((row) => mapImageGeneration(row)!);
+  }
+
+  readCreationSnapshotReference(id: string) {
+    return mapCreationSnapshotReference(this.database.prepare("SELECT * FROM creation_snapshot_references WHERE id = ?").get(id) as CreationSnapshotReferenceRow | undefined);
+  }
+
+  updateCreationSnapshotReference(id: string, patch: Partial<Pick<CreationSnapshotReference, "status" | "objectKey" | "contentType" | "size" | "etag">> & { lastError?: string | null; providerAssetId?: string | null; expectedStatus?: CreationSnapshotReference["status"] }) {
+    const current = this.readCreationSnapshotReference(id);
+    if (!current) return null;
+    const now = Date.now();
+    this.database.prepare(`
+      UPDATE creation_snapshot_references
+      SET status = ?, object_key = ?, content_type = ?, size = ?, etag = ?, provider_asset_id = ?, last_error = ?, updated_at = ?,
+          deleted_at = CASE WHEN ? = 'deleted' THEN ? ELSE deleted_at END
+      WHERE id = ? AND (? IS NULL OR status = ?)
+    `).run(
+      patch.status ?? current.status, patch.objectKey ?? current.objectKey ?? null,
+      patch.contentType ?? current.contentType, patch.size ?? current.size, patch.etag ?? current.etag,
+      patch.providerAssetId === undefined ? current.providerAssetId ?? null : patch.providerAssetId,
+      patch.lastError === undefined ? current.lastError ?? null : patch.lastError, now,
+      patch.status ?? current.status, now, id, patch.expectedStatus ?? null, patch.expectedStatus ?? null,
+    );
+    const updated = this.readCreationSnapshotReference(id);
+    return patch.expectedStatus && updated?.status !== (patch.status ?? current.status) ? null : updated;
+  }
+
+  pendingCreationReferencePromotions(limit = 100) {
+    return (this.database.prepare("SELECT * FROM creation_snapshot_references WHERE status = 'promoting' ORDER BY updated_at ASC LIMIT ?").all(limit) as CreationSnapshotReferenceRow[])
+      .map((row) => mapCreationSnapshotReference(row)!);
+  }
+
+  pendingCreationReferenceDeletes(limit = 100) {
+    return (this.database.prepare("SELECT * FROM creation_snapshot_references WHERE status = 'delete_pending' ORDER BY updated_at ASC LIMIT ?").all(limit) as CreationSnapshotReferenceRow[])
+      .map((row) => mapCreationSnapshotReference(row)!);
+  }
+
   createCreationSession(session: CreationSession) {
     this.database.prepare("INSERT INTO creation_sessions (id, owner_id, title, created_at, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?)")
       .run(session.id, session.ownerId, session.title, session.createdAt, session.updatedAt, session.deletedAt ?? null);
@@ -606,7 +784,22 @@ export class UserStore {
       const existing = this.readCreationSession(session.id, true);
       if (existing) return { status: "existing" as const, session: existing };
       return { status: "created" as const, session: this.createCreationSession(session) };
-    })();
+    }).immediate();
+  }
+
+  admitReeditSession(ownerId: string, sourceType: CreationSourceType, sourceId: string, session: CreationSession) {
+    return this.database.transaction(() => {
+      const linked = this.database.prepare("SELECT session_id FROM reedit_session_links WHERE owner_id = ? AND source_type = ? AND source_id = ?").get(ownerId, sourceType, sourceId) as { session_id: string } | undefined;
+      const existing = linked ? this.readCreationSession(linked.session_id) : null;
+      if (existing) return { status: "existing" as const, session: existing };
+      this.createCreationSession(session);
+      this.database.prepare(`
+        INSERT INTO reedit_session_links (owner_id, source_type, source_id, session_id, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(owner_id, source_type, source_id) DO UPDATE SET session_id = excluded.session_id, created_at = excluded.created_at
+      `).run(ownerId, sourceType, sourceId, session.id, session.createdAt);
+      return { status: "created" as const, session };
+    }).immediate();
   }
 
   readCreationSession(id: string, includeDeleted = false) {
@@ -644,15 +837,16 @@ export class UserStore {
   }
 
   /** Atomically reserves one active generation slot and persists the queued task. */
-  admitTaskWithinLimit(task: StoredTask, limit: number, intent?: AsyncJobIntent) {
+  admitTaskWithinLimit(task: StoredTask, limit: number, intent?: AsyncJobIntent, snapshot?: CreationSnapshotBundle) {
     return this.database.transaction(() => {
       const existing = this.readTask(task.id, true);
       if (existing) return { status: "existing" as const, task: existing };
       if (!task.ownerId || this.countActiveTasksForUser(task.ownerId) >= limit) return { status: "limit" as const };
       const created = this.saveTask(task);
+      if (snapshot) this.insertCreationSnapshot(snapshot);
       if (intent) this.insertAsyncJobIntent(intent, task.createdAt);
       return { status: "created" as const, task: created };
-    })();
+    }).immediate();
   }
 
   /** Backward-compatible boolean admission used by maintenance code and older tests. */
@@ -838,21 +1032,42 @@ export class UserStore {
       .map((row) => mapImageGeneration(row)!);
   }
 
+  /** Read-only production smoke inputs; never returns prompts or media URLs. */
+  reeditIntegritySources() {
+    const providerMarkerLeak = Boolean(this.database.prepare(`
+      SELECT 1 FROM creation_snapshots WHERE instr(provider_prompt, '[[firefly-') > 0 LIMIT 1
+    `).get());
+    const duplicateBinding = Boolean(this.database.prepare(`
+      SELECT 1 FROM creation_snapshot_references WHERE status != 'deleted'
+      GROUP BY source_type, source_id, binding_id HAVING COUNT(*) > 1 LIMIT 1
+    `).get());
+    const video = mapTask(this.database.prepare(`
+      SELECT * FROM generation_tasks WHERE owner_id IS NOT NULL AND deleted_at IS NULL
+        AND status IN ('succeeded', 'failed') ORDER BY created_at DESC LIMIT 1
+    `).get() as TaskRow | undefined);
+    const image = mapImageGeneration(this.database.prepare(`
+      SELECT * FROM image_generation_tasks WHERE deleted_at IS NULL
+        AND status IN ('succeeded', 'failed') ORDER BY created_at DESC LIMIT 1
+    `).get() as ImageGenerationRow | undefined);
+    return { providerMarkerLeak, duplicateBinding, video, image };
+  }
+
   listImageGenerationsForSession(ownerId: string, sessionId: string, limit = 50) {
     return (this.database.prepare("SELECT * FROM image_generation_tasks WHERE owner_id = ? AND session_id = ? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?").all(ownerId, sessionId, limit) as ImageGenerationRow[])
       .map((row) => mapImageGeneration(row)!);
   }
 
-  admitImageGenerationWithinLimit(task: ImageGenerationTask, limit: number, intent?: AsyncJobIntent) {
+  admitImageGenerationWithinLimit(task: ImageGenerationTask, limit: number, intent?: AsyncJobIntent, snapshot?: CreationSnapshotBundle) {
     return this.database.transaction(() => {
       const existing = this.readImageGeneration(task.id, true);
       if (existing) return { status: "existing" as const, task: existing };
       const count = (this.database.prepare("SELECT COUNT(*) AS count FROM image_generation_tasks WHERE owner_id = ? AND status = 'running' AND deleted_at IS NULL").get(task.ownerId) as { count: number }).count;
       if (count >= limit) return { status: "limit" as const };
       const created = this.createImageGeneration(task);
+      if (snapshot) this.insertCreationSnapshot(snapshot);
       if (intent) this.insertAsyncJobIntent(intent, task.createdAt);
       return { status: "created" as const, task: created };
-    })();
+    }).immediate();
   }
 
   /** Backward-compatible boolean admission for maintenance callers. */
@@ -887,6 +1102,7 @@ export class UserStore {
       const mediaIds = task.items.map((item) => item.mediaId);
       const mark = this.database.prepare("UPDATE media_objects SET status = 'delete_pending', updated_at = ? WHERE id = ? AND owner_id = ? AND kind = 'generated' AND status != 'deleted'");
       for (const mediaId of mediaIds) mark.run(now, mediaId, ownerId);
+      this.database.prepare("UPDATE creation_snapshot_references SET status = 'delete_pending', updated_at = ? WHERE source_type = 'image' AND source_id = ? AND owner_id = ? AND status NOT IN ('deleted', 'delete_pending')").run(now, id, ownerId);
       return true;
     })();
   }
@@ -901,6 +1117,7 @@ export class UserStore {
       const result = this.database.prepare("UPDATE generation_tasks SET deleted_at = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").run(now, now, taskId, ownerId);
       if (!result.changes) return false;
       this.database.prepare("UPDATE media_objects SET status = 'delete_pending', updated_at = ? WHERE task_id = ? AND kind IN ('output', 'preview', 'poster') AND status != 'deleted'").run(now, taskId);
+      this.database.prepare("UPDATE creation_snapshot_references SET status = 'delete_pending', updated_at = ? WHERE source_type = 'video' AND source_id = ? AND owner_id = ? AND status NOT IN ('deleted', 'delete_pending')").run(now, taskId, ownerId);
       return true;
     })();
   }
@@ -1366,6 +1583,9 @@ export class UserStore {
 
   clearGenerationHistory() {
     return this.database.transaction(() => {
+      this.database.prepare("DELETE FROM reedit_session_links").run();
+      this.database.prepare("DELETE FROM creation_snapshot_references").run();
+      this.database.prepare("DELETE FROM creation_snapshots").run();
       this.database.prepare("DELETE FROM image_generation_tasks").run();
       this.database.prepare("DELETE FROM media_objects").run();
       this.database.prepare("DELETE FROM generation_tasks").run();

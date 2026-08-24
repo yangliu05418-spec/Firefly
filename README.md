@@ -6,6 +6,7 @@
 
 - **生成**：文本/首帧/首尾帧/编辑/续写/全能参考六种创作模式，多模型多比例，素材引用（@图片/@视频/@音频）
 - **资产**：已归档成片（长期保留）+ 图片素材库（inputs/ 前缀 7 天生命周期）
+- **重新编辑**：按任务保存不可变提示词、参数和引用快照；草稿冲突可新会话打开、替换或撤销，任务素材随任务长期保留
 - **画布（Canvas）**：无限画布工作台 —— 自由排版节点、连线、分组、框选、剪贴板、撤销/重做、小地图、缩放导航；从资产一键插入成片与图片（图片自动迁移到 canvas/ 长期存储）；自动保存（800ms 防抖 + 离页 flush + revision 乐观锁）
 
 ## 画布（Canvas Feature）
@@ -55,6 +56,8 @@ npm run dev        # vite + server + worker
 npm test           # vitest（server/** 与 src/**）
 npm run build      # vite build + tsc server
 ```
+
+生产迁移、功能开关、Smoke Test 与故障处置见 [重新编辑 V2 运行手册](docs/reedit-production.md)。
 
 ## 许可与来源声明
 

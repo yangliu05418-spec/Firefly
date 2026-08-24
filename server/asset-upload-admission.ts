@@ -1,8 +1,9 @@
 import type { MediaObject } from "./db.js";
 
 /** Transported inputs may be listed immediately, but only the worker can advance them to a usable asset. */
-export const canCreatePendingAsset = (media: MediaObject | null, ownerId: string): media is MediaObject => Boolean(
-  media && media.ownerId === ownerId && media.kind === "input" && ["uploading", "ready"].includes(media.status),
+export const canCreatePendingAsset = (media: MediaObject | null, ownerId: string, inputRetentionDays = 7, now = Date.now()): media is MediaObject => Boolean(
+  media && media.ownerId === ownerId && media.kind === "input" && ["uploading", "ready"].includes(media.status)
+  && (!media.objectKey.startsWith("inputs/") || now - media.createdAt < inputRetentionDays * 24 * 60 * 60 * 1000),
 );
 
 export class UploadReferencePendingError extends Error {
