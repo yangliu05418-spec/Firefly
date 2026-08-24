@@ -8,7 +8,7 @@ import { recoverComposerDraftAsset } from "../../composer-draft-recovery";
 import { materializePromptReferences, promptAssetLabel, referenceBindingId } from "../../prompt-references";
 import { RecoveringThumbnail } from "../../recovering-image";
 import { isAmbiguousSubmissionFailure } from "../../studio-sync";
-import type { CreationMode, ImageGenResponse, ImageResultBundle, ModelCapability, Task, UploadAsset } from "../../types";
+import type { CreationMode, GenerationCapacity, ImageGenResponse, ImageResultBundle, ModelCapability, Task, UploadAsset } from "../../types";
 import { areAttachedUploadsAdmissible } from "../../upload-state";
 import { useImageModelCatalog } from "../../use-image-model-catalog";
 import { LibraryPanel } from "./LibraryPanel";
@@ -16,6 +16,7 @@ import { PromptEditor } from "./PromptEditor";
 import { persistPrivateMediaStorage } from "../../private-media-cache";
 import { uploadFileUntilAccepted } from "../../upload-acceptance";
 import type { ComposerRestore } from "../../composer-restore";
+import { submissionBlockReason } from "./submission-readiness";
 
 const modeLabels: Record<CreationMode, string> = { omni: "全能参考", first_frame: "首帧生成", first_last: "首尾帧", edit: "视频编辑", extend: "视频续写", text: "文本生成" };
 const modeNotes: Record<CreationMode, string> = { omni: "自由组合图片、视频和音频", first_frame: "锁定开场画面继续创作", first_last: "精确控制起点与落点", edit: "替换、增删或重绘画面", extend: "向前、向后或多段衔接", text: "只用提示词生成镜头" };
@@ -32,7 +33,7 @@ function Popover({ children, className = "" }: { children: ReactNode; className?
   return <div className={`popover ${className}`} onClick={(event) => event.stopPropagation()}>{children}</div>;
 }
 
-export function Composer({ models, compact, sessionId, restore, onRestoreConsumed, onCreated, onImagesGenerated }: { models: ModelCapability[]; compact: boolean; sessionId: string; restore?: ComposerRestore; onRestoreConsumed?: () => void; onCreated: (task: Task) => void; onImagesGenerated?: (bundle: ImageResultBundle) => void }) {
+export function Composer({ models, compact, sessionId, restore, onRestoreConsumed, onCreated, onImagesGenerated, generationCapacity, admissionConfirmationPending = false, onAdmissionConfirmationChange, onGenerationSettled }: { models: ModelCapability[]; compact: boolean; sessionId: string; restore?: ComposerRestore; onRestoreConsumed?: () => void; onCreated: (task: Task) => void; onImagesGenerated?: (bundle: ImageResultBundle) => void; generationCapacity?: GenerationCapacity | null; admissionConfirmationPending?: boolean; onAdmissionConfirmationChange?: (pending: boolean) => void; onGenerationSettled?: () => void }) {
   const userId = useAssetCacheUserId();
   const { catalog: imageModelCatalog, error: imageModelCatalogError } = useImageModelCatalog();
   const defaultModel = models[0];
@@ -56,6 +57,7 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
   const consumedRestore = useRef<number | null>(null);
   const restoringDraft = useRef(false);
   const skipHydrationAfterRestore = useRef<string | null>(null);
+  const submissionInFlight = useRef(false);
 
   const releaseLocalPreview = (url?: string) => {
     if (url && localPreviewUrls.current.delete(url)) URL.revokeObjectURL(url);
@@ -304,6 +306,8 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
   };
 
   const submit = async () => {
+    if (submissionInFlight.current) return;
+    submissionInFlight.current = true;
     setLoading(true); setError("");
     let pendingImage: ImageResultBundle | undefined;
     let pendingVideo: Task | undefined;
@@ -333,7 +337,12 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
       const submittedAt = Date.now();
       pendingVideo = { id: requestId, sessionId, caseId: requestId, ownerId: userId, visibility: "private", status: "submitting", mediaStatus: "none", prompt: submittedPrompt, model: model.id, mode, ratio, resolution, duration, createdAt: submittedAt, updatedAt: submittedAt };
       const task = await api.post<Task>("/api/generations", { requestId, sessionId, prompt: submittedPrompt, editorPrompt, model: model.id, mode, ratio, resolution, duration, generateAudio: model.supportsAudio && generateAudio, seed, cameraFixed, watermark, outputFormat: "mp4", assets: assets.map((attached) => { const { preview, progress, size, ...asset } = attached; return { ...asset, bindingId: referenceBindingId(attached) }; }) }, { timeoutMs: 8_000 });
-      clearSubmittedComposer(); onCreated(task);
+      // Video creators commonly submit several variations from the same
+      // references. Persist the accepted draft before the empty composer is
+      // replaced by the docked composer, then keep it ready for the next take.
+      void composerDraftCache.write(userId, sessionId, draftState);
+      setDraftNotice("已加入生成队列，可继续调整或再次生成");
+      onCreated(task);
     } catch (e) {
       const message = e instanceof Error ? e.message : "无法创建任务";
       if (pendingImage && isAmbiguousSubmissionFailure(e)) {
@@ -345,25 +354,34 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
         return;
       }
       if (pendingVideo && isAmbiguousSubmissionFailure(e)) {
-        clearSubmittedComposer(); onCreated(pendingVideo);
+        void composerDraftCache.write(userId, sessionId, draftState);
+        onAdmissionConfirmationChange?.(true);
+        onCreated(pendingVideo);
         void api.get<Task>(`/api/generations/${encodeURIComponent(pendingVideo.id)}`, { timeoutMs: 8_000 })
           .then(onCreated)
-          .catch((confirmation) => { if ((confirmation as { status?: number }).status === 404) onCreated({ ...pendingVideo!, status: "failed", error: "任务未完成接纳，请重新生成", updatedAt: Date.now() }); });
+          .catch((confirmation) => { if ((confirmation as { status?: number }).status === 404) onCreated({ ...pendingVideo!, status: "failed", error: "任务未完成接纳，请重新生成", updatedAt: Date.now() }); })
+          .finally(() => { onAdmissionConfirmationChange?.(false); onGenerationSettled?.(); });
         return;
       }
       if (pendingImage) onImagesGenerated?.({ ...pendingImage, status: "failed", error: message });
       setError(message);
-    } finally { setLoading(false); }
+    } finally {
+      setLoading(false);
+      submissionInFlight.current = false;
+      if (engine === "video") onGenerationSettled?.();
+    }
   };
 
   const uploadsReady = areAttachedUploadsAdmissible(assets);
   const uploadsFinalizing = assets.some((asset) => !asset.assetId && asset.progress === 100 && asset.phase === "verifying");
-  const modeReady = engine === "image" ? imageReady!
-    : mode === "text" ? Boolean(prompt.trim())
-    : mode === "first_frame" ? assets.length === 1 && assets[0]?.role === "first_frame"
-    : mode === "first_last" ? assets.length === 2 && assets.some((asset) => asset.role === "first_frame") && assets.some((asset) => asset.role === "last_frame")
-    : mode === "omni" ? assets.length > 0
-    : Boolean(prompt.trim()) && assets.some((asset) => asset.type === "video");
+  const submitBlockReason = submissionBlockReason({
+    engine, mode, prompt, assetCount: assets.length,
+    hasVideoAsset: assets.some((asset) => asset.type === "video"),
+    hasFirstFrame: assets.some((asset) => asset.role === "first_frame"),
+    hasLastFrame: assets.some((asset) => asset.role === "last_frame"),
+    uploadsReady, imageReady: Boolean(imageReady), loading, confirmationPending: admissionConfirmationPending,
+    capacity: generationCapacity,
+  });
 
   return <div className={`composer ${compact ? "composer--compact" : ""}`} onClick={(e) => e.stopPropagation()}>
     {!compact && <h1>今晚，想创造什么？</h1>}
@@ -392,9 +410,11 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
         <span className="control-spacer" />
           </>
         )}
-        <button className={`send-button ${loading ? "send-button--submitted" : ""}`} title={uploadsFinalizing ? "文件已上传，后台准备引用，不影响提交" : undefined} aria-label={loading ? engine === "image" ? "图片已提交，正在生成" : "视频已提交，正在确认任务" : engine === "image" ? "生成图片" : "生成视频"} aria-busy={loading ? true : undefined} disabled={loading || !uploadsReady || !modeReady} onClick={submit}>{loading ? <Check /> : <Send />}</button>
+        {engine === "video" && generationCapacity && <span className={`generation-capacity ${generationCapacity.available <= 0 ? "generation-capacity--full" : ""}`} title={`每位用户最多同时生成 ${generationCapacity.limit} 个视频`}><i />{generationCapacity.active ? `${generationCapacity.active}/${generationCapacity.limit} 生成中` : `可并行 ${generationCapacity.limit} 项`}</span>}
+        <button className={`send-button ${loading || admissionConfirmationPending ? "send-button--submitted" : ""}`} title={uploadsFinalizing ? "文件已上传，后台准备引用，不影响提交" : submitBlockReason || undefined} aria-label={loading ? engine === "image" ? "图片已提交，正在生成" : "视频已提交，正在确认任务" : admissionConfirmationPending ? "正在确认上一项任务" : engine === "image" ? "生成图片" : "生成视频"} aria-busy={loading || admissionConfirmationPending ? true : undefined} aria-describedby={submitBlockReason && !loading ? "composer-submit-hint" : undefined} disabled={Boolean(submitBlockReason)} onClick={submit}>{loading || admissionConfirmationPending ? <Check /> : <Send />}</button>
       </div>
       {loading && <div className="composer-generation-status" role="status" aria-live="polite"><Check /><span><b>{engine === "image" ? "已提交，正在生成" : "已提交，正在确认任务"}</b><small>{engine === "image" ? "完成后会自动出现在结果区" : "接纳后会立即进入上方生成队列"}</small></span></div>}
+      {!loading && submitBlockReason && <div id="composer-submit-hint" className="composer-submit-hint" role="status" aria-live="polite">{submitBlockReason}</div>}
       {draftNotice && <div className="composer-draft-status" role="status" aria-live="polite"><RefreshCw /><span>{draftNotice}</span></div>}
       {engine === "image" && imageModelCatalogError && !imageModels.length && <div className="composer-error">{imageModelCatalogError}</div>}
       {error && <div className="composer-error">{error}</div>}
