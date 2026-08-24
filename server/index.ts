@@ -74,7 +74,33 @@ app.use((req, res, next) => {
 const respondError = (res: express.Response, error: unknown, status = 400) => {
   const message = error instanceof z.ZodError ? error.issues[0]?.message : error instanceof Error ? error.message : "请求失败";
   const code = (error as { code?: string }).code;
-  res.status(error instanceof z.ZodError ? 400 : status).json({ error: message, ...(code ? { code } : {}), requestId: res.locals.requestId });
+  const effectiveStatus = error instanceof z.ZodError ? 400 : status;
+  const event = {
+    type: "api_request_failed", level: effectiveStatus >= 500 ? "error" : effectiveStatus === 409 || effectiveStatus === 429 ? "warn" : "info",
+    at: new Date().toISOString(), requestId: res.locals.requestId,
+    method: res.req.method, path: res.req.route?.path ?? res.req.path,
+    status: effectiveStatus, code: code ?? (error instanceof z.ZodError ? "REQUEST_SCHEMA_INVALID" : "REQUEST_FAILED"),
+    userId: (res.locals.user as SessionUser | undefined)?.id,
+    errorType: error instanceof Error ? error.name : typeof error,
+    ...(error instanceof z.ZodError ? { issues: error.issues.slice(0, 8).map((issue) => ({ code: issue.code, path: issue.path.join(".") })) } : {}),
+  };
+  if (effectiveStatus >= 500) console.error(JSON.stringify(event));
+  else if (effectiveStatus === 409 || effectiveStatus === 429) console.warn(JSON.stringify(event));
+  else console.info(JSON.stringify(event));
+  res.status(effectiveStatus).json({ error: message, ...(code ? { code } : {}), requestId: res.locals.requestId });
+};
+type GenerationRejectContext = { model?: string; mode?: string; assetCount?: number; activeCount?: number; limit?: number; causeCode?: string; errorType?: string; issues?: { code: string; path: string }[] };
+const rejectGeneration = (res: express.Response, status: number, code: string, error: string, context: GenerationRejectContext = {}) => {
+  const event = {
+    type: "generation_rejected", level: status === 409 || status === 429 ? "warn" : status >= 500 ? "error" : "info",
+    at: new Date().toISOString(), requestId: res.locals.requestId,
+    userId: (res.locals.user as SessionUser | undefined)?.id,
+    status, code, ...context,
+  };
+  if (status >= 500) console.error(JSON.stringify(event));
+  else if (status === 409 || status === 429) console.warn(JSON.stringify(event));
+  else console.info(JSON.stringify(event));
+  return res.status(status).json({ error, code, requestId: res.locals.requestId });
 };
 const param = (value: string | string[]) => Array.isArray(value) ? value[0] : value;
 const publicGenerationTask = (task: StoredTask) => {
@@ -548,14 +574,26 @@ app.post("/api/reedit-sessions", requireAuth, (req, res) => {
   } catch (error) { respondError(res, error); }
 });
 
+app.get("/api/generation-capacity", requireAuth, (_req, res) => {
+  const user = res.locals.user as SessionUser;
+  const active = users.countActiveTasksForUser(user.id);
+  const limit = config.maxActiveGenerationsPerUser;
+  res.json({ active, limit, available: Math.max(0, limit - active) });
+});
+
 app.post("/api/generations", requireAuth, async (req, res) => {
+  const requestContext: GenerationRejectContext = {
+    ...(typeof req.body?.model === "string" ? { model: req.body.model } : {}),
+    ...(typeof req.body?.mode === "string" ? { mode: req.body.mode } : {}),
+    assetCount: Array.isArray(req.body?.assets) ? req.body.assets.length : 0,
+  };
   try {
     const requestedTaskId = z.string().uuid().optional().parse(req.body?.requestId);
     const owner = res.locals.user as SessionUser;
     if (requestedTaskId) {
       const existing = await readTask(requestedTaskId, true);
       if (existing) {
-        if (existing.ownerId !== owner.id || existing.deletedAt) return res.status(409).json({ error: "请求标识已被使用", requestId: res.locals.requestId });
+        if (existing.ownerId !== owner.id || existing.deletedAt) return rejectGeneration(res, 409, "REQUEST_ID_CONFLICT", "请求标识已被使用", requestContext);
         const active = ["queued", "submitting", "running"].includes(existing.status) || existing.mediaStatus === "archiving";
         return res.status(active ? 202 : 200).json(publicGenerationTask(existing));
       }
@@ -563,27 +601,27 @@ app.post("/api/generations", requireAuth, async (req, res) => {
     const requestedSessionId = z.string().min(1).max(200).optional().parse(req.body?.sessionId);
     const requestedInput = validateGeneration(req.body);
     const session = requestedSessionId ? users.readCreationSession(requestedSessionId) : null;
-    if (requestedSessionId && (!session || session.ownerId !== owner.id)) return res.status(404).json({ error: "创作会话不存在" });
+    if (requestedSessionId && (!session || session.ownerId !== owner.id)) return rejectGeneration(res, 404, "SESSION_NOT_FOUND", "创作会话不存在", requestContext);
     const activeSession = session ?? createCreationSession(owner.id);
     const assets = [];
     for (const asset of requestedInput.assets) {
-      if (asset.canvasProjectAssetId) return res.status(404).json({ error: "引用素材不存在或无权访问" });
+      if (asset.canvasProjectAssetId) return rejectGeneration(res, 404, "REFERENCE_NOT_FOUND", "引用素材不存在或无权访问", requestContext);
       if (asset.uploadId) {
         const media = users.readUploadState(asset.uploadId);
-        if (!canCreatePendingAsset(media, owner.id, config.tosInputRetentionDays)) return res.status(404).json({ error: "引用素材不存在或已过期" });
+        if (!canCreatePendingAsset(media, owner.id, config.tosInputRetentionDays)) return rejectGeneration(res, 404, "REFERENCE_EXPIRED", "引用素材不存在或已过期", requestContext);
         assets.push(asset);
         continue;
       }
       if (asset.assetId) {
         const owned = users.readUserAsset(asset.assetId);
-        if (!owned || owned.ownerId !== owner.id) return res.status(404).json({ error: "引用素材不存在或无权访问" });
-        if (owned.status !== "Active") return res.status(409).json({ error: `参考素材「${asset.name}」仍在处理中，请稍后再试` });
+        if (!owned || owned.ownerId !== owner.id) return rejectGeneration(res, 404, "REFERENCE_NOT_FOUND", "引用素材不存在或无权访问", requestContext);
+        if (owned.status !== "Active") return rejectGeneration(res, 409, owned.status === "Failed" ? "REFERENCE_UNAVAILABLE" : "REFERENCE_PROCESSING", owned.status === "Failed" ? "参考素材处理失败，请重新上传" : "参考素材仍在处理中，请稍后再试", requestContext);
         assets.push(asset);
         continue;
       }
       if (asset.snapshotReferenceId) {
         const reference = users.readCreationSnapshotReference(asset.snapshotReferenceId);
-        if (!reference || reference.ownerId !== owner.id || reference.status !== "ready" || reference.mediaType !== asset.type) return res.status(404).json({ error: "引用素材不存在或尚未归档完成" });
+        if (!reference || reference.ownerId !== owner.id || reference.status !== "ready" || reference.mediaType !== asset.type) return rejectGeneration(res, 404, "REFERENCE_NOT_READY", "引用素材不存在或尚未归档完成", requestContext);
         assets.push(asset);
         continue;
       }
@@ -592,7 +630,7 @@ app.post("/api/generations", requireAuth, async (req, res) => {
       if (url.origin === applicationOrigin && url.pathname.startsWith("/media/")) {
         const uploadId = url.pathname.split("/")[2];
         const raw = uploadId ? await redis.get(`upload:${uploadId}`) : null;
-        if (!raw || JSON.parse(raw).ownerId !== owner.id) return res.status(404).json({ error: "引用素材不存在或已过期" });
+        if (!raw || JSON.parse(raw).ownerId !== owner.id) return rejectGeneration(res, 404, "REFERENCE_EXPIRED", "引用素材不存在或已过期", requestContext);
       }
       assets.push(asset);
     }
@@ -609,23 +647,34 @@ app.post("/api/generations", requireAuth, async (req, res) => {
       },
       references: assets as CreationReferenceInput[], createdAt: now,
     }, creationSnapshotDependencies);
-    if (snapshot.references.some((reference) => reference.status === "unavailable")) return res.status(409).json({ error: "有参考素材刚刚失效，请重新选择后提交" });
+    if (snapshot.references.some((reference) => reference.status === "unavailable")) return rejectGeneration(res, 409, "REFERENCE_UNAVAILABLE", "有参考素材刚刚失效，请重新选择后提交", requestContext);
     const input = validateGeneration({ ...requestedInput, editorPrompt, prompt: snapshot.snapshot.providerPrompt, assets });
     const persistedRequest = { ...input, assets };
     const task: StoredTask = { id, sessionId: activeSession.id, ownerId: owner.id, visibility: "private", status: "queued", mediaStatus: "none", mediaRevision: 0, prompt: input.prompt, model: input.model, mode: input.mode, ratio: input.ratio, resolution: input.resolution, duration: input.duration, request: persistedRequest, createdAt: now, updatedAt: now };
     const intent = { queueName: "generation" as const, jobId: id, jobName: "generate", payload: { input } };
     const admission = users.admitTaskWithinLimit(task, config.maxActiveGenerationsPerUser, intent, snapshot);
-    if (admission.status === "limit") return res.status(429).json({ error: `你已有 ${config.maxActiveGenerationsPerUser} 个任务正在生成，请等待其中一个完成`, requestId: res.locals.requestId });
+    if (admission.status === "limit") return rejectGeneration(res, 429, "GENERATION_LIMIT_REACHED", `你已有 ${config.maxActiveGenerationsPerUser} 个任务正在生成，请等待其中一个完成`, { ...requestContext, activeCount: users.countActiveTasksForUser(owner.id), limit: config.maxActiveGenerationsPerUser });
     if (admission.status === "existing") {
-      if (admission.task.ownerId !== owner.id || admission.task.deletedAt) return res.status(409).json({ error: "请求标识已被使用", requestId: res.locals.requestId });
+      if (admission.task.ownerId !== owner.id || admission.task.deletedAt) return rejectGeneration(res, 409, "REQUEST_ID_CONFLICT", "请求标识已被使用", requestContext);
       const active = ["queued", "submitting", "running"].includes(admission.task.status) || admission.task.mediaStatus === "archiving";
       return res.status(active ? 202 : 200).json(publicGenerationTask(admission.task));
     }
     enqueueSnapshotPromotions(snapshot);
     users.touchCreationSession(activeSession.id, owner.id, input.prompt);
-    console.info(JSON.stringify({ type: "generation_admitted", at: new Date().toISOString(), requestId: res.locals.requestId, taskId: id, userId: owner.id, model: input.model, mode: input.mode, assetCount: input.assets.length }));
+    console.info(JSON.stringify({ type: "generation_admitted", level: "info", at: new Date().toISOString(), requestId: res.locals.requestId, taskId: id, userId: owner.id, model: input.model, mode: input.mode, assetCount: input.assets.length, activeCount: users.countActiveTasksForUser(owner.id), limit: config.maxActiveGenerationsPerUser }));
     res.status(202).json(publicGenerationTask(task));
-  } catch (error) { respondError(res, error); }
+  } catch (error) {
+    const issues = error instanceof z.ZodError ? error.issues.slice(0, 8).map((issue) => ({ code: issue.code, path: issue.path.join(".") })) : undefined;
+    const errorCode = (error as { code?: string }).code;
+    const isClientError = error instanceof z.ZodError || errorCode === "UNRESOLVED_PROMPT_REFERENCE";
+    const message = error instanceof z.ZodError
+      ? error.issues[0]?.message ?? "生成参数无效"
+      : isClientError && error instanceof Error
+        ? error.message
+        : "生成服务暂时无法接纳请求，请稍后重试";
+    const publicCode = error instanceof z.ZodError ? "REQUEST_SCHEMA_INVALID" : isClientError ? errorCode! : "GENERATION_ADMISSION_FAILED";
+    return rejectGeneration(res, isClientError ? 400 : 500, publicCode, message, { ...requestContext, errorType: error instanceof Error ? error.name : typeof error, ...(!isClientError && errorCode ? { causeCode: errorCode } : {}), ...(issues ? { issues } : {}) });
+  }
 });
 
 app.get("/api/generations", requireAuth, async (req, res) => {

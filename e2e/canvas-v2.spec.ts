@@ -135,6 +135,10 @@ async function mockAuthenticatedApi(page: Page, options: {
       return json(route, { Id: body.requestId, Items: [], Model: imageModels[0].id, Ratio: body.ratio, Resolution: body.resolution, Failed: [], Status: "generating" }, 202);
     }
     if (path === "/api/image-media/image-e2e") return route.fulfill({ status: 200, contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><path fill="#b8d9cf" d="M0 0h8v8H0z"/></svg>' });
+    if (path === "/api/generation-capacity" && request.method() === "GET") {
+      const active = videoHistory.filter((item) => ["queued", "submitting", "running"].includes(String(item.status))).length;
+      return json(route, { active, limit: 4, available: Math.max(0, 4 - active) });
+    }
     if (path === "/api/generations" && request.method() === "GET") {
       const sessionId = url.searchParams.get("sessionId");
       return json(route, sessionId ? videoHistory.filter((item) => item.sessionId === sessionId) : videoHistory);
@@ -748,9 +752,28 @@ test("a lost video admission response reconciles by client id without creating a
 
   await expect(page.locator(".task-card").filter({ hasText: prompt })).toBeVisible();
   await expect(page.locator(".task-card")).toHaveCount(1);
-  await expect(page.locator(".composer-dock").getByRole("textbox", { name: "创作提示词" })).toHaveText("");
+  await expect(page.locator(".composer-dock").getByRole("textbox", { name: "创作提示词" })).toContainText(prompt);
   await expect.poll(() => mock.postedGenerations()).toHaveLength(1);
   expect(mock.postedGenerations()[0]?.requestId).toMatch(/^[0-9a-f-]{36}$/);
+});
+
+test("video composer keeps the accepted draft ready for consecutive parallel submissions", async ({ page }) => {
+  const mock = await mockAuthenticatedApi(page);
+  await page.goto("/studio/sessions/session-e2e");
+  await page.getByRole("button", { name: "全能参考", exact: true }).click();
+  await page.getByRole("button", { name: /文本生成/ }).click();
+  const prompt = "同一镜头生成两版不同随机结果";
+  await page.getByRole("textbox", { name: "创作提示词" }).fill(prompt);
+
+  await page.getByRole("button", { name: "生成视频" }).click();
+  const dock = page.locator(".composer-dock");
+  await expect(dock.getByRole("textbox", { name: "创作提示词" })).toContainText(prompt);
+  await expect(dock.getByRole("button", { name: "生成视频" })).toBeEnabled();
+  await dock.getByRole("button", { name: "生成视频" }).click();
+
+  await expect.poll(() => mock.postedGenerations()).toHaveLength(2);
+  await expect(page.locator(".task-card")).toHaveCount(2);
+  await expect(dock.locator(".generation-capacity")).toContainText("2/4 生成中");
 });
 
 test("video generation acknowledges the click while task admission completes in the background", async ({ page }) => {

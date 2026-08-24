@@ -79,13 +79,19 @@ describe("enterprise identity and isolation", () => {
     store.close();
   });
 
-  it("atomically enforces the per-user active generation limit", () => {
+  it("admits four concurrent generations per user and rejects only the fifth", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-generation-limit-")); directories.push(directory);
     const store = openStore(path.join(directory, "firefly.db"));
     const owner = store.upsertFromFeishu({ openId: "ou_limit", unionId: "on_limit", tenantKey: "tenant-dokuai", email: "limit@dokuai.tv", name: "Limit", avatarUrl: "" });
-    expect(store.createTaskWithinLimit(task({ id: "task-limit-1", ownerId: owner.id }), 1)).toBe(true);
-    expect(store.createTaskWithinLimit(task({ id: "task-limit-2", ownerId: owner.id }), 1)).toBe(false);
-    expect(store.readTask("task-limit-2")).toBeNull();
+    const other = store.upsertFromFeishu({ openId: "ou_limit_other", unionId: "on_limit_other", tenantKey: "tenant-dokuai", email: "limit-other@dokuai.tv", name: "Other", avatarUrl: "" });
+    for (let index = 1; index <= 4; index += 1) {
+      expect(store.createTaskWithinLimit(task({ id: `task-limit-${index}`, ownerId: owner.id }), 4)).toBe(true);
+    }
+    expect(store.countActiveTasksForUser(owner.id)).toBe(4);
+    expect(store.createTaskWithinLimit(task({ id: "task-limit-5", ownerId: owner.id }), 4)).toBe(false);
+    expect(store.readTask("task-limit-5")).toBeNull();
+    expect(store.createTaskWithinLimit(task({ id: "task-other-1", ownerId: other.id }), 4)).toBe(true);
+    expect(store.countActiveTasksForUser(other.id)).toBe(1);
     store.close();
   });
 
