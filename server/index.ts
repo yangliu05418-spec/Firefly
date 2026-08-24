@@ -45,6 +45,7 @@ import { MediaValidationError, validateMedia } from "./media-validation.js";
 import { withinDeadline } from "./deadline.js";
 import { startAsyncJobControlPlane } from "./async-job-control-plane.js";
 import { buildImageReeditPayload, buildVideoReeditPayload } from "./generation-reedit.js";
+import { runReeditIntegrityCheck } from "./reedit-integrity.js";
 import { buildCreationSnapshot, type CreationReferenceInput } from "./creation-snapshots.js";
 import { buildLegacyImageSnapshot, buildLegacyVideoSnapshot } from "./legacy-creation-snapshot.js";
 
@@ -1756,12 +1757,14 @@ app.get("/api/health/workers", async (_req, res) => {
 });
 
 app.get("/api/health/ready", async (_req, res) => {
-  let dependency: "redis" | "database" | "queues" | "workers" | "tos" = "redis";
+  let dependency: "redis" | "database" | "reedit" | "queues" | "workers" | "tos" = "redis";
   let workerHealth: WorkerHealthSnapshot | undefined;
   try {
     await redis.ping();
     dependency = "database";
     if (!users.healthCheck()) throw new Error("database unavailable");
+    dependency = "reedit";
+    runReeditIntegrityCheck(users, config.tosInputRetentionDays);
     dependency = "queues";
     await Promise.all([generationQueue.getJobCounts("wait", "active"), imageGenerationQueue.getJobCounts("wait", "active"), mediaQueue.getJobCounts("wait", "active"), previewQueue.getJobCounts("wait", "active"), assetQueue.getJobCounts("wait", "active"), canvasQueue.getJobCounts("wait", "active"), uploadFinalizationQueue.getJobCounts("wait", "active")]);
     dependency = "workers";

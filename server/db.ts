@@ -1032,6 +1032,26 @@ export class UserStore {
       .map((row) => mapImageGeneration(row)!);
   }
 
+  /** Read-only production smoke inputs; never returns prompts or media URLs. */
+  reeditIntegritySources() {
+    const providerMarkerLeak = Boolean(this.database.prepare(`
+      SELECT 1 FROM creation_snapshots WHERE instr(provider_prompt, '[[firefly-') > 0 LIMIT 1
+    `).get());
+    const duplicateBinding = Boolean(this.database.prepare(`
+      SELECT 1 FROM creation_snapshot_references WHERE status != 'deleted'
+      GROUP BY source_type, source_id, binding_id HAVING COUNT(*) > 1 LIMIT 1
+    `).get());
+    const video = mapTask(this.database.prepare(`
+      SELECT * FROM generation_tasks WHERE owner_id IS NOT NULL AND deleted_at IS NULL
+        AND status IN ('succeeded', 'failed') ORDER BY created_at DESC LIMIT 1
+    `).get() as TaskRow | undefined);
+    const image = mapImageGeneration(this.database.prepare(`
+      SELECT * FROM image_generation_tasks WHERE deleted_at IS NULL
+        AND status IN ('succeeded', 'failed') ORDER BY created_at DESC LIMIT 1
+    `).get() as ImageGenerationRow | undefined);
+    return { providerMarkerLeak, duplicateBinding, video, image };
+  }
+
   listImageGenerationsForSession(ownerId: string, sessionId: string, limit = 50) {
     return (this.database.prepare("SELECT * FROM image_generation_tasks WHERE owner_id = ? AND session_id = ? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?").all(ownerId, sessionId, limit) as ImageGenerationRow[])
       .map((row) => mapImageGeneration(row)!);
