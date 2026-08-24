@@ -15,6 +15,7 @@ import { startWorkerHeartbeat } from "./worker-heartbeat.js";
 import { finalizeQueuedUpload } from "./upload-finalization.js";
 import { coordinateUploadFinalization } from "./upload-finalization-coordinator.js";
 import { copyCreationSnapshotReference, deleteCreationSnapshotReference } from "./creation-reference-media.js";
+import { archiveTransferStrategy } from "./archive-state.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const numberHeader = (value: unknown) => Number(value ?? 0) || 0;
@@ -124,20 +125,20 @@ const enqueueArchiveRecovery = async (task: { id: string; sourceVideoUrl?: strin
   return true;
 };
 
-const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputFormat: "mp4" | "mov"; existingObjectOnly?: boolean }, attempt: number, finalAttempt: boolean) => {
+const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputFormat: "mp4" | "mov"; existingObjectOnly?: boolean }, attempt: number) => {
   const task = await readTask(data.taskId, true);
   if (!task || task.deletedAt || !task.ownerId) return;
   if (task.mediaStatus !== "archiving") await saveTask({ ...task, mediaStatus: "archiving", error: undefined, updatedAt: Date.now() });
   const startedAt = Date.now();
   const objectKey = outputObjectKey(task.ownerId, task.id, data.outputFormat);
-  const strategy = data.existingObjectOnly ? "existing_object" : finalAttempt ? "stream_multipart" : "url_fetch";
+  const strategy = archiveTransferStrategy(attempt, data.existingObjectOnly);
   console.info(JSON.stringify({ type: "tos_fetch_started", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, strategy }));
   try {
     if (data.existingObjectOnly) {
       await verifyStoredObject(objectKey, data.outputFormat === "mov" ? "video/quicktime" : "video/mp4");
     } else if (!data.sourceUrl) {
       throw new Error("上游临时地址已过期，且 TOS 中没有可恢复的成片");
-    } else if (finalAttempt) {
+    } else if (strategy === "stream_multipart") {
       await streamObjectFromUrl(objectKey, data.sourceUrl, `result.${data.outputFormat}`, data.outputFormat === "mov" ? "video/quicktime" : "video/mp4", (partNumber, bytes) => console.info(JSON.stringify({ type: "tos_stream_part_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, partNumber, bytes })), 5 * 1024 * 1024);
     } else {
       await fetchObjectFromUrl(objectKey, data.sourceUrl, {
@@ -242,9 +243,8 @@ const deletePendingMedia = async (taskId?: string) => {
 
 const worker = new Worker("media", async (job) => {
   if (job.name === "archive-output") {
-    const attempts = job.opts.attempts ?? 1;
     const attempt = job.attemptsMade + 1;
-    return archiveOutput(job.data, attempt, attempt >= attempts);
+    return archiveOutput(job.data, attempt);
   }
   if (job.name === "delete-task-media") return deletePendingMedia(job.data.taskId);
   if (job.name === "reconcile-deletes") return deletePendingMedia();
