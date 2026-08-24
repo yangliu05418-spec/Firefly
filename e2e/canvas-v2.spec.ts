@@ -1,6 +1,7 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 import type { CanvasProjectAsset } from "../src/features/canvas/canvas-api";
 import type { CanvasDocumentV2 } from "../src/features/canvas/canvas-v2-types";
+import type { LibraryAsset } from "../src/types";
 
 test.describe.configure({ timeout: 60_000 });
 
@@ -45,6 +46,7 @@ async function mockAuthenticatedApi(page: Page, options: {
   creationSessions?: Array<{ id: string; title: string; createdAt: number; updatedAt: number }>;
   imageHistory?: Array<Record<string, unknown>>; videoHistory?: Array<Record<string, unknown>>; imageSessionFailures?: string[]; holdGenerationAdmission?: boolean; generationAdmissionResponseLost?: boolean; creationSessionAdmissionResponseLost?: boolean;
   authSessionFailures?: number;
+  libraryAssets?: LibraryAsset[];
 } = {}) {
   let revision = 0;
   let storedDocument = structuredClone(options.document ?? documentV2);
@@ -157,7 +159,7 @@ async function mockAuthenticatedApi(page: Page, options: {
     }
     if (path === "/api/creation-references/snapshot-reference-e2e") return json(route, { id: "snapshot-reference-e2e", bindingId: "reedit-reference", name: "角色参考.png", type: "image", size: 128, state: "ready", preview: "/api/creation-references/snapshot-reference-e2e/source?variant=thumbnail" });
     if (path === "/api/creation-references/snapshot-reference-e2e/source") return route.fulfill({ status: 200, contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><path fill="#b8d9cf" d="M0 0h8v8H0z"/></svg>' });
-    if (path === "/api/assets") return json(route, { Items: [], HasMore: false });
+    if (path === "/api/assets") return json(route, { Items: options.libraryAssets ?? [], HasMore: false });
     if (path === "/api/canvas/config") return json(route, { enabled: true });
     if (path === "/api/canvases/canvas-e2e/lease" && request.method() === "POST") {
       leasePostCount += 1;
@@ -364,6 +366,32 @@ test("composer keeps uploaded assets available through the inline mention picker
 
   await expect(editor.locator("[data-asset-id]")).toHaveCount(1);
   await expect(editor).toContainText("video-placeholder.webp");
+});
+
+test("an active library asset selected with @ enables omni generation", async ({ page }) => {
+  await mockAuthenticatedApi(page, {
+    libraryAssets: [{
+      Id: "asset-active-reference",
+      UploadId: "upload-active-reference",
+      Name: "角色正面参考",
+      AssetType: "Image",
+      Status: "Active",
+      GroupId: "group-firefly",
+      Category: "character",
+    }],
+  });
+  await page.goto("/studio");
+
+  const send = page.getByRole("button", { name: "生成视频" });
+  await expect(send).toBeDisabled();
+  const editor = page.getByRole("textbox", { name: "创作提示词" });
+  await editor.fill("角色在雨中缓慢回头 @");
+  const picker = page.getByRole("listbox", { name: "选择参考资产" });
+  await expect(picker).toBeVisible();
+  await picker.getByRole("option", { name: /角色正面参考/ }).click();
+
+  await expect(editor.locator("[data-asset-id]")).toContainText("角色正面参考");
+  await expect(send).toBeEnabled();
 });
 
 test("asset archive preserves the selected media view across refresh", async ({ page }) => {

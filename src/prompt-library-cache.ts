@@ -5,6 +5,7 @@ const isReadyAsset = (asset: LibraryAsset) => asset.Status === "Active";
 
 export const toPromptLibraryAsset = (asset: LibraryAsset): UploadAsset => ({
   id: asset.Id,
+  uploadId: asset.UploadId,
   assetId: asset.Id,
   name: asset.Name || asset.Id,
   type: asset.AssetType.toLowerCase() as UploadAsset["type"],
@@ -12,6 +13,7 @@ export const toPromptLibraryAsset = (asset: LibraryAsset): UploadAsset => ({
   role: asset.AssetType === "Image" ? "reference_image" : asset.AssetType === "Video" ? "reference_video" : "reference_audio",
   progress: 100,
   preview: asset.URL,
+  status: asset.Status,
 });
 
 export async function loadPromptLibraryCacheFirst(options: {
