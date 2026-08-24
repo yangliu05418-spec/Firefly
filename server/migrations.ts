@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 
-export const CURRENT_SCHEMA_VERSION = 10;
+export const CURRENT_SCHEMA_VERSION = 11;
 // Compatibility release: schema 11 is expand-only, so this release can stay
 // online during the blue-green migration and remains a valid rollback target.
 export const MAX_SUPPORTED_SCHEMA_VERSION = 11;
@@ -39,6 +39,7 @@ const baseSchema = `
     source_video_url TEXT,
     source_video_expires_at INTEGER,
     error TEXT,
+    error_code TEXT,
     fetch_task_id TEXT,
     media_attempts INTEGER NOT NULL DEFAULT 0,
     media_last_error TEXT,
@@ -486,6 +487,34 @@ const addCreationSnapshots = (database: Database.Database) => {
   `);
 };
 
+const addArchiveCheckpoints = (database: Database.Database) => {
+  const hasGenerationTasks = tableExists(database, "generation_tasks");
+  const taskColumns = new Set((database.prepare("PRAGMA table_info(generation_tasks)").all() as { name: string }[]).map((column) => column.name));
+  if (hasGenerationTasks && !taskColumns.has("error_code")) database.exec("ALTER TABLE generation_tasks ADD COLUMN error_code TEXT");
+  if (!hasGenerationTasks) return;
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS media_archive_checkpoints (
+      task_id TEXT PRIMARY KEY,
+      strategy TEXT NOT NULL CHECK (strategy IN ('url_fetch', 'stream_multipart')),
+      fetch_task_id TEXT,
+      fetch_started_at INTEGER,
+      tos_upload_id TEXT,
+      object_key TEXT NOT NULL,
+      source_size INTEGER,
+      content_type TEXT,
+      part_size INTEGER NOT NULL DEFAULT 5242880,
+      parts_json TEXT NOT NULL DEFAULT '[]',
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      last_error_code TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      FOREIGN KEY (task_id) REFERENCES generation_tasks(id)
+    );
+    CREATE INDEX IF NOT EXISTS media_archive_checkpoints_expiry_idx ON media_archive_checkpoints(expires_at);
+  `);
+};
+
 export const migrateDatabase = (databasePath: string) => {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const database = new Database(databasePath);
@@ -536,6 +565,10 @@ export const migrateDatabase = (databasePath: string) => {
       if (version < 10) {
         addCreationSnapshots(database);
         database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(10, "add-creation-snapshots", Date.now());
+      }
+      if (version < 11) {
+        addArchiveCheckpoints(database);
+        database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(11, "add-media-archive-checkpoints", Date.now());
       }
       assertSchemaVersion(database);
     }).exclusive();

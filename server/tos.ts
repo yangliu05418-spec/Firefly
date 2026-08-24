@@ -209,7 +209,15 @@ export type FetchObjectObserver = {
   stateChanged?: (taskId: string, state: string, error: string) => void;
 };
 
-export const fetchObjectFromUrl = async (key: string, url: string, observer: FetchObjectObserver = {}, existingTaskId?: string) => {
+export class TosFetchPendingError extends Error {
+  readonly code = "TOS_FETCH_PENDING";
+  constructor(readonly taskId: string) {
+    super("TOS URL 抓取仍在进行中");
+    this.name = "TosFetchPendingError";
+  }
+}
+
+export const fetchObjectFromUrl = async (key: string, url: string, observer: FetchObjectObserver = {}, existingTaskId?: string, pollingDeadlineMs = config.tosFetchDeadlineMs) => {
   requireTos();
   try {
     return await verifyStoredObject(key);
@@ -223,7 +231,7 @@ export const fetchObjectFromUrl = async (key: string, url: string, observer: Fet
   };
   let resumedTask = Boolean(existingTaskId);
   let taskId = existingTaskId ?? await createFetchTask();
-  const deadline = Date.now() + config.tosFetchDeadlineMs;
+  const deadline = Date.now() + pollingDeadlineMs;
   while (Date.now() < deadline) {
     let result;
     try { result = await tos.getFetchTask({ bucket: config.tosBucket, taskId }); }
@@ -242,14 +250,14 @@ export const fetchObjectFromUrl = async (key: string, url: string, observer: Fet
       try { return await verifyStoredObject(key); }
       catch { throw new Error(result.data.Err || `TOS 抓取失败 (${state})`); }
     }
-    await delay(Math.min(10000, Math.max(1000, deadline - Date.now())));
+    await delay(Math.min(config.tosFetchPollIntervalMs, Math.max(1000, deadline - Date.now())));
   }
   // The remote fetch can commit on the deadline boundary after the last state
   // poll. Reconcile the deterministic key before scheduling another attempt.
   try { return await verifyStoredObject(key); }
   catch (error) {
     if ((error as { statusCode?: number }).statusCode !== 404) throw error;
-    throw new Error(`TOS URL 抓取超过 ${Math.round(config.tosFetchDeadlineMs / 1000)} 秒`);
+    throw new TosFetchPendingError(taskId);
   }
 };
 
@@ -272,7 +280,7 @@ export const streamObjectToTos = async (
     uploadId = created.data.UploadId;
     const parts: { partNumber: number; eTag: string }[] = [];
     let pending = Buffer.alloc(0); let transferred = 0;
-    const requestDeadlineMs = Math.min(config.tosUploadRequestTimeoutMs, 30_000);
+    const requestDeadlineMs = config.tosUploadRequestTimeoutMs;
     const upload = async (body: Buffer) => {
       const partNumber = parts.length + 1;
       let eTag = "";
@@ -370,6 +378,29 @@ export const rangedSourceParts = (totalSize: number, partSize: number) => {
   });
 };
 
+export type RangedArchiveCheckpoint = {
+  uploadId?: string;
+  sourceSize?: number;
+  contentType?: string;
+  parts?: { partNumber: number; eTag: string }[];
+};
+
+export type RangedArchiveObserver = {
+  checkpoint?: (state: Required<Pick<RangedArchiveCheckpoint, "sourceSize" | "contentType" | "parts">> & { uploadId: string }) => void;
+  resumed?: (uploadId: string, skippedParts: number) => void;
+};
+
+const listAllUploadedParts = async (key: string, uploadId: string) => {
+  const parts: { partNumber: number; eTag: string }[] = [];
+  let marker: number | undefined;
+  do {
+    const response = await tos.listParts({ bucket: config.tosBucket, key, uploadId, maxParts: 1000, partNumberMarker: marker });
+    parts.push(...(response.data.Parts ?? []).map((part) => ({ partNumber: part.PartNumber, eTag: part.ETag.replace(/^"|"$/g, "") })));
+    marker = response.data.IsTruncated ? response.data.NextPartNumberMarker : undefined;
+  } while (marker !== undefined);
+  return parts;
+};
+
 export const rangedObjectFromUrl = async (
   key: string,
   url: string,
@@ -378,6 +409,8 @@ export const rangedObjectFromUrl = async (
   onPart?: (partNumber: number, bytes: number) => void,
   partSize = 5 * 1024 * 1024,
   concurrency = config.tosUploadConcurrency,
+  checkpoint: RangedArchiveCheckpoint = {},
+  observer: RangedArchiveObserver = {},
 ) => {
   requireTos();
   if (!Number.isSafeInteger(partSize) || partSize < 5 * 1024 * 1024) throw new Error("TOS Multipart 分片不得小于 5 MiB");
@@ -385,7 +418,7 @@ export const rangedObjectFromUrl = async (
   catch (error) { if ((error as { statusCode?: number }).statusCode !== 404) throw error; }
 
   const probeController = new AbortController();
-  const probeTimer = setTimeout(() => probeController.abort(), Math.min(config.tosSourceStreamTimeoutMs, 30_000));
+  const probeTimer = setTimeout(() => probeController.abort(), config.tosUploadRequestTimeoutMs);
   let probe: Response;
   try {
     probe = await fetch(url, { headers: { range: "bytes=0-0" }, signal: probeController.signal });
@@ -398,18 +431,33 @@ export const rangedObjectFromUrl = async (
   const ranges = rangedSourceParts(totalSize, partSize);
   const partCount = ranges.length;
   const workerCount = Math.min(Math.max(1, concurrency), partCount);
-  const partDeadlineMs = Math.min(config.tosUploadRequestTimeoutMs, 30_000);
-  let uploadId = "";
-  try {
+  const partDeadlineMs = config.tosUploadRequestTimeoutMs;
+  let uploadId = checkpoint.uploadId ?? "";
+  let knownParts: { partNumber: number; eTag: string }[] = [];
+  if (uploadId) {
+    try {
+      knownParts = await listAllUploadedParts(key, uploadId);
+      observer.resumed?.(uploadId, knownParts.length);
+    } catch (error) {
+      if ((error as { code?: string }).code !== "NoSuchUpload") throw error;
+      uploadId = "";
+      knownParts = [];
+    }
+  }
+  if (!uploadId) {
     const created = await tos.createMultipartUpload({ bucket: config.tosBucket, key, contentType, contentDisposition: `inline; filename*=UTF-8''${encodeURIComponent(fileName)}`, forbidOverwrite: true });
     uploadId = created.data.UploadId;
-    const parts = new Array<{ partNumber: number; eTag: string }>(partCount);
+  }
+  const completed = new Map(knownParts.map((part) => [part.partNumber, part]));
+  observer.checkpoint?.({ uploadId, sourceSize: totalSize, contentType, parts: [...completed.values()] });
+  try {
     let cursor = 0;
-    let transferred = 0;
+    let transferred = ranges.filter((range) => completed.has(range.partNumber)).reduce((total, range) => total + range.size, 0);
     const transferNext = async (): Promise<void> => {
       const index = cursor++;
       if (index >= partCount) return;
       const { partNumber, start, end, size: expectedBytes } = ranges[index]!;
+      if (completed.has(partNumber)) return transferNext();
       let body: Uint8Array | undefined;
       let lastError: unknown;
       for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -443,9 +491,10 @@ export const rangedObjectFromUrl = async (
           if (!target.ok) throw new Error(`TOS 分片上传失败 (${target.status})`);
           const eTag = (target.headers.get("etag") ?? "").replace(/^"|"$/g, "");
           if (!eTag) throw new Error("TOS 分片上传缺少 ETag");
-          parts[index] = { partNumber, eTag };
+          completed.set(partNumber, { partNumber, eTag });
           transferred += body.byteLength;
           onPart?.(partNumber, transferred);
+          observer.checkpoint?.({ uploadId, sourceSize: totalSize, contentType, parts: [...completed.values()].sort((a, b) => a.partNumber - b.partNumber) });
           lastError = undefined;
           break;
         } catch (error) {
@@ -463,6 +512,8 @@ export const rangedObjectFromUrl = async (
     const failed = transfers.find((result): result is PromiseRejectedResult => result.status === "rejected");
     if (failed) throw failed.reason;
     try {
+      const parts = [...completed.values()].sort((a, b) => a.partNumber - b.partNumber);
+      if (parts.length !== partCount) throw new Error(`TOS Multipart 分片不完整 (${parts.length}/${partCount})`);
       await tos.completeMultipartUpload({ bucket: config.tosBucket, key, uploadId, parts, forbidOverwrite: true });
     } catch (error) {
       try {
@@ -473,8 +524,10 @@ export const rangedObjectFromUrl = async (
     }
     uploadId = "";
     return await verifyStoredObject(key);
-  } finally {
-    if (uploadId) await tos.abortMultipartUpload({ bucket: config.tosBucket, key, uploadId }).catch(() => undefined);
+  } catch (error) {
+    // Keep the multipart session alive. The durable checkpoint plus ListParts
+    // allows the next BullMQ attempt or a replacement worker to resume it.
+    throw error;
   }
 };
 

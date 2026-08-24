@@ -48,6 +48,7 @@ import { buildImageReeditPayload, buildVideoReeditPayload } from "./generation-r
 import { runReeditIntegrityCheck } from "./reedit-integrity.js";
 import { buildCreationSnapshot, type CreationReferenceInput } from "./creation-snapshots.js";
 import { buildLegacyImageSnapshot, buildLegacyVideoSnapshot } from "./legacy-creation-snapshot.js";
+import { assertPromptLength, EDITOR_PROMPT_STORAGE_MAX_CHARS, IMAGE_PROVIDER_PROMPT_MAX_CHARS, PromptTooLongError } from "./prompt-policy.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -87,7 +88,12 @@ const respondError = (res: express.Response, error: unknown, status = 400) => {
   if (effectiveStatus >= 500) console.error(JSON.stringify(event));
   else if (effectiveStatus === 409 || effectiveStatus === 429) console.warn(JSON.stringify(event));
   else console.info(JSON.stringify(event));
-  res.status(effectiveStatus).json({ error: message, ...(code ? { code } : {}), requestId: res.locals.requestId });
+  res.status(effectiveStatus).json({
+    error: message,
+    ...(code ? { code } : {}),
+    ...(error instanceof PromptTooLongError ? { details: { field: error.field, actual: error.actual, limit: error.limit } } : {}),
+    requestId: res.locals.requestId,
+  });
 };
 type GenerationRejectContext = { model?: string; mode?: string; assetCount?: number; activeCount?: number; limit?: number; causeCode?: string; errorType?: string; issues?: { code: string; path: string }[] };
 const rejectGeneration = (res: express.Response, status: number, code: string, error: string, context: GenerationRejectContext = {}) => {
@@ -664,6 +670,10 @@ app.post("/api/generations", requireAuth, async (req, res) => {
     console.info(JSON.stringify({ type: "generation_admitted", level: "info", at: new Date().toISOString(), requestId: res.locals.requestId, taskId: id, userId: owner.id, model: input.model, mode: input.mode, assetCount: input.assets.length, activeCount: users.countActiveTasksForUser(owner.id), limit: config.maxActiveGenerationsPerUser }));
     res.status(202).json(publicGenerationTask(task));
   } catch (error) {
+    if (error instanceof PromptTooLongError) {
+      console.info(JSON.stringify({ type: "generation_rejected", level: "info", at: new Date().toISOString(), requestId: res.locals.requestId, userId: (res.locals.user as SessionUser).id, status: 400, code: error.code, field: error.field, actual: error.actual, limit: error.limit, ...requestContext }));
+      return res.status(400).json({ error: error.message, code: error.code, details: { field: error.field, actual: error.actual, limit: error.limit }, requestId: res.locals.requestId });
+    }
     const issues = error instanceof z.ZodError ? error.issues.slice(0, 8).map((issue) => ({ code: issue.code, path: issue.path.join(".") })) : undefined;
     const errorCode = (error as { code?: string }).code;
     const isClientError = error instanceof z.ZodError || errorCode === "UNRESOLVED_PROMPT_REFERENCE";
@@ -1028,8 +1038,8 @@ const imageGenerationSchema = z.object({
   ratio: z.enum(IMAGE_RATIOS),
   resolution: z.string().min(1).max(20),
   count: z.number().int().min(1).max(4),
-  prompt: z.string().trim().min(1).max(2000),
-  editorPrompt: z.string().max(2000).optional(),
+  prompt: z.string().trim().min(1),
+  editorPrompt: z.string().optional(),
   references: z.array(imageReferenceSchema).max(4).default([]),
 });
 
@@ -1107,6 +1117,8 @@ app.delete("/api/image-generations/:id", requireAuth, (req, res) => {
 app.post("/api/image-generation", requireAuth, async (req, res) => {
   try {
     const body = imageGenerationSchema.parse(req.body);
+    assertPromptLength(body.prompt, "prompt", IMAGE_PROVIDER_PROMPT_MAX_CHARS);
+    if (body.editorPrompt !== undefined) assertPromptLength(body.editorPrompt, "editorPrompt", EDITOR_PROMPT_STORAGE_MAX_CHARS);
     const user = res.locals.user as SessionUser;
     const requestId = body.requestId ?? crypto.randomUUID();
     const existing = users.readImageGeneration(requestId);

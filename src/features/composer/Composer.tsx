@@ -17,6 +17,7 @@ import { persistPrivateMediaStorage } from "../../private-media-cache";
 import { uploadFileUntilAccepted } from "../../upload-acceptance";
 import type { ComposerRestore } from "../../composer-restore";
 import { submissionBlockReason } from "./submission-readiness";
+import { EDITOR_PROMPT_STORAGE_MAX_CHARS, IMAGE_PROVIDER_PROMPT_MAX_CHARS, promptCharacterCount, VIDEO_PROVIDER_PROMPT_MAX_CHARS } from "../../../server/prompt-policy";
 
 const modeLabels: Record<CreationMode, string> = { omni: "全能参考", first_frame: "首帧生成", first_last: "首尾帧", edit: "视频编辑", extend: "视频续写", text: "文本生成" };
 const modeNotes: Record<CreationMode, string> = { omni: "自由组合图片、视频和音频", first_frame: "锁定开场画面继续创作", first_last: "精确控制起点与落点", edit: "替换、增删或重绘画面", extend: "向前、向后或多段衔接", text: "只用提示词生成镜头" };
@@ -85,6 +86,10 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
   const fileAccept = engine === "image" || mode === "first_frame" || mode === "first_last" ? "image/*" : "image/*,video/mp4,video/quicktime,audio/mpeg,audio/wav";
   const imageSpec = imageModels.find((item) => item.id === imageModelId) ?? imageModels[0];
   const imageReady = engine === "image" ? Boolean(prompt.trim()) && Boolean(imageSpec) : undefined;
+  const providerPromptPreview = useMemo(() => materializePromptReferences(prompt, assets), [prompt, assets]);
+  const providerPromptCharacters = promptCharacterCount(providerPromptPreview);
+  const providerPromptLimit = engine === "image" ? IMAGE_PROVIDER_PROMPT_MAX_CHARS : VIDEO_PROVIDER_PROMPT_MAX_CHARS;
+  const editorPromptCharacters = promptCharacterCount(prompt);
 
   useEffect(() => {
     if (!imageModelCatalog) return;
@@ -326,9 +331,9 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
           assetId: asset.assetId, snapshotReferenceId: asset.snapshotReferenceId,
           name: asset.name, type: "image" as const, role: "reference_image" as const,
         }));
-        clearSubmittedComposer();
         onImagesGenerated?.(pendingImage);
         await api.post<ImageGenResponse>("/api/image-generation", { requestId: pendingImage.id, sessionId, model: imageModelId, ratio: imageRatio, resolution: imageResolution, count: imageCount, prompt: submittedPrompt, editorPrompt, references }, { timeoutMs: 8_000 });
+        clearSubmittedComposer();
         return;
       }
       const requestId = crypto.randomUUID();
@@ -375,7 +380,7 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
   const uploadsReady = areAttachedUploadsAdmissible(assets);
   const uploadsFinalizing = assets.some((asset) => !asset.assetId && asset.progress === 100 && asset.phase === "verifying");
   const submitBlockReason = submissionBlockReason({
-    engine, mode, prompt, assetCount: assets.length,
+    engine, mode, prompt, providerPromptCharacters, providerPromptLimit, editorPromptCharacters, editorPromptLimit: EDITOR_PROMPT_STORAGE_MAX_CHARS, assetCount: assets.length,
     hasVideoAsset: assets.some((asset) => asset.type === "video"),
     hasFirstFrame: assets.some((asset) => asset.role === "first_frame"),
     hasLastFrame: assets.some((asset) => asset.role === "last_frame"),
@@ -389,7 +394,7 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
       {!!assets.length && <div className="asset-rail" aria-label={`已选择 ${assets.length} 个参考素材`}><div className="asset-rail__label"><span>参考</span><b>{assets.length}</b></div><div className="asset-strip">{assets.map((asset) => <div className="asset-chip" key={referenceBindingId(asset)}>{asset.preview ? <RecoveringThumbnail src={asset.preview} alt={asset.name || "参考素材"} loading="lazy" decoding="async" fallbackClassName="asset-chip__media" manualRecovery={false} /> : asset.type === "image" ? <ImageIcon /> : asset.type === "video" ? <Video /> : <AudioLines />}<span><b>{asset.role === "first_frame" ? "首帧" : asset.role === "last_frame" ? "尾帧" : promptAssetLabel(asset, assets).replace("Image", "图片").replace("Video", "视频").replace("Audio", "音频")}</b><small>{asset.status === "Processing" ? "正在恢复素材引用" : asset.phase === "preparing" ? "正在检查图片" : asset.phase === "verifying" ? `${asset.name} · 已上传，可立即生成` : asset.progress === 100 ? `${asset.name}${asset.normalized ? " · 已自动补白" : ""}` : `上传 ${asset.progress ?? 0}%`}</small></span>{asset.progress !== 100 && <i style={{ width: `${asset.progress ?? 0}%` }} />}<button aria-label={`移除 ${asset.name}`} onClick={() => removeAttachedAsset(asset.id)}><X /></button></div>)}</div></div>}
       <div className={`prompt-row ${referenceSlots.length > 1 ? "prompt-row--dual" : ""} ${!referenceSlots.length ? "prompt-row--text" : ""}`}>
         {!!referenceSlots.length && <div className="reference-slots">{referenceSlots.map((label, index) => <button className="add-reference" key={label} onClick={() => { void persistPrivateMediaStorage(); fileInput.current?.click(); }} disabled={(mode === "first_frame" && assets.length >= 1) || (mode === "first_last" && assets.length > index)}><Plus /><span>{label}</span></button>)}</div>}
-        <PromptEditor value={prompt} change={setPrompt} placeholder={engine === "image" ? "描述你想生成的画面；上传参考图即可进行图生图……" : modePlaceholders[mode]} assets={assets} disabled={mode === "text" && engine === "video"} attach={attachMentionAsset} focusSignal={promptFocusSignal} />
+        <PromptEditor value={prompt} change={setPrompt} placeholder={engine === "image" ? "描述你想生成的画面；上传参考图即可进行图生图……" : modePlaceholders[mode]} assets={assets} disabled={mode === "text" && engine === "video"} attach={attachMentionAsset} focusSignal={promptFocusSignal} characterCount={providerPromptCharacters} characterLimit={providerPromptLimit} />
         <input ref={fileInput} hidden type="file" multiple={mode !== "first_frame"} accept={fileAccept} onChange={(e) => pickFiles(e.target.files)} />
       </div>
       <div className="control-row">

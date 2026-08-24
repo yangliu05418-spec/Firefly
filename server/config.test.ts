@@ -56,13 +56,15 @@ describe("TOS archive latency configuration", () => {
     vi.resetModules();
   });
 
-  it("bounds the initial server-side URL fetch to 30 seconds by default", async () => {
+  it("allows a complete server-side URL fetch polling window by default", async () => {
     delete process.env.TOS_FETCH_DEADLINE_MS;
     vi.resetModules();
 
     const { config } = await import("./config.js");
 
-    expect(config.tosFetchDeadlineMs).toBe(30_000);
+    expect(config.tosFetchDeadlineMs).toBe(180_000);
+    expect(config.tosFetchMaxWaitMs).toBe(300_000);
+    expect(config.tosFetchPollIntervalMs).toBe(5_000);
   });
 
   it("keeps the fetch deadline configurable for controlled rollback", async () => {

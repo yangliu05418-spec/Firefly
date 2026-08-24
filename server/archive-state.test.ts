@@ -16,14 +16,15 @@ describe("generation archive handoff recovery", () => {
 });
 
 describe("generation archive transfer strategy", () => {
-  it("tries TOS URL fetch once, then falls back to bounded streaming uploads", () => {
-    expect(archiveTransferStrategy(1)).toBe("url_fetch");
-    expect(archiveTransferStrategy(2)).toBe("stream_multipart");
-    expect(archiveTransferStrategy(4)).toBe("stream_multipart");
+  it("reuses URL fetch until its cumulative window expires, then resumes multipart", () => {
+    expect(archiveTransferStrategy(null)).toBe("url_fetch");
+    expect(archiveTransferStrategy({ strategy: "url_fetch", fetchStartedAt: 1_000 }, false, 299_000, 300_000)).toBe("url_fetch");
+    expect(archiveTransferStrategy({ strategy: "url_fetch", fetchStartedAt: 1_000 }, false, 301_000, 300_000)).toBe("stream_multipart");
+    expect(archiveTransferStrategy({ strategy: "stream_multipart" })).toBe("stream_multipart");
   });
 
   it("only verifies the deterministic key during stored-object recovery", () => {
-    expect(archiveTransferStrategy(1, true)).toBe("existing_object");
-    expect(archiveTransferStrategy(2, true)).toBe("existing_object");
+    expect(archiveTransferStrategy(null, true)).toBe("existing_object");
+    expect(archiveTransferStrategy({ strategy: "stream_multipart" }, true)).toBe("existing_object");
   });
 });
