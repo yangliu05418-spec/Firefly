@@ -2,8 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 
-export const CURRENT_SCHEMA_VERSION = 8;
-export const MAX_SUPPORTED_SCHEMA_VERSION = 8;
+export const CURRENT_SCHEMA_VERSION = 9;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 9;
 
 const baseSchema = `
   CREATE TABLE IF NOT EXISTS users (
@@ -289,6 +289,7 @@ const addImageGenerationHistory = (database: Database.Database) => {
       ratio TEXT NOT NULL,
       resolution TEXT NOT NULL,
       prompt TEXT NOT NULL,
+      references_json TEXT NOT NULL DEFAULT '[]',
       requested_count INTEGER NOT NULL CHECK (requested_count BETWEEN 1 AND 4),
       status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
       items_json TEXT NOT NULL DEFAULT '[]',
@@ -411,6 +412,12 @@ const addUploadSessions = (database: Database.Database) => {
   `);
 };
 
+const addImageGenerationReferences = (database: Database.Database) => {
+  if (!tableExists(database, "image_generation_tasks")) return;
+  const columns = new Set((database.prepare("PRAGMA table_info(image_generation_tasks)").all() as { name: string }[]).map((column) => column.name));
+  if (!columns.has("references_json")) database.exec("ALTER TABLE image_generation_tasks ADD COLUMN references_json TEXT NOT NULL DEFAULT '[]'");
+};
+
 export const migrateDatabase = (databasePath: string) => {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const database = new Database(databasePath);
@@ -453,6 +460,10 @@ export const migrateDatabase = (databasePath: string) => {
       if (version < 8) {
         addUploadSessions(database);
         database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(8, "add-upload-sessions", Date.now());
+      }
+      if (version < 9) {
+        addImageGenerationReferences(database);
+        database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(9, "add-image-generation-references", Date.now());
       }
       assertSchemaVersion(database);
     }).exclusive();

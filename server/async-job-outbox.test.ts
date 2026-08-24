@@ -65,14 +65,15 @@ describe("durable async job outbox", () => {
   it("persists the complete image payload and retries beyond provider key cooldowns", async () => {
     const { store, owner } = createStore();
     const createdAt = 200;
+    const payloadReferences = ["upload-reference-1234567890"];
     const imageTask = {
       id: "image-task-1", ownerId: owner.id, model: "google/image", modelName: "Image", ratio: "16:9",
-      resolution: "1024", prompt: "雨夜列车", requestedCount: 2, status: "running" as const,
+      resolution: "1024", prompt: "雨夜列车", referenceUploadIds: payloadReferences, requestedCount: 2, status: "running" as const,
       items: [], failures: [], createdAt, updatedAt: createdAt,
     };
     const payload = {
       ownerId: owner.id, model: imageTask.model, prompt: imageTask.prompt, ratio: imageTask.ratio,
-      resolution: imageTask.resolution, count: 2, referenceUploadIds: ["upload-reference-1234567890"],
+      resolution: imageTask.resolution, count: 2, referenceUploadIds: payloadReferences,
     };
 
     expect(store.createImageGenerationWithinLimit(imageTask, 2, {

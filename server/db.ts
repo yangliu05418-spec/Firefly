@@ -95,6 +95,7 @@ export type ImageGenerationTask = {
   ratio: string;
   resolution: string;
   prompt: string;
+  referenceUploadIds: string[];
   requestedCount: number;
   status: "running" | "succeeded" | "failed";
   items: { mediaId: string; width?: number; height?: number }[];
@@ -275,7 +276,7 @@ type UploadSessionRow = {
 
 type ImageGenerationRow = {
   id: string; session_id: string | null; owner_id: string; model: string; model_name: string; ratio: string; resolution: string;
-  prompt: string; requested_count: number; status: ImageGenerationTask["status"]; items_json: string;
+  prompt: string; references_json: string; requested_count: number; status: ImageGenerationTask["status"]; items_json: string;
   failures_json: string; error: string | null; created_at: number; updated_at: number; deleted_at: number | null;
 };
 
@@ -363,7 +364,7 @@ const mapUploadSession = (row?: UploadSessionRow): UploadSession | null => row ?
 
 const mapImageGeneration = (row?: ImageGenerationRow): ImageGenerationTask | null => row ? ({
   id: row.id, sessionId: row.session_id ?? undefined, ownerId: row.owner_id, model: row.model, modelName: row.model_name,
-  ratio: row.ratio, resolution: row.resolution, prompt: row.prompt, requestedCount: row.requested_count,
+  ratio: row.ratio, resolution: row.resolution, prompt: row.prompt, referenceUploadIds: JSON.parse(row.references_json), requestedCount: row.requested_count,
   status: row.status, items: JSON.parse(row.items_json), failures: JSON.parse(row.failures_json),
   error: row.error ?? undefined, createdAt: row.created_at, updatedAt: row.updated_at,
   deletedAt: row.deleted_at ?? undefined,
@@ -818,11 +819,11 @@ export class UserStore {
   createImageGeneration(task: ImageGenerationTask) {
     this.database.prepare(`
       INSERT INTO image_generation_tasks
-        (id, session_id, owner_id, model, model_name, ratio, resolution, prompt, requested_count, status, items_json, failures_json, error, created_at, updated_at, deleted_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (id, session_id, owner_id, model, model_name, ratio, resolution, prompt, references_json, requested_count, status, items_json, failures_json, error, created_at, updated_at, deleted_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id, task.sessionId ?? null, task.ownerId, task.model, task.modelName, task.ratio, task.resolution, task.prompt,
-      task.requestedCount, task.status, JSON.stringify(task.items), JSON.stringify(task.failures),
+      JSON.stringify(task.referenceUploadIds), task.requestedCount, task.status, JSON.stringify(task.items), JSON.stringify(task.failures),
       task.error ?? null, task.createdAt, task.updatedAt, task.deletedAt ?? null,
     );
     return task;
