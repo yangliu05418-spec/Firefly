@@ -1,5 +1,5 @@
 import { config } from "./config.js";
-import { AssetApiError, callAssetApi } from "./asset-api.js";
+import { AssetApiError, AUTO_REFERENCE_GROUP_TYPE, callAssetApi } from "./asset-api.js";
 import { users } from "./store.js";
 import { redis } from "./redis.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
@@ -69,12 +69,12 @@ let groupIdPromise: Promise<string> | undefined;
 
 const resolveGroupId = async (deps: RegistrationDeps) => {
   const listed = await deps.callAsset<{ Items?: GroupRecord[] }>("ListAssetGroups", {
-    Filter: { GroupType: "AIGC", Name: GROUP_NAME }, PageNumber: 1, PageSize: 20
+    Filter: { GroupType: AUTO_REFERENCE_GROUP_TYPE, Name: GROUP_NAME }, PageNumber: 1, PageSize: 20
   });
   const existing = listed.Items?.find((group) => group.Name === GROUP_NAME);
   if (existing) return existing.Id;
   const created = await deps.callAsset<{ Id: string }>("CreateAssetGroup", {
-    Name: GROUP_NAME, Description: "Firefly 自动入库的已授权参考素材", GroupType: "AIGC"
+    Name: GROUP_NAME, Description: "Firefly 自动入库的已授权参考素材", GroupType: AUTO_REFERENCE_GROUP_TYPE
   });
   return created.Id;
 };
@@ -106,7 +106,7 @@ const readCachedRegistration = (value: string | null) => {
 
 const reconcileUploadAsset = async (groupId: string, providerName: string, assetType: AssetRecord["AssetType"], deps: RegistrationDeps) => {
   const listed = await deps.callAsset<{ Items?: AssetRecord[] }>("ListAssets", {
-    Filter: { GroupIds: [groupId], Name: providerName }, PageNumber: 1, PageSize: 100
+    Filter: { GroupType: AUTO_REFERENCE_GROUP_TYPE, GroupIds: [groupId], Name: providerName }, PageNumber: 1, PageSize: 100
   });
   const exact = (listed.Items ?? []).filter((candidate) => candidate.Name === providerName
     && candidate.GroupId === groupId

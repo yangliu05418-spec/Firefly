@@ -19,4 +19,9 @@ describe("asset API retry policy", () => {
     expect(isMissingProviderAssetError(new AssetApiError("asset does not exist", 400, "InvalidAsset.NotFound", "GetAsset"))).toBe(true);
     expect(isMissingProviderAssetError(new AssetApiError("rate limited", 429, "TooManyRequests", "GetAsset"))).toBe(false);
   });
+
+  it("carries deterministic retry metadata on provider errors", () => {
+    expect(new AssetApiError("invalid filter", 400, "InvalidParameter", "ListAssets").retryable).toBe(false);
+    expect(new AssetApiError("busy", 503, "InternalError", "ListAssets", true).retryable).toBe(true);
+  });
 });

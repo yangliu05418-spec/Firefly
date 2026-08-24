@@ -4,10 +4,11 @@ import { config } from "./config.js";
 const hmac = (key: Buffer | string, data: string) => crypto.createHmac("sha256", key).update(data).digest();
 const hash = (data: string) => crypto.createHash("sha256").update(data).digest("hex");
 const retryableActions = new Set(["GetAsset", "ListAssets", "ListAssetGroups"]);
+export const AUTO_REFERENCE_GROUP_TYPE = "AIGC" as const;
 export const canRetryAssetAction = (action: string) => retryableActions.has(action);
 
 export class AssetApiError extends Error {
-  constructor(message: string, readonly status: number, readonly providerCode?: string, readonly action?: string) {
+  constructor(message: string, readonly status: number, readonly providerCode?: string, readonly action?: string, readonly retryable = false) {
     super(message);
     this.name = "AssetApiError";
   }
@@ -54,8 +55,17 @@ export async function callAssetApi<T>(action: string, body: Record<string, unkno
     if (!response.ok || json.ResponseMetadata?.Error) {
       const providerCode = json.ResponseMetadata?.Error?.Code ?? json.code;
       const message = json.ResponseMetadata?.Error?.Message ?? json.message ?? `资源库请求失败 (${response.status})`;
-      const error = new AssetApiError(message, response.status, providerCode, action);
-      (error as { retryable?: boolean }).retryable = canRetryAssetAction(action) && (response.status >= 500 || response.status === 429);
+      const retryable = canRetryAssetAction(action) && (response.status >= 500 || response.status === 429);
+      const error = new AssetApiError(message, response.status, providerCode, action, retryable);
+      console.warn(JSON.stringify({
+        type: "asset_api_failed",
+        at: new Date().toISOString(),
+        action,
+        status: response.status,
+        providerCode,
+        providerRequestId: json.ResponseMetadata?.RequestId,
+        retryable
+      }));
       throw error;
     }
     return json.Result ?? json;
