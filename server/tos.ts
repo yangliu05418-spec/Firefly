@@ -119,7 +119,7 @@ export const signedProviderObjectUrl = (key: string, expires = 2 * 3600) => {
   return tos.getPreSignedUrl(providerObjectSigningInput(config.tosBucket, key, expires));
 };
 
-const fetchSucceeded = (state: string) => ["success", "succeeded", "done", "complete", "completed"].includes(state.toLowerCase());
+export const tosJobSucceeded = (state: string) => ["success", "succeed", "succeeded", "done", "complete", "completed"].includes(state.trim().toLowerCase());
 const fetchFailed = (state: string) => state.toLowerCase().includes("fail") || state.toLowerCase().includes("cancel");
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -192,7 +192,7 @@ export const transcodeVideoOnTos = async (sourceKey: string, targetKey: string, 
     const state = response.data.State ?? "unknown";
     const code = Number(response.data.Code ?? 0);
     observer.stateChanged?.(jobId, state, code, response.data.Message, response.requestId);
-    if (fetchSucceeded(state)) return verifyStoredObject(targetKey, "video/mp4");
+    if (tosJobSucceeded(state)) return verifyStoredObject(targetKey, "video/mp4");
     if (fetchFailed(state) || code !== 0) throw new Error(response.data.Message || `TOS 视频转码失败 (${state}, ${code})`);
     await delay(Math.min(7000, Math.max(1000, deadline - Date.now())));
   }
@@ -219,7 +219,7 @@ export const fetchObjectFromUrl = async (key: string, url: string, observer: Fet
     const result = await tos.getFetchTask({ bucket: config.tosBucket, taskId });
     const state = result.data.State ?? "unknown";
     observer.stateChanged?.(taskId, state, result.data.Err ?? "");
-    if (fetchSucceeded(state)) return verifyStoredObject(key);
+    if (tosJobSucceeded(state)) return verifyStoredObject(key);
     if (fetchFailed(state)) {
       try { return await verifyStoredObject(key); }
       catch { throw new Error(result.data.Err || `TOS 抓取失败 (${state})`); }
