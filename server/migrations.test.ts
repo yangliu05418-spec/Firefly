@@ -4,7 +4,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { UserStore } from "./db.js";
-import { assertSchemaVersion, CURRENT_SCHEMA_VERSION, migrateDatabase, schemaVersion } from "./migrations.js";
+import { assertSchemaVersion, CURRENT_SCHEMA_VERSION, MAX_SUPPORTED_SCHEMA_VERSION, migrateDatabase, schemaVersion } from "./migrations.js";
 
 describe("versioned database migrations", () => {
   const directories: string[] = [];
@@ -107,11 +107,23 @@ describe("versioned database migrations", () => {
     upgraded.close();
   });
 
+  it("accepts the expand-only rollback schema without attempting to create it", () => {
+    const target = databasePath();
+    migrateDatabase(target);
+    const database = new Database(target);
+    database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (10, 'reedit-production-closure', ?)").run(Date.now());
+    database.close();
+    expect(migrateDatabase(target)).toBe(MAX_SUPPORTED_SCHEMA_VERSION);
+    const compatible = new Database(target, { readonly: true });
+    expect(assertSchemaVersion(compatible)).toBe(MAX_SUPPORTED_SCHEMA_VERSION);
+    compatible.close();
+  });
+
   it("rejects a database newer than the rollback compatibility ceiling", () => {
     const target = databasePath();
     migrateDatabase(target);
     const database = new Database(target);
-    database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (10, 'future-incompatible', ?)").run(Date.now());
+    database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, 'future-incompatible', ?)").run(MAX_SUPPORTED_SCHEMA_VERSION + 1, Date.now());
     database.close();
     expect(() => migrateDatabase(target)).toThrow("newer than this release");
     const incompatible = new Database(target, { readonly: true });

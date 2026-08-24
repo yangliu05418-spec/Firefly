@@ -3,7 +3,10 @@ import path from "node:path";
 import Database from "better-sqlite3";
 
 export const CURRENT_SCHEMA_VERSION = 9;
-export const MAX_SUPPORTED_SCHEMA_VERSION = 9;
+// Keep the rollback release readable after the expand-only re-edit schema lands.
+// This release never creates v10; it only tolerates it so a traffic rollback does
+// not strand the old web/workers on an otherwise backwards-compatible database.
+export const MAX_SUPPORTED_SCHEMA_VERSION = 10;
 
 const baseSchema = `
   CREATE TABLE IF NOT EXISTS users (
