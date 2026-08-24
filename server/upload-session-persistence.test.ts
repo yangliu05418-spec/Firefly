@@ -48,4 +48,24 @@ describe("durable upload sessions", () => {
     expect(store.readUploadSession("expired-active")).toBeNull();
     store.close();
   });
+
+  it("terminalizes only stale finalization rows so uploads cannot spin forever", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-upload-finalize-deadline-"));
+    directories.push(directory);
+    const databasePath = path.join(directory, "firefly.db");
+    migrateDatabase(databasePath);
+    const store = new UserStore(databasePath);
+    const owner = store.upsertFromFeishu({ openId: "deadline-open", unionId: "deadline-union", tenantKey: "tenant", email: "deadline@dokuai.tv", name: "Uploader", avatarUrl: "" });
+    const add = (id: string, updatedAt: number) => {
+      store.createUploadSession({ id, ownerId: owner.id, objectKey: `inputs/${id}.png`, tosUploadId: `tos-${id}`, fileName: `${id}.png`, mediaKind: "image", contentType: "image/png", size: 10, partSize: 10, partCount: 1, state: "finalizing", createdAt: updatedAt, updatedAt, expiresAt: Date.now() + 86_400_000 });
+      store.upsertMedia({ id: `input:${id}`, ownerId: owner.id, uploadId: id, kind: "input", objectKey: `inputs/${id}.png`, status: "uploading", fileName: `${id}.png`, contentType: "image/png", size: 10, etag: "etag", createdAt: updatedAt, updatedAt });
+    };
+    add("stale", 1);
+    add("fresh", 100);
+    expect(store.expireFinalizingUpload("fresh", 50)).toBeNull();
+    expect(store.expireFinalizingUpload("stale", 50)).toMatchObject({ uploadId: "stale", status: "deleted" });
+    expect(store.readUploadSession("stale")?.state).toBe("failed");
+    expect(store.readUploadState("stale")?.status).toBe("deleted");
+    store.close();
+  });
 });

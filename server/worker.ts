@@ -27,7 +27,7 @@ const enqueueArchiveHandoff = async (task: StoredTask) => {
   await saveTask(archiving);
   await mediaQueue.add("archive-output", { taskId: task.id, sourceUrl: task.sourceVideoUrl, outputFormat: outputFormatFor(task) }, {
     jobId: `archive-handoff-${task.id}-${Math.floor(Date.now() / archiveRecoveryBucketMs)}`,
-    attempts: 4, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 24 * 3600 }
+    attempts: 4, backoff: { type: "exponential", delay: 5000, jitter: .5 }, removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 24 * 3600 }
   });
   return true;
 };
@@ -113,7 +113,7 @@ const processGenerationJob = async (job: Job<{ input: unknown }>) => {
     await saveTask(completed);
     console.info(JSON.stringify({ type: "generation_succeeded", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, providerId: task.providerId }));
     if (config.mediaStorageBackend === "tos") {
-      await mediaQueue.add("archive-output", { taskId: task.id, sourceUrl: sourceVideoUrl, outputFormat: input.outputFormat }, { jobId: `archive-${task.id}`, attempts: 4, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: { age: 7 * 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } });
+      await mediaQueue.add("archive-output", { taskId: task.id, sourceUrl: sourceVideoUrl, outputFormat: input.outputFormat }, { jobId: `archive-${task.id}`, attempts: 4, backoff: { type: "exponential", delay: 5000, jitter: .5 }, removeOnComplete: { age: 7 * 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } });
     } else {
       await saveTask({ ...completed, mediaStatus: "fallback", mediaRevision: (completed.mediaRevision ?? 0) + 1 });
     }

@@ -158,6 +158,26 @@ describe("enterprise identity and isolation", () => {
     store.close();
   });
 
+  it("selects recent uncommitted TOS outputs even after the provider URL and retry budget expire", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-stored-output-recovery-")); directories.push(directory);
+    const store = openStore(path.join(directory, "stored-output-recovery.db"));
+    const owner = store.upsertFromFeishu({ openId: "ou_stored", unionId: "on_stored", tenantKey: "tenant-dokuai", email: "stored@dokuai.tv", name: "Stored", avatarUrl: "" });
+    const now = Date.now();
+    const save = (id: string, updatedAt: number, mediaStatus: StoredTask["mediaStatus"] = "failed") => store.saveTask(task({
+      id, ownerId: owner.id, visibility: "private", status: "succeeded", mediaStatus,
+      sourceVideoUrl: "https://provider.example/expired.mp4", sourceVideoExpiresAt: now - 1,
+      mediaAttempts: 3, updatedAt,
+    }));
+    save("stored-recover", now - 60_000);
+    save("stored-stale-archiving", now - 60_000, "archiving");
+    save("stored-active", now, "archiving");
+    save("stored-too-old", now - 31 * 24 * 60 * 60_000);
+    save("stored-already-ready", now - 60_000);
+    store.upsertMedia({ id: "stored-already-ready:output", ownerId: owner.id, taskId: "stored-already-ready", kind: "output", objectKey: "outputs/stored-ready.mp4", status: "ready", fileName: "result.mp4", contentType: "video/mp4", size: 10, etag: "etag", createdAt: now, updatedAt: now });
+    expect(store.recoverableStoredMediaTasks(now - 30 * 24 * 60 * 60_000, now - 30_000).map((item) => item.id).sort()).toEqual(["stored-recover", "stored-stale-archiving"]);
+    store.close();
+  });
+
   it("selects the newest archived originals whose streaming preview still needs recovery", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-previews-")); directories.push(directory);
     const store = openStore(path.join(directory, "previews.db"));

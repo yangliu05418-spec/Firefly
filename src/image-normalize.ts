@@ -1,4 +1,4 @@
-import { imageNormalizationPlan, type ImageNormalizationPlan } from "./image-normalize-policy";
+import { IMAGE_REENCODE_THRESHOLD_BYTES, imageNormalizationPlan, type ImageNormalizationPlan } from "./image-normalize-policy";
 
 export type PreparedImage = { file: File; normalized: boolean; plan?: ImageNormalizationPlan; previewBlob?: Blob };
 
@@ -12,6 +12,15 @@ const previewSize = (width: number, height: number) => {
 const canvasBlob = (canvas: HTMLCanvasElement, type: string, quality: number) => new Promise<Blob>((resolve, reject) =>
   canvas.toBlob((result) => result ? resolve(result) : reject(new Error("图片预览生成失败")), type, quality)
 );
+
+const normalizedCanvasBlob = async (canvas: HTMLCanvasElement) => {
+  let result: Blob | undefined;
+  for (const quality of [.9, .82, .72, .62]) {
+    result = await canvasBlob(canvas, "image/jpeg", quality);
+    if (result.size <= IMAGE_REENCODE_THRESHOLD_BYTES) return result;
+  }
+  throw new Error("图片内容过于复杂，压缩后仍超过 18MB，请缩小图片后重试");
+};
 
 let activeNormalizations = 0;
 const normalizationWaiters: (() => void)[] = [];
@@ -54,7 +63,7 @@ const normalizeOnMainThread = async (file: File, signal?: AbortSignal, createPre
       element.src = url;
     });
     if (signal?.aborted) throw abortError(signal);
-    const plan = imageNormalizationPlan(image.naturalWidth, image.naturalHeight);
+    const plan = imageNormalizationPlan(image.naturalWidth, image.naturalHeight, file.size);
     const renderWidth = plan.adjusted ? plan.targetWidth : image.naturalWidth;
     const renderHeight = plan.adjusted ? plan.targetHeight : image.naturalHeight;
     let normalizedCanvas: HTMLCanvasElement | undefined;
@@ -89,7 +98,7 @@ const normalizeOnMainThread = async (file: File, signal?: AbortSignal, createPre
       } catch { /* Local preview caching must never block the upload. */ }
     }
     if (!plan.adjusted) return { file, normalized: false, plan, previewBlob };
-    const blob = await canvasBlob(normalizedCanvas!, "image/jpeg", .92);
+    const blob = await normalizedCanvasBlob(normalizedCanvas!);
     if (signal?.aborted) throw abortError(signal);
     return { file: new File([blob], normalizedName(file.name), { type: "image/jpeg", lastModified: file.lastModified }), normalized: true, plan, previewBlob };
   } finally {
