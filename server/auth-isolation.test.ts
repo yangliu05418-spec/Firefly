@@ -318,13 +318,16 @@ describe("enterprise identity and isolation", () => {
     let store = openStore(databasePath);
     const owner = store.upsertFromFeishu({ openId: "ou_trace", unionId: "on_trace", tenantKey: "tenant-dokuai", email: "trace@dokuai.tv", name: "Trace", avatarUrl: "" });
     const now = Date.now();
-    store.saveTask(task({ id: "trace-1", ownerId: owner.id, visibility: "private", status: "succeeded", mediaStatus: "failed", sourceVideoUrl: "https://provider.example/v.mp4", sourceVideoExpiresAt: now + 3600_000, fetchTaskId: "fetch-123", mediaAttempts: 1, mediaLastError: JSON.stringify({ phase: "url_fetch", message: "boom" }), updatedAt: now }));
+    store.saveTask(task({ id: "trace-1", ownerId: owner.id, visibility: "private", status: "succeeded", mediaStatus: "failed", sourceVideoUrl: "https://provider.example/v.mp4", sourceVideoExpiresAt: now + 3600_000, fetchTaskId: "fetch-123", mediaAttempts: 1, mediaLastError: JSON.stringify({ phase: "url_fetch", message: "boom" }), errorCode: "PROVIDER_UNAVAILABLE", updatedAt: now }));
+    store.saveMediaArchiveCheckpoint({ taskId: "trace-1", strategy: "stream_multipart", tosUploadId: "tos-upload-1", objectKey: "outputs/trace-1.mp4", sourceSize: 10_000_000, contentType: "video/mp4", partSize: 5 * 1024 * 1024, parts: [{ partNumber: 1, eTag: "etag-1" }], attemptCount: 2, createdAt: now, updatedAt: now, expiresAt: now + 86_400_000 });
     store.close();
     store = openStore(databasePath);
     const loaded = store.readTask("trace-1")!;
     expect(loaded.fetchTaskId).toBe("fetch-123");
     expect(loaded.mediaAttempts).toBe(1);
+    expect(loaded.errorCode).toBe("PROVIDER_UNAVAILABLE");
     expect(JSON.parse(loaded.mediaLastError!).message).toBe("boom");
+    expect(store.readMediaArchiveCheckpoint("trace-1")).toMatchObject({ tosUploadId: "tos-upload-1", parts: [{ partNumber: 1, eTag: "etag-1" }] });
     // 达到恢复上限后不再进入可恢复集合
     const recoverable = store.recoverableMediaTasks(now + 5 * 60_000, now - 60_000, 20);
     expect(recoverable.map((item) => item.id)).toContain("trace-1");

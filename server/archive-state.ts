@@ -8,7 +8,14 @@ export const shouldRecoverArchiveHandoff = (
 
 export type ArchiveTransferStrategy = "existing_object" | "url_fetch" | "stream_multipart";
 
-export const archiveTransferStrategy = (attempt: number, existingObjectOnly = false): ArchiveTransferStrategy => {
+export const archiveTransferStrategy = (
+  checkpoint: { strategy?: "url_fetch" | "stream_multipart"; fetchStartedAt?: number } | null,
+  existingObjectOnly = false,
+  now = Date.now(),
+  fetchMaxWaitMs = 300_000,
+): ArchiveTransferStrategy => {
   if (existingObjectOnly) return "existing_object";
-  return attempt <= 1 ? "url_fetch" : "stream_multipart";
+  if (checkpoint?.strategy === "stream_multipart") return "stream_multipart";
+  if (checkpoint?.fetchStartedAt && now - checkpoint.fetchStartedAt >= fetchMaxWaitMs) return "stream_multipart";
+  return "url_fetch";
 };

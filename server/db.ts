@@ -46,7 +46,26 @@ export type StoredTask = {
   createdAt: number;
   updatedAt: number;
   error?: string;
+  errorCode?: string;
   deletedAt?: number;
+};
+
+export type MediaArchiveCheckpoint = {
+  taskId: string;
+  strategy: "url_fetch" | "stream_multipart";
+  fetchTaskId?: string;
+  fetchStartedAt?: number;
+  tosUploadId?: string;
+  objectKey: string;
+  sourceSize?: number;
+  contentType?: string;
+  partSize: number;
+  parts: { partNumber: number; eTag: string }[];
+  attemptCount: number;
+  lastErrorCode?: string;
+  createdAt: number;
+  updatedAt: number;
+  expiresAt: number;
 };
 
 /** 归档自动恢复轮次上限：达到后停止重试，保留临时源可播放（fallback 分层保护） */
@@ -299,7 +318,7 @@ type TaskRow = {
   id: string; session_id: string | null; owner_id: string | null; visibility: "private" | "shared"; provider_id: string | null;
   status: TaskStatus; media_status: MediaStatus; media_revision: number; prompt: string; model: string; mode: string;
   ratio: string; resolution: string; duration: number; request_json: string; source_video_url: string | null;
-  source_video_expires_at: number | null; error: string | null; created_at: number; updated_at: number; deleted_at: number | null;
+  source_video_expires_at: number | null; error: string | null; error_code: string | null; created_at: number; updated_at: number; deleted_at: number | null;
   fetch_task_id: string | null; media_attempts: number | null; media_last_error: string | null;
 };
 
@@ -307,6 +326,12 @@ type MediaRow = {
   id: string; owner_id: string; task_id: string | null; upload_id: string | null; kind: MediaObject["kind"];
   object_key: string; status: MediaObject["status"]; file_name: string; content_type: string; size: number;
   etag: string; created_at: number; updated_at: number; deleted_at: number | null;
+};
+
+type MediaArchiveCheckpointRow = {
+  task_id: string; strategy: MediaArchiveCheckpoint["strategy"]; fetch_task_id: string | null; fetch_started_at: number | null;
+  tos_upload_id: string | null; object_key: string; source_size: number | null; content_type: string | null; part_size: number;
+  parts_json: string; attempt_count: number; last_error_code: string | null; created_at: number; updated_at: number; expires_at: number;
 };
 
 type UploadSessionRow = {
@@ -398,10 +423,18 @@ const mapTask = (row?: TaskRow): StoredTask | null => row ? ({
   status: row.status, mediaStatus: row.media_status, mediaRevision: row.media_revision, prompt: row.prompt, model: row.model,
   mode: row.mode, ratio: row.ratio, resolution: row.resolution, duration: row.duration,
   request: JSON.parse(row.request_json), sourceVideoUrl: row.source_video_url ?? undefined,
-  sourceVideoExpiresAt: row.source_video_expires_at ?? undefined, error: row.error ?? undefined,
+  sourceVideoExpiresAt: row.source_video_expires_at ?? undefined, error: row.error ?? undefined, errorCode: row.error_code ?? undefined,
   fetchTaskId: row.fetch_task_id ?? undefined, mediaAttempts: row.media_attempts ?? undefined,
   mediaLastError: row.media_last_error ?? undefined,
   createdAt: row.created_at, updatedAt: row.updated_at, deletedAt: row.deleted_at ?? undefined
+}) : null;
+
+const mapMediaArchiveCheckpoint = (row?: MediaArchiveCheckpointRow): MediaArchiveCheckpoint | null => row ? ({
+  taskId: row.task_id, strategy: row.strategy, fetchTaskId: row.fetch_task_id ?? undefined,
+  fetchStartedAt: row.fetch_started_at ?? undefined, tosUploadId: row.tos_upload_id ?? undefined,
+  objectKey: row.object_key, sourceSize: row.source_size ?? undefined, contentType: row.content_type ?? undefined,
+  partSize: row.part_size, parts: JSON.parse(row.parts_json), attemptCount: row.attempt_count,
+  lastErrorCode: row.last_error_code ?? undefined, createdAt: row.created_at, updatedAt: row.updated_at, expiresAt: row.expires_at,
 }) : null;
 
 const mapMedia = (row?: MediaRow): MediaObject | null => row ? ({
@@ -549,19 +582,19 @@ export class UserStore {
 
   saveTask(task: StoredTask) {
     this.database.prepare(`
-      INSERT INTO generation_tasks (id, session_id, owner_id, visibility, provider_id, status, media_status, media_revision, prompt, model, mode, ratio, resolution, duration, request_json, source_video_url, source_video_expires_at, error, fetch_task_id, media_attempts, media_last_error, created_at, updated_at, deleted_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO generation_tasks (id, session_id, owner_id, visibility, provider_id, status, media_status, media_revision, prompt, model, mode, ratio, resolution, duration, request_json, source_video_url, source_video_expires_at, error, error_code, fetch_task_id, media_attempts, media_last_error, created_at, updated_at, deleted_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id, owner_id=excluded.owner_id, visibility=excluded.visibility, provider_id=excluded.provider_id,
         status=excluded.status, media_status=excluded.media_status, media_revision=excluded.media_revision, prompt=excluded.prompt,
         model=excluded.model, mode=excluded.mode, ratio=excluded.ratio, resolution=excluded.resolution, duration=excluded.duration,
         request_json=excluded.request_json, source_video_url=excluded.source_video_url, source_video_expires_at=excluded.source_video_expires_at,
-        error=excluded.error, fetch_task_id=excluded.fetch_task_id, media_attempts=excluded.media_attempts, media_last_error=excluded.media_last_error,
+        error=excluded.error, error_code=excluded.error_code, fetch_task_id=excluded.fetch_task_id, media_attempts=excluded.media_attempts, media_last_error=excluded.media_last_error,
         updated_at=excluded.updated_at, deleted_at=COALESCE(generation_tasks.deleted_at, excluded.deleted_at)
     `).run(
       task.id, task.sessionId ?? null, task.ownerId ?? null, task.visibility ?? (task.ownerId ? "private" : "shared"), task.providerId ?? null,
       task.status, task.mediaStatus ?? "none", task.mediaRevision ?? 0, task.prompt, task.model, task.mode, task.ratio,
       task.resolution, task.duration, JSON.stringify(task.request ?? {}), task.sourceVideoUrl ?? null,
-      task.sourceVideoExpiresAt ?? null, task.error ?? null, task.fetchTaskId ?? null,
+      task.sourceVideoExpiresAt ?? null, task.error ?? null, task.errorCode ?? null, task.fetchTaskId ?? null,
       task.mediaAttempts ?? 0, task.mediaLastError ?? null, task.createdAt, task.updatedAt, task.deletedAt ?? null
     );
     return this.readTask(task.id, true)!;
@@ -656,6 +689,31 @@ export class UserStore {
   readTask(id: string, includeDeleted = false) {
     const row = this.database.prepare(`SELECT * FROM generation_tasks WHERE id = ?${includeDeleted ? "" : " AND deleted_at IS NULL"}`).get(id) as TaskRow | undefined;
     return mapTask(row);
+  }
+
+  readMediaArchiveCheckpoint(taskId: string) {
+    return mapMediaArchiveCheckpoint(this.database.prepare("SELECT * FROM media_archive_checkpoints WHERE task_id = ?").get(taskId) as MediaArchiveCheckpointRow | undefined);
+  }
+
+  saveMediaArchiveCheckpoint(checkpoint: MediaArchiveCheckpoint) {
+    this.database.prepare(`
+      INSERT INTO media_archive_checkpoints
+        (task_id, strategy, fetch_task_id, fetch_started_at, tos_upload_id, object_key, source_size, content_type, part_size, parts_json, attempt_count, last_error_code, created_at, updated_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(task_id) DO UPDATE SET strategy=excluded.strategy, fetch_task_id=excluded.fetch_task_id,
+        fetch_started_at=excluded.fetch_started_at, tos_upload_id=excluded.tos_upload_id, object_key=excluded.object_key,
+        source_size=excluded.source_size, content_type=excluded.content_type, part_size=excluded.part_size,
+        parts_json=excluded.parts_json, attempt_count=excluded.attempt_count, last_error_code=excluded.last_error_code,
+        updated_at=excluded.updated_at, expires_at=excluded.expires_at
+    `).run(checkpoint.taskId, checkpoint.strategy, checkpoint.fetchTaskId ?? null, checkpoint.fetchStartedAt ?? null,
+      checkpoint.tosUploadId ?? null, checkpoint.objectKey, checkpoint.sourceSize ?? null, checkpoint.contentType ?? null,
+      checkpoint.partSize, JSON.stringify(checkpoint.parts), checkpoint.attemptCount, checkpoint.lastErrorCode ?? null,
+      checkpoint.createdAt, checkpoint.updatedAt, checkpoint.expiresAt);
+    return this.readMediaArchiveCheckpoint(checkpoint.taskId)!;
+  }
+
+  deleteMediaArchiveCheckpoint(taskId: string) {
+    return this.database.prepare("DELETE FROM media_archive_checkpoints WHERE task_id = ?").run(taskId).changes > 0;
   }
 
   listTasksForUser(userId: string, limit = 50) {

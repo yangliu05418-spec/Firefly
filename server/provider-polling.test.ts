@@ -46,7 +46,7 @@ describe("recoverable provider polling", () => {
     const get = vi.fn(async () => { throw new ProviderRequestError("not found", 404); });
     await expect(pollProviderTaskUntilTerminal({
       providerId: "provider-missing", deadlineAt: 360_000, pollIntervalMs: 7000, shouldContinue: () => true,
-    }, { get, sleep, now: () => now })).rejects.toThrow("not found");
+    }, { get, sleep, now: () => now })).rejects.toThrow("生成参数不符合当前模型要求");
     expect(get).toHaveBeenCalledTimes(5);
   });
 

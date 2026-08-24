@@ -5,6 +5,10 @@ const ready = {
   engine: "video" as const,
   mode: "omni" as const,
   prompt: "让角色向前走",
+  providerPromptCharacters: 7,
+  providerPromptLimit: 5_000,
+  editorPromptCharacters: 7,
+  editorPromptLimit: 20_000,
   assetCount: 1,
   hasVideoAsset: false,
   hasFirstFrame: false,
@@ -31,5 +35,9 @@ describe("composer submission readiness", () => {
 
   it("blocks duplicates while an ambiguous admission is being confirmed", () => {
     expect(submissionBlockReason({ ...ready, confirmationPending: true })).toBe("正在确认上一项是否已进入队列");
+  });
+
+  it("blocks a provider prompt only after materialized references exceed the engine limit", () => {
+    expect(submissionBlockReason({ ...ready, providerPromptCharacters: 5_001 })).toContain("5000");
   });
 });

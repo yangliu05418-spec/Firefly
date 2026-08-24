@@ -44,7 +44,7 @@ describe("non-idempotent provider submission", () => {
     expect(saved.at(-1)?.providerId).toBeUndefined();
   });
 
-  it.each([new ProviderRequestError("bad request", 400), new ProviderRequestError("server error", 503), new ProviderRequestError("timeout", "network")])(
+  it.each([new ProviderRequestError("bad request", 400), new ProviderRequestError("timeout", "network")])(
     "stops blind replay for rejected or ambiguous creates: $message",
     async (error) => {
       const create = vi.fn(async () => { throw error; });
@@ -53,8 +53,9 @@ describe("non-idempotent provider submission", () => {
     },
   );
 
-  it("only classifies an explicit rate-limit response as safe to retry", () => {
+  it("only retries explicit throttling and provider 5xx responses", () => {
     expect(providerSubmissionCanRetry(new ProviderRequestError("busy", 429))).toBe(true);
+    expect(providerSubmissionCanRetry(new ProviderRequestError("unavailable", 503))).toBe(true);
     expect(providerSubmissionCanRetry(new ProviderRequestError("timeout", "network"))).toBe(false);
     expect(providerSubmissionWasRejected(new ProviderRequestError("bad", 400))).toBe(true);
     expect(providerSubmissionWasRejected(new ProviderRequestError("timeout", 408))).toBe(false);

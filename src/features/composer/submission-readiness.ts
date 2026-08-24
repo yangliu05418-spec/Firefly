@@ -4,6 +4,10 @@ type SubmissionReadinessInput = {
   engine: "video" | "image";
   mode: CreationMode;
   prompt: string;
+  providerPromptCharacters: number;
+  providerPromptLimit: number;
+  editorPromptCharacters: number;
+  editorPromptLimit: number;
   assetCount: number;
   hasVideoAsset: boolean;
   hasFirstFrame: boolean;
@@ -27,6 +31,8 @@ export const submissionBlockReason = (input: SubmissionReadinessInput) => {
     return `已达 ${input.capacity.limit} 项并行上限，完成一项后可继续`;
   }
   if (!input.uploadsReady) return "素材仍在上传，请稍候";
+  if (input.editorPromptCharacters > input.editorPromptLimit) return `编辑内容超过 ${input.editorPromptLimit} 个字符，请精简后提交`;
+  if (input.providerPromptCharacters > input.providerPromptLimit) return `提示词展开素材引用后超过 ${input.providerPromptLimit} 个字符，请精简后提交`;
   if (input.engine === "image") return input.imageReady ? "" : "输入提示词并选择可用模型后即可生成";
   if (input.mode === "text") return input.prompt.trim() ? "" : "输入提示词后即可生成";
   if (input.mode === "first_frame") return input.assetCount === 1 && input.hasFirstFrame ? "" : "请添加一张首帧图片";

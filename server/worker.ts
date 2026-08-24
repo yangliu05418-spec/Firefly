@@ -3,7 +3,7 @@ import { Redis } from "ioredis";
 import { config } from "./config.js";
 import { shouldRecoverArchiveHandoff } from "./archive-state.js";
 import type { StoredTask } from "./db.js";
-import { validateGeneration, type GenerationInput } from "./provider.js";
+import { classifyProviderError, ProviderRequestError, validateGeneration, type GenerationInput } from "./provider.js";
 import { mediaQueue, previewQueue, readTask, saveTask } from "./redis.js";
 import { AssetRegistrationRejected, isRetryableAssetRejection, prepareProviderAssets } from "./asset-registration.js";
 import { users } from "./store.js";
@@ -24,7 +24,7 @@ const archiveRecoveryBucketMs = 15 * 60 * 1000;
 const outputFormatFor = (task: { request?: unknown }) => (task.request as { outputFormat?: unknown } | undefined)?.outputFormat === "mov" ? "mov" as const : "mp4" as const;
 const enqueueArchiveHandoff = async (task: StoredTask) => {
   if (!shouldRecoverArchiveHandoff(task, config.mediaStorageBackend)) return false;
-  const archiving = { ...task, status: "succeeded" as const, mediaStatus: "archiving" as const, error: undefined, updatedAt: Date.now() };
+  const archiving = { ...task, status: "succeeded" as const, mediaStatus: "archiving" as const, error: undefined, errorCode: undefined, updatedAt: Date.now() };
   await saveTask(archiving);
   await mediaQueue.add("archive-output", { taskId: task.id, sourceUrl: task.sourceVideoUrl, outputFormat: outputFormatFor(task) }, {
     jobId: `archive-handoff-${task.id}-${Math.floor(Date.now() / archiveRecoveryBucketMs)}`,
@@ -73,7 +73,7 @@ const processGenerationJob = async (job: Job<{ input: unknown }>) => {
     task = await submitProviderTaskOnce(task, input, { save: saveTask });
     console.info(JSON.stringify({ type: "generation_submitted", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, providerId: task.providerId }));
   } else if (task.status !== "running") {
-    task = { ...task, status: "running", error: undefined, updatedAt: Date.now() };
+    task = { ...task, status: "running", error: undefined, errorCode: undefined, updatedAt: Date.now() };
     await saveTask(task);
   }
   let result;
@@ -101,7 +101,11 @@ const processGenerationJob = async (job: Job<{ input: unknown }>) => {
       },
     });
   } catch (error) {
-    if (error instanceof ProviderPollingTerminalError) throw new UnrecoverableError(error.message);
+    if (error instanceof ProviderPollingTerminalError) {
+      const cause = error.cause;
+      if (cause instanceof ProviderRequestError) throw Object.assign(new UnrecoverableError(cause.message), { errorCode: cause.errorCode, providerCode: cause.providerCode, providerRequestId: cause.requestId, providerStage: cause.stage });
+      throw Object.assign(new UnrecoverableError("模型任务状态查询失败，请稍后重试"), { errorCode: "PROVIDER_UNKNOWN_ERROR", providerStage: "query" });
+    }
     throw error;
   }
   if (!result) return;
@@ -111,7 +115,7 @@ const processGenerationJob = async (job: Job<{ input: unknown }>) => {
     const sourceVideoUrl = result.content?.video_url;
     if (!sourceVideoUrl) throw new UnrecoverableError("上游未返回成片地址");
     const sourceVideoExpiresAt = Date.now() + 24 * 3600 * 1000;
-    const completed = { ...latest, status: "succeeded" as const, mediaStatus: "archiving" as const, sourceVideoUrl, sourceVideoExpiresAt, updatedAt: Date.now() };
+    const completed = { ...latest, status: "succeeded" as const, mediaStatus: "archiving" as const, sourceVideoUrl, sourceVideoExpiresAt, error: undefined, errorCode: undefined, updatedAt: Date.now() };
     await saveTask(completed);
     console.info(JSON.stringify({ type: "generation_succeeded", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, providerId: task.providerId }));
     if (config.mediaStorageBackend === "tos") {
@@ -127,9 +131,8 @@ const processGenerationJob = async (job: Job<{ input: unknown }>) => {
     return;
   }
   if (result.status === "failed" || result.status === "cancelled" || result.status === "expired") {
-    const message = result.error?.message ?? "视频生成失败";
-    if (/may contain real person/i.test(message)) throw new UnrecoverableError("参考素材检测到真人面孔。Seedance 不允许直接使用未认证真人素材，请先在 BytePlus 真人资产库完成认证并等待资产状态变为 Active。 ");
-    throw new UnrecoverableError(message);
+    const classified = classifyProviderError(result.error?.message ?? "provider generation failed", 400, result.error?.code);
+    throw Object.assign(new UnrecoverableError(classified.publicMessage), { errorCode: classified.errorCode, providerCode: result.error?.code, providerRequestId: result.error?.request_id, providerStage: "query" });
   }
   throw new UnrecoverableError(`上游返回未知任务状态：${result.status}`);
 };
@@ -162,13 +165,14 @@ worker.on("failed", async (job, error) => {
       return;
     }
     const message = referencePending ? "参考素材长时间未能准备完成，请重新上传后再试" : error.message;
-    await saveTask({ ...task, status: "failed", error: message, updatedAt: Date.now() });
+    const errorCode = (error as { errorCode?: string }).errorCode ?? (referencePending ? "REFERENCE_ASSET_REJECTED" : "PROVIDER_UNKNOWN_ERROR");
+    await saveTask({ ...task, status: "failed", error: message, errorCode, updatedAt: Date.now() });
     const canvasJob = users.readCanvasJobByProviderTask(task.id);
     if (canvasJob && canvasJob.status !== "cancelled") {
       const failed = users.transitionActiveCanvasJob(canvasJob.id, { status: "failed", error: message.slice(0, 500) });
       if (failed) await connection.publish(`canvas:events:${canvasJob.canvasId}`, JSON.stringify({ type: "canvas_job", job: failed }));
     }
-    console.error(JSON.stringify({ type: "generation_failed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, providerId: task.providerId, attempts: job.attemptsMade, message }));
+    console.error(JSON.stringify({ type: "generation_failed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, providerId: task.providerId, attempts: job.attemptsMade, errorCode, providerCode: (error as { providerCode?: string }).providerCode, providerRequestId: (error as { providerRequestId?: string }).providerRequestId, providerStage: (error as { providerStage?: string }).providerStage }));
     users.completeAsyncJobIntent("generation", job.id);
   } catch (handlerError) {
     console.error(JSON.stringify({ type: "generation_failure_handler_failed", at: new Date().toISOString(), taskId: job.id, code: (handlerError as { code?: string }).code ?? "unknown" }));

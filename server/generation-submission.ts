@@ -8,10 +8,13 @@ type SubmissionDependencies = {
   now: () => number;
 };
 
-const message = (error: unknown) => error instanceof Error ? error.message.slice(0, 300) : "未知错误";
+const unrecoverableProviderError = (error: ProviderRequestError, fallback?: string) => Object.assign(
+  new UnrecoverableError(fallback ?? error.message),
+  { errorCode: error.errorCode, providerCode: error.providerCode, providerRequestId: error.requestId, providerStage: error.stage },
+);
 
 export const providerSubmissionCanRetry = (error: unknown) =>
-  error instanceof ProviderRequestError && error.status === 429;
+  error instanceof ProviderRequestError && (error.status === 429 || typeof error.status === "number" && error.status >= 500);
 
 export const providerSubmissionWasRejected = (error: unknown) =>
   error instanceof ProviderRequestError
@@ -25,8 +28,8 @@ export const providerSubmissionWasRejected = (error: unknown) =>
  *
  * A persisted `submitting` task without a provider id means the process may
  * have lost the response after ModelArk accepted the task. Replaying that POST
- * can create a second billable generation, so only an explicit 429 response is
- * returned to the queue for retry.
+ * can create a second billable generation, so only explicit rate-limit or
+ * provider 5xx responses are returned to the bounded queue retry policy.
  */
 export const submitProviderTaskOnce = async (
   task: StoredTask,
@@ -56,7 +59,8 @@ export const submitProviderTaskOnce = async (
       await deps.save({ ...submitting, status: "queued", updatedAt: deps.now() });
       throw error;
     }
-    if (providerSubmissionWasRejected(error)) throw new UnrecoverableError(message(error));
-    throw new UnrecoverableError(`上游任务提交结果未知（${message(error)}）。为避免重复创建和重复计费，系统没有自动再次提交；请联系管理员核对上游任务列表后再决定是否重试。`);
+    if (providerSubmissionWasRejected(error) && error instanceof ProviderRequestError) throw unrecoverableProviderError(error);
+    if (error instanceof ProviderRequestError) throw unrecoverableProviderError(error, `模型服务提交结果暂时无法确认。为避免重复创建和重复计费，系统没有自动再次提交；请通过 Case ID 联系管理员核查。`);
+    throw new UnrecoverableError(`模型服务提交结果暂时无法确认。为避免重复创建和重复计费，系统没有自动再次提交；请通过 Case ID 联系管理员核查。`);
   }
 };
