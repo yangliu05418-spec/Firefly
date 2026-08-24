@@ -674,6 +674,26 @@ export class UserStore {
     return rows.map((row) => mapTask(row)!);
   }
 
+  /**
+   * Finds recent tasks whose deterministic TOS output may have completed after
+   * the worker timed out. This intentionally ignores source URL expiry and the
+   * retry counter: reconciling an existing object is read-only and non-billable.
+   */
+  recoverableStoredMediaTasks(minimumUpdatedAt: number, staleBefore: number, limit = 20) {
+    const rows = this.database.prepare(`
+      SELECT * FROM generation_tasks
+      WHERE deleted_at IS NULL AND status = 'succeeded' AND updated_at >= ?
+        AND (media_status IN ('failed', 'fallback') OR (media_status = 'archiving' AND updated_at < ?))
+        AND NOT EXISTS (
+          SELECT 1 FROM media_objects
+          WHERE media_objects.task_id = generation_tasks.id
+            AND media_objects.kind = 'output' AND media_objects.status = 'ready'
+        )
+      ORDER BY updated_at ASC LIMIT ?
+    `).all(minimumUpdatedAt, staleBefore, limit) as TaskRow[];
+    return rows.map((row) => mapTask(row)!);
+  }
+
   recoverablePosterTasks(limit = 20) {
     const rows = this.database.prepare(`
       SELECT * FROM generation_tasks
@@ -733,6 +753,19 @@ export class UserStore {
       const result = this.database.prepare("UPDATE media_objects SET status = 'ready', updated_at = ? WHERE id = ? AND kind = 'input' AND status = 'uploading'").run(now, id);
       if (result.changes && media?.uploadId) this.database.prepare("UPDATE upload_sessions SET state = 'completed', updated_at = ? WHERE id = ? AND state = 'finalizing'").run(now, media.uploadId);
       return result.changes > 0;
+    })();
+  }
+
+  /** Stops an otherwise infinite validation retry loop without deleting the object inline. */
+  expireFinalizingUpload(uploadId: string, updatedBefore: number) {
+    return this.database.transaction(() => {
+      const media = this.readUploadState(uploadId);
+      if (!media || media.status !== "uploading" || media.updatedAt >= updatedBefore) return null;
+      const now = Date.now();
+      const result = this.database.prepare("UPDATE media_objects SET status = 'deleted', deleted_at = ?, updated_at = ? WHERE id = ? AND status = 'uploading'").run(now, now, media.id);
+      if (!result.changes) return null;
+      this.database.prepare("UPDATE upload_sessions SET state = 'failed', updated_at = ? WHERE id = ? AND state != 'completed'").run(now, uploadId);
+      return { ...media, status: "deleted" as const, deletedAt: now, updatedAt: now };
     })();
   }
 

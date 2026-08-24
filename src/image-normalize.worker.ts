@@ -1,5 +1,5 @@
 /// <reference lib="webworker" />
-import { imageNormalizationPlan } from "./image-normalize-policy";
+import { IMAGE_REENCODE_THRESHOLD_BYTES, imageNormalizationPlan } from "./image-normalize-policy";
 
 type NormalizeRequest = { id: string; file: File; createPreview?: boolean };
 const PREVIEW_MAX_EDGE = 960;
@@ -9,7 +9,7 @@ self.onmessage = async (event: MessageEvent<NormalizeRequest>) => {
   let bitmap: ImageBitmap | undefined;
   try {
     bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
-    const plan = imageNormalizationPlan(bitmap.width, bitmap.height);
+    const plan = imageNormalizationPlan(bitmap.width, bitmap.height, file.size);
     const renderWidth = plan.adjusted ? plan.targetWidth : bitmap.width;
     const renderHeight = plan.adjusted ? plan.targetHeight : bitmap.height;
     let normalizedCanvas: OffscreenCanvas | undefined;
@@ -39,7 +39,14 @@ self.onmessage = async (event: MessageEvent<NormalizeRequest>) => {
         }
       } catch { /* Local preview caching must never block the upload. */ }
     }
-    const blob = plan.adjusted ? await normalizedCanvas!.convertToBlob({ type: "image/jpeg", quality: .92 }) : undefined;
+    let blob: Blob | undefined;
+    if (plan.adjusted) {
+      for (const quality of [.9, .82, .72, .62]) {
+        blob = await normalizedCanvas!.convertToBlob({ type: "image/jpeg", quality });
+        if (blob.size <= IMAGE_REENCODE_THRESHOLD_BYTES) break;
+      }
+      if (!blob || blob.size > IMAGE_REENCODE_THRESHOLD_BYTES) throw new Error("图片内容过于复杂，压缩后仍超过 18MB，请缩小图片后重试");
+    }
     self.postMessage({ id, plan, blob, previewBlob });
   } catch (error) {
     self.postMessage({ id, error: error instanceof Error ? error.message : "图片预处理失败" });

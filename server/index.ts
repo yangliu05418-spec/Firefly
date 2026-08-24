@@ -247,7 +247,7 @@ const enqueueUploadFinalization = (uploadId: string) => {
     jobId: `finalize-upload-${uploadId}`,
     priority: 1,
     attempts: 5,
-    backoff: { type: "exponential", delay: 3000 },
+    backoff: { type: "exponential", delay: 3000, jitter: .5 },
     removeOnComplete: true,
     removeOnFail: true
   }).catch((error) => console.warn(JSON.stringify({ type: "upload_finalize_enqueue_failed", at: new Date().toISOString(), uploadId, code: (error as { code?: string }).code ?? "unknown" })));

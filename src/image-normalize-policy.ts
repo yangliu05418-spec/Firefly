@@ -1,4 +1,6 @@
 export const VIDEO_IMAGE_RATIOS = [21 / 9, 16 / 9, 4 / 3, 1, 3 / 4, 9 / 16] as const;
+/** Leave headroom below TOS image/info's hard 20 MiB processing limit. */
+export const IMAGE_REENCODE_THRESHOLD_BYTES = 18 * 1024 * 1024;
 
 export type ImageNormalizationPlan = {
   adjusted: boolean;
@@ -20,16 +22,18 @@ const closestStandardRatio = (ratio: number) => VIDEO_IMAGE_RATIOS.reduce((close
 
 /**
  * ModelArk accepts image dimensions from 300 to 6000 px and ratios strictly
- * between 0.4 and 2.5. Valid files stay byte-for-byte untouched. Invalid files
- * are contained on a white canvas; the normalized canvas is intentionally
- * capped to keep batch preprocessing responsive on ordinary laptops.
+ * between 0.4 and 2.5. TOS image/info accepts at most 20 MiB, so oversized
+ * source files are re-encoded with headroom even when their dimensions are
+ * valid. Adjusted files are contained on a white canvas and capped to keep
+ * batch preprocessing responsive on ordinary laptops.
  */
-export const imageNormalizationPlan = (sourceWidth: number, sourceHeight: number): ImageNormalizationPlan => {
+export const imageNormalizationPlan = (sourceWidth: number, sourceHeight: number, sourceBytes = 0): ImageNormalizationPlan => {
   if (!Number.isFinite(sourceWidth) || !Number.isFinite(sourceHeight) || sourceWidth <= 0 || sourceHeight <= 0) {
     throw new Error("无法识别图片尺寸");
   }
   const sourceRatio = sourceWidth / sourceHeight;
-  const adjusted = sourceWidth < 300 || sourceWidth > 6000 || sourceHeight < 300 || sourceHeight > 6000 || sourceRatio <= .4 || sourceRatio >= 2.5;
+  const adjusted = sourceWidth < 300 || sourceWidth > 6000 || sourceHeight < 300 || sourceHeight > 6000
+    || sourceRatio <= .4 || sourceRatio >= 2.5 || sourceBytes > IMAGE_REENCODE_THRESHOLD_BYTES;
   if (!adjusted) return { adjusted: false, sourceWidth, sourceHeight, targetWidth: sourceWidth, targetHeight: sourceHeight, drawX: 0, drawY: 0, drawWidth: sourceWidth, drawHeight: sourceHeight };
 
   const targetRatio = sourceRatio <= .4 || sourceRatio >= 2.5 ? closestStandardRatio(sourceRatio) : sourceRatio;

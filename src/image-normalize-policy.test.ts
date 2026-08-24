@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { imageNormalizationPlan } from "./image-normalize-policy";
+import { IMAGE_REENCODE_THRESHOLD_BYTES, imageNormalizationPlan } from "./image-normalize-policy";
 
 describe("image upload normalization policy", () => {
   it("keeps compliant images byte-for-byte eligible", () => {
@@ -28,5 +28,11 @@ describe("image upload normalization policy", () => {
     const large = imageNormalizationPlan(9000, 4500);
     expect(Math.max(large.targetWidth, large.targetHeight)).toBeLessThanOrEqual(4096);
     expect(large.targetWidth / large.targetHeight).toBeCloseTo(2, 2);
+  });
+
+  it("re-encodes files before they can exceed the TOS image processing ceiling", () => {
+    const plan = imageNormalizationPlan(6000, 6000, IMAGE_REENCODE_THRESHOLD_BYTES + 1);
+    expect(plan.adjusted).toBe(true);
+    expect(plan.targetWidth * plan.targetHeight).toBeLessThanOrEqual(12_100_000);
   });
 });

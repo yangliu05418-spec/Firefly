@@ -204,19 +204,32 @@ export type FetchObjectObserver = {
   stateChanged?: (taskId: string, state: string, error: string) => void;
 };
 
-export const fetchObjectFromUrl = async (key: string, url: string, observer: FetchObjectObserver = {}) => {
+export const fetchObjectFromUrl = async (key: string, url: string, observer: FetchObjectObserver = {}, existingTaskId?: string) => {
   requireTos();
   try {
     return await verifyStoredObject(key);
   } catch (error) {
     if ((error as { statusCode?: number }).statusCode !== 404) throw error;
   }
-  const created = await tos.putFetchTask({ bucket: config.tosBucket, key, url, ignoreSameKey: true });
-  const taskId = created.data.TaskId;
-  observer.taskCreated?.(taskId);
+  const createFetchTask = async () => {
+    const created = await tos.putFetchTask({ bucket: config.tosBucket, key, url, ignoreSameKey: true });
+    observer.taskCreated?.(created.data.TaskId);
+    return created.data.TaskId;
+  };
+  let resumedTask = Boolean(existingTaskId);
+  let taskId = existingTaskId ?? await createFetchTask();
   const deadline = Date.now() + config.tosFetchDeadlineMs;
   while (Date.now() < deadline) {
-    const result = await tos.getFetchTask({ bucket: config.tosBucket, taskId });
+    let result;
+    try { result = await tos.getFetchTask({ bucket: config.tosBucket, taskId }); }
+    catch (error) {
+      if (resumedTask && (error as { statusCode?: number }).statusCode === 404) {
+        resumedTask = false;
+        taskId = await createFetchTask();
+        continue;
+      }
+      throw error;
+    }
     const state = result.data.State ?? "unknown";
     observer.stateChanged?.(taskId, state, result.data.Err ?? "");
     if (tosJobSucceeded(state)) return verifyStoredObject(key);
@@ -226,7 +239,13 @@ export const fetchObjectFromUrl = async (key: string, url: string, observer: Fet
     }
     await delay(Math.min(10000, Math.max(1000, deadline - Date.now())));
   }
-  throw new Error(`TOS URL 抓取超过 ${Math.round(config.tosFetchDeadlineMs / 1000)} 秒`);
+  // The remote fetch can commit on the deadline boundary after the last state
+  // poll. Reconcile the deterministic key before scheduling another attempt.
+  try { return await verifyStoredObject(key); }
+  catch (error) {
+    if ((error as { statusCode?: number }).statusCode !== 404) throw error;
+    throw new Error(`TOS URL 抓取超过 ${Math.round(config.tosFetchDeadlineMs / 1000)} 秒`);
+  }
 };
 
 export const streamObjectToTos = async (
@@ -291,7 +310,17 @@ export const streamObjectToTos = async (
     }
     if (pending.length) await upload(pending);
     if (!parts.length) throw new Error("媒体处理没有产生可上传的数据");
-    await tos.completeMultipartUpload({ bucket: config.tosBucket, key, uploadId, parts, forbidOverwrite: true });
+    try {
+      await tos.completeMultipartUpload({ bucket: config.tosBucket, key, uploadId, parts, forbidOverwrite: true });
+    } catch (error) {
+      // CompleteMultipartUpload is not safe to blindly repeat: its response can
+      // be lost after TOS commits. The deterministic key is the idempotency key.
+      try {
+        const reconciled = await verifyStoredObject(key);
+        uploadId = "";
+        return reconciled;
+      } catch { throw error; }
+    }
     uploadId = "";
     return await verifyStoredObject(key);
   } finally {

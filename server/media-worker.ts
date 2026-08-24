@@ -4,7 +4,7 @@ import { Redis } from "ioredis";
 import { config } from "./config.js";
 import { users } from "./store.js";
 import { assetQueue, mediaQueue, previewQueue, readTask, saveTask, uploadFinalizationQueue } from "./redis.js";
-import { createPoster, deleteObject, fetchObjectFromUrl, optimizePlaybackObject, outputObjectKey, posterObjectKey, previewObjectKey, streamObjectFromUrl, verifyProgressiveMp4 } from "./tos.js";
+import { createPoster, deleteObject, fetchObjectFromUrl, optimizePlaybackObject, outputObjectKey, posterObjectKey, previewObjectKey, streamObjectFromUrl, verifyProgressiveMp4, verifyStoredObject } from "./tos.js";
 import { MAX_MEDIA_RECOVERY_ATTEMPTS } from "./db.js";
 import { transcodePreview } from "./preview-transcode.js";
 import { closeWorkersWithin } from "./shutdown.js";
@@ -20,6 +20,7 @@ const numberHeader = (value: unknown) => Number(value ?? 0) || 0;
 const recoveryBucketMs = 15 * 60 * 1000;
 const posterRecoveryBucketMs = 15 * 60 * 1000;
 const previewRecoveryBucketMs = 15 * 60 * 1000;
+const uploadFinalizationDeadlineMs = 15 * 60 * 1000;
 
 const outputFormatFor = (task: { request?: unknown }) => (task.request as { outputFormat?: unknown } | undefined)?.outputFormat === "mov" ? "mov" as const : "mp4" as const;
 const enqueuePosterRecovery = async (taskId: string) => mediaQueue.add("create-poster", { taskId }, {
@@ -111,26 +112,31 @@ const createTaskPoster = async (taskId: string) => {
   return true;
 };
 
-const enqueueArchiveRecovery = async (task: { id: string; sourceVideoUrl?: string; sourceVideoExpiresAt?: number; request?: unknown }, delay = 0) => {
-  if (!task.sourceVideoUrl || !task.sourceVideoExpiresAt || task.sourceVideoExpiresAt <= Date.now() + delay + 5 * 60 * 1000) return false;
+const enqueueArchiveRecovery = async (task: { id: string; sourceVideoUrl?: string; sourceVideoExpiresAt?: number; request?: unknown }, delay = 0, existingObjectOnly = false) => {
+  if (!existingObjectOnly && (!task.sourceVideoUrl || !task.sourceVideoExpiresAt || task.sourceVideoExpiresAt <= Date.now() + delay + 5 * 60 * 1000)) return false;
   const bucket = Math.floor((Date.now() + delay) / recoveryBucketMs);
-  await mediaQueue.add("archive-output", { taskId: task.id, sourceUrl: task.sourceVideoUrl, outputFormat: outputFormatFor(task) }, {
-    jobId: `archive-recovery-${task.id}-${bucket}`, delay, attempts: 4, backoff: { type: "exponential", delay: 5000 },
+  await mediaQueue.add("archive-output", { taskId: task.id, sourceUrl: existingObjectOnly ? undefined : task.sourceVideoUrl, outputFormat: outputFormatFor(task), existingObjectOnly }, {
+    jobId: `${existingObjectOnly ? "archive-stored-recovery" : "archive-recovery"}-${task.id}-${bucket}`, delay, attempts: existingObjectOnly ? 2 : 4, backoff: { type: "exponential", delay: 5000, jitter: .5 },
     removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 24 * 3600 }
   });
-  console.info(JSON.stringify({ type: "tos_recovery_queued", at: new Date().toISOString(), taskId: task.id, delay }));
+  console.info(JSON.stringify({ type: "tos_recovery_queued", at: new Date().toISOString(), taskId: task.id, delay, strategy: existingObjectOnly ? "existing_object" : "provider_source" }));
   return true;
 };
 
-const archiveOutput = async (data: { taskId: string; sourceUrl: string; outputFormat: "mp4" | "mov" }, attempt: number, finalAttempt: boolean) => {
+const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputFormat: "mp4" | "mov"; existingObjectOnly?: boolean }, attempt: number, finalAttempt: boolean) => {
   const task = await readTask(data.taskId, true);
   if (!task || task.deletedAt || !task.ownerId) return;
   if (task.mediaStatus !== "archiving") await saveTask({ ...task, mediaStatus: "archiving", error: undefined, updatedAt: Date.now() });
   const startedAt = Date.now();
   const objectKey = outputObjectKey(task.ownerId, task.id, data.outputFormat);
-  console.info(JSON.stringify({ type: "tos_fetch_started", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, strategy: finalAttempt ? "stream_multipart" : "url_fetch" }));
+  const strategy = data.existingObjectOnly ? "existing_object" : finalAttempt ? "stream_multipart" : "url_fetch";
+  console.info(JSON.stringify({ type: "tos_fetch_started", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, strategy }));
   try {
-    if (finalAttempt) {
+    if (data.existingObjectOnly) {
+      await verifyStoredObject(objectKey, data.outputFormat === "mov" ? "video/quicktime" : "video/mp4");
+    } else if (!data.sourceUrl) {
+      throw new Error("上游临时地址已过期，且 TOS 中没有可恢复的成片");
+    } else if (finalAttempt) {
       await streamObjectFromUrl(objectKey, data.sourceUrl, `result.${data.outputFormat}`, data.outputFormat === "mov" ? "video/quicktime" : "video/mp4", (partNumber, bytes) => console.info(JSON.stringify({ type: "tos_stream_part_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, partNumber, bytes })), 5 * 1024 * 1024);
     } else {
       await fetchObjectFromUrl(objectKey, data.sourceUrl, {
@@ -141,7 +147,7 @@ const archiveOutput = async (data: { taskId: string; sourceUrl: string; outputFo
           }).catch((error) => console.warn(JSON.stringify({ type: "tos_fetch_trace_persist_failed", at: new Date().toISOString(), taskId: task.id, code: (error as { code?: string }).code ?? "unknown" })));
         },
         stateChanged: (fetchTaskId, state, error) => console.info(JSON.stringify({ type: "tos_fetch_task_state", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, fetchTaskId, state, error: error || undefined }))
-      });
+      }, task.fetchTaskId);
     }
     const head = await optimizePlaybackObject(objectKey, { contentType: data.outputFormat === "mov" ? "video/quicktime" : "video/mp4", fileName: `result.${data.outputFormat}`, cacheSeconds: config.tosPreviewTtlSeconds });
     const dataOut = head.data as unknown as { contentLength?: number; etag?: string; contentType?: string };
@@ -178,14 +184,14 @@ const archiveOutput = async (data: { taskId: string; sourceUrl: string; outputFo
       if (attached && !config.tosPreviewTranscodeEnabled) await connection.publish(`canvas:events:${canvasJob.canvasId}`, JSON.stringify({ type: "canvas_job", job: attached.job }));
     }
     await enqueueLivePreview(task.id).catch((error) => console.warn(JSON.stringify({ type: "tos_preview_queue_failed", at: new Date().toISOString(), taskId: task.id, code: (error as { code?: string }).code ?? "unknown" })));
-    console.info(JSON.stringify({ type: "tos_fetch_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, strategy: finalAttempt ? "stream_multipart" : "url_fetch", size, posterReady, elapsedMs: Date.now() - startedAt, requestId: head.requestId }));
+    console.info(JSON.stringify({ type: "tos_fetch_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, strategy, size, posterReady, elapsedMs: Date.now() - startedAt, requestId: head.requestId }));
   } catch (error) {
     const current = await readTask(task.id, true);
     if (current && !current.deletedAt) {
-      const trace = { phase: finalAttempt ? "stream_multipart" : "url_fetch", code: (error as { code?: string }).code ?? "unknown", statusCode: (error as { statusCode?: number }).statusCode ?? null, message: error instanceof Error ? error.message.slice(0, 500) : undefined, elapsedMs: Date.now() - startedAt };
+      const trace = { phase: strategy, code: (error as { code?: string }).code ?? "unknown", statusCode: (error as { statusCode?: number }).statusCode ?? null, message: error instanceof Error ? error.message.slice(0, 500) : undefined, elapsedMs: Date.now() - startedAt };
       await saveTask({ ...current, mediaStatus: "archiving", mediaLastError: JSON.stringify(trace), updatedAt: Date.now() });
     }
-    console.warn(JSON.stringify({ type: "tos_fetch_failed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, strategy: finalAttempt ? "stream_multipart" : "url_fetch", elapsedMs: Date.now() - startedAt, code: (error as { code?: string }).code ?? "unknown", statusCode: (error as { statusCode?: number }).statusCode, message: error instanceof Error ? error.message : undefined }));
+    console.warn(JSON.stringify({ type: "tos_fetch_failed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, strategy, elapsedMs: Date.now() - startedAt, code: (error as { code?: string }).code ?? "unknown", statusCode: (error as { statusCode?: number }).statusCode, message: error instanceof Error ? error.message : undefined }));
     throw error;
   }
 };
@@ -282,6 +288,16 @@ assetWorker.on("failed", (job, error) => {
 
 uploadFinalizationWorker.on("failed", (job, error) => {
   console.warn(JSON.stringify({ type: "tos_upload_finalize_failed", at: new Date().toISOString(), uploadId: job?.data.uploadId, attempt: job?.attemptsMade, code: (error as { code?: string }).code ?? "worker_failure" }));
+  if (!job?.data.uploadId || job.attemptsMade < (job.opts.attempts ?? 1)) return;
+  const expired = users.expireFinalizingUpload(job.data.uploadId, Date.now() - uploadFinalizationDeadlineMs);
+  if (!expired) return;
+  const message = "素材内容校验超过 15 分钟，已停止自动重试；请重新上传";
+  const asset = users.readUserAssetByUpload(expired.ownerId, job.data.uploadId);
+  if (asset?.status === "Processing") markAssetIngestFailed(asset.id, message);
+  void connection.set(`upload:error:${job.data.uploadId}`, message, "EX", 24 * 3600)
+    .then(() => connection.del(`upload:${job.data.uploadId}`))
+    .catch(() => undefined);
+  console.warn(JSON.stringify({ type: "tos_upload_finalize_exhausted", at: new Date().toISOString(), uploadId: job.data.uploadId, userId: expired.ownerId, elapsedMs: Date.now() - expired.createdAt }));
 });
 
 worker.on("failed", async (job, error) => {
@@ -305,7 +321,7 @@ worker.on("failed", async (job, error) => {
   if (!job || job.name !== "archive-output" || job.attemptsMade < (job.opts.attempts ?? 1)) return;
   const task = await readTask(job.data.taskId, true);
   if (!task || task.deletedAt) return;
-  const mediaAttempts = (task.mediaAttempts ?? 0) + 1;
+  const mediaAttempts = job.data.existingObjectOnly ? (task.mediaAttempts ?? 0) : (task.mediaAttempts ?? 0) + 1;
   // 分层保护：任务保持 succeeded（生成本身成功），归档失败进入可恢复态；
   // 临时源只作为前端显式选择的降级预览，默认播放与下载仍等待 TOS 验证完成。
   await saveTask({
@@ -315,7 +331,7 @@ worker.on("failed", async (job, error) => {
     mediaLastError: job.failedReason ? JSON.stringify({ phase: "archive_output", message: job.failedReason.slice(0, 500) }) : undefined,
     updatedAt: Date.now()
   });
-  if (mediaAttempts < MAX_MEDIA_RECOVERY_ATTEMPTS) {
+  if (!job.data.existingObjectOnly && mediaAttempts < MAX_MEDIA_RECOVERY_ATTEMPTS) {
     await enqueueArchiveRecovery(task, 60_000).catch((error) => console.warn(JSON.stringify({ type: "tos_recovery_queue_failed", at: new Date().toISOString(), taskId: task.id, code: (error as { code?: string }).code ?? "unknown" })));
   } else {
     console.warn(JSON.stringify({ type: "tos_recovery_exhausted", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempts: mediaAttempts, maxAttempts: MAX_MEDIA_RECOVERY_ATTEMPTS }));
@@ -329,6 +345,19 @@ const reconcileArchives = async () => {
   const now = Date.now();
   const tasks = users.recoverableMediaTasks(now + 5 * 60 * 1000, now - 30 * 60 * 1000, 20);
   for (const task of tasks) await enqueueArchiveRecovery(task);
+  const sourceRecoveries = new Set(tasks.map((task) => task.id));
+  const stored = users.recoverableStoredMediaTasks(now - 30 * 24 * 60 * 60 * 1000, now - 30 * 60 * 1000, 20);
+  for (const task of stored) {
+    if (!task.ownerId || sourceRecoveries.has(task.id)) continue;
+    const format = outputFormatFor(task);
+    const key = outputObjectKey(task.ownerId, task.id, format);
+    try {
+      await verifyStoredObject(key, format === "mov" ? "video/quicktime" : "video/mp4");
+      await enqueueArchiveRecovery(task, 0, true);
+    } catch (error) {
+      if ((error as { statusCode?: number }).statusCode !== 404) console.warn(JSON.stringify({ type: "tos_stored_recovery_probe_failed", at: new Date().toISOString(), taskId: task.id, code: (error as { code?: string }).code ?? "unknown", statusCode: (error as { statusCode?: number }).statusCode }));
+    }
+  }
 };
 const archiveReconcile = setInterval(() => void reconcileArchives().catch((error) => console.warn(JSON.stringify({ type: "tos_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }))), 5 * 60 * 1000);
 const reconcilePosters = async () => {
@@ -359,7 +388,7 @@ const assetReconcile = setInterval(() => void reconcileAssets().catch((error) =>
 const reconcileUploadFinalizations = async () => {
   for (const media of users.listFinalizingUploads(100)) {
     if (!media.uploadId) continue;
-    await uploadFinalizationQueue.add("finalize-upload", { uploadId: media.uploadId }, { jobId: `finalize-upload-${media.uploadId}`, priority: 1, attempts: 5, backoff: { type: "exponential", delay: 3000 }, removeOnComplete: true, removeOnFail: true });
+    await uploadFinalizationQueue.add("finalize-upload", { uploadId: media.uploadId }, { jobId: `finalize-upload-${media.uploadId}`, priority: 1, attempts: 5, backoff: { type: "exponential", delay: 3000, jitter: .5 }, removeOnComplete: true, removeOnFail: true });
   }
 };
 const uploadFinalizeReconcile = setInterval(() => void reconcileUploadFinalizations().catch((error) => console.warn(JSON.stringify({ type: "tos_upload_finalize_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }))), 60_000);

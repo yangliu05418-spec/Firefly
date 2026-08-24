@@ -39,6 +39,14 @@ describe("asynchronous upload finalization", () => {
     expect(deps.markReady).not.toHaveBeenCalled();
   });
 
+  it("rejects images above TOS image/info's 20 MiB ceiling without retrying the processor", async () => {
+    const deps = setup(pending({ size: 20 * 1024 * 1024 + 1 }));
+    await expect(finalizeQueuedUpload("upload-1", deps)).resolves.toMatchObject({ status: "failed", error: expect.stringContaining("20MB") });
+    expect(deps.inspect).not.toHaveBeenCalled();
+    expect(deps.deleteObject).toHaveBeenCalledTimes(1);
+    expect(deps.markDeleted).toHaveBeenCalledWith("input:upload-1");
+  });
+
   it("treats an already absent rejected object as deleted", async () => {
     const deps = setup();
     deps.inspect = vi.fn(async () => ({ ImageWidth: { value: "120" }, ImageHeight: { value: "120" } })) as never;
@@ -53,6 +61,14 @@ describe("asynchronous upload finalization", () => {
     await expect(finalizeQueuedUpload("upload-1", deps)).rejects.toThrow("temporarily unavailable");
     expect(deps.markReady).not.toHaveBeenCalled();
     expect(deps.markDeleted).not.toHaveBeenCalled();
+  });
+
+  it("turns a deterministic TOS media parser rejection into a terminal validation failure", async () => {
+    const deps = setup();
+    deps.inspect = vi.fn(async () => { throw Object.assign(new Error(""), { statusCode: 400 }); }) as never;
+    await expect(finalizeQueuedUpload("upload-1", deps)).resolves.toMatchObject({ status: "failed", error: expect.stringContaining("无法被 TOS 解析") });
+    expect(deps.deleteObject).toHaveBeenCalledTimes(1);
+    expect(deps.markDeleted).toHaveBeenCalledWith("input:upload-1");
   });
 
   it("uses the bounded ffprobe path only for audio", async () => {
