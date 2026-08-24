@@ -3,7 +3,9 @@ import path from "node:path";
 import Database from "better-sqlite3";
 
 export const CURRENT_SCHEMA_VERSION = 10;
-export const MAX_SUPPORTED_SCHEMA_VERSION = 10;
+// Compatibility release: schema 11 is expand-only, so this release can stay
+// online during the blue-green migration and remains a valid rollback target.
+export const MAX_SUPPORTED_SCHEMA_VERSION = 11;
 
 const baseSchema = `
   CREATE TABLE IF NOT EXISTS users (
