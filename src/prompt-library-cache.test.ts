@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createAssetMetadataCache, type AssetCacheRecord, type AssetMetadataStore } from "./asset-metadata-cache";
 import { loadPromptLibraryCacheFirst, toPromptLibraryAsset } from "./prompt-library-cache";
 import type { LibraryAsset } from "./types";
+import { areAttachedUploadsAdmissible } from "./upload-state";
 
 const makeAsset = (id: string, status: LibraryAsset["Status"] = "Active", type: LibraryAsset["AssetType"] = "Image"): LibraryAsset => ({
   Id: id,
@@ -11,6 +12,7 @@ const makeAsset = (id: string, status: LibraryAsset["Status"] = "Active", type: 
   GroupId: "group-1",
   Category: "material",
   URL: `/api/assets/${id}/source`,
+  UploadId: `upload-${id}`,
 });
 
 const makeCache = () => {
@@ -27,12 +29,19 @@ describe("prompt library cache", () => {
   it("maps a provider asset into an immediately attachable prompt reference", () => {
     expect(toPromptLibraryAsset(makeAsset("clip", "Active", "Video"))).toMatchObject({
       id: "clip",
+      uploadId: "upload-clip",
       assetId: "clip",
       type: "video",
       role: "reference_video",
       progress: 100,
       preview: "/api/assets/clip/source",
+      status: "Active",
     });
+  });
+
+  it("keeps an active @ mention admissible for generation", () => {
+    const reference = toPromptLibraryAsset(makeAsset("reference"));
+    expect(areAttachedUploadsAdmissible([reference])).toBe(true);
   });
 
   it("paints only ready cached assets before the network refresh completes", async () => {
