@@ -97,6 +97,7 @@ describe("versioned database migrations", () => {
     const database = new Database(target);
     database.prepare("DELETE FROM schema_migrations WHERE version = 9").run();
     database.exec("ALTER TABLE image_generation_tasks DROP COLUMN references_json");
+    database.prepare(`INSERT INTO users (id, feishu_open_id, feishu_union_id, tenant_key, email, name, avatar_url, status, created_at, last_login_at) VALUES ('owner-1', 'open-schema-8', 'union-schema-8', 'tenant-1', 'schema8@dokuai.tv', 'Schema 8 Owner', '', 'active', 1, 1)`).run();
     database.prepare(`INSERT INTO image_generation_tasks (id, session_id, owner_id, model, model_name, ratio, resolution, prompt, requested_count, status, items_json, failures_json, created_at, updated_at) VALUES ('image-old', NULL, 'owner-1', 'model-1', 'Model', '1:1', '1024', 'Prompt', 1, 'failed', '[]', '[]', 1, 1)`).run();
     database.close();
 
