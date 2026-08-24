@@ -659,6 +659,21 @@ const legacyReeditDependencies = {
   now: reeditDependencies.now,
   inputRetentionDays: reeditDependencies.inputRetentionDays,
 };
+let reeditIntegrityCache: { checkedAt: number; error?: Error } = { checkedAt: 0 };
+const checkReeditIntegrity = () => {
+  if (Date.now() - reeditIntegrityCache.checkedAt < 30_000) {
+    if (reeditIntegrityCache.error) throw reeditIntegrityCache.error;
+    return;
+  }
+  try {
+    runReeditIntegrityCheck(users, config.tosInputRetentionDays);
+    reeditIntegrityCache = { checkedAt: Date.now() };
+  } catch (error) {
+    const failure = error instanceof Error ? error : new Error("re-edit integrity unavailable");
+    reeditIntegrityCache = { checkedAt: Date.now(), error: failure };
+    throw failure;
+  }
+};
 const ensureVideoSnapshot = (task: StoredTask) => {
   if (!config.reeditV2Enabled || users.readCreationSnapshot("video", task.id)) return;
   const bundle = buildLegacyVideoSnapshot(task, creationSnapshotDependencies);
@@ -1764,7 +1779,7 @@ app.get("/api/health/ready", async (_req, res) => {
     dependency = "database";
     if (!users.healthCheck()) throw new Error("database unavailable");
     dependency = "reedit";
-    runReeditIntegrityCheck(users, config.tosInputRetentionDays);
+    checkReeditIntegrity();
     dependency = "queues";
     await Promise.all([generationQueue.getJobCounts("wait", "active"), imageGenerationQueue.getJobCounts("wait", "active"), mediaQueue.getJobCounts("wait", "active"), previewQueue.getJobCounts("wait", "active"), assetQueue.getJobCounts("wait", "active"), canvasQueue.getJobCounts("wait", "active"), uploadFinalizationQueue.getJobCounts("wait", "active")]);
     dependency = "workers";
