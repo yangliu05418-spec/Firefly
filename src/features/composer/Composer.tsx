@@ -15,6 +15,7 @@ import { LibraryPanel } from "./LibraryPanel";
 import { PromptEditor } from "./PromptEditor";
 import { persistPrivateMediaStorage } from "../../private-media-cache";
 import { uploadFileUntilAccepted } from "../../upload-acceptance";
+import type { ComposerRestore } from "../../composer-restore";
 
 const modeLabels: Record<CreationMode, string> = { omni: "全能参考", first_frame: "首帧生成", first_last: "首尾帧", edit: "视频编辑", extend: "视频续写", text: "文本生成" };
 const modeNotes: Record<CreationMode, string> = { omni: "自由组合图片、视频和音频", first_frame: "锁定开场画面继续创作", first_last: "精确控制起点与落点", edit: "替换、增删或重绘画面", extend: "向前、向后或多段衔接", text: "只用提示词生成镜头" };
@@ -31,7 +32,7 @@ function Popover({ children, className = "" }: { children: ReactNode; className?
   return <div className={`popover ${className}`} onClick={(event) => event.stopPropagation()}>{children}</div>;
 }
 
-export function Composer({ models, compact, sessionId, onCreated, onImagesGenerated }: { models: ModelCapability[]; compact: boolean; sessionId: string; onCreated: (task: Task) => void; onImagesGenerated?: (bundle: ImageResultBundle) => void }) {
+export function Composer({ models, compact, sessionId, restore, onRestoreConsumed, onCreated, onImagesGenerated }: { models: ModelCapability[]; compact: boolean; sessionId: string; restore?: ComposerRestore; onRestoreConsumed?: () => void; onCreated: (task: Task) => void; onImagesGenerated?: (bundle: ImageResultBundle) => void }) {
   const userId = useAssetCacheUserId();
   const { catalog: imageModelCatalog, error: imageModelCatalogError } = useImageModelCatalog();
   const defaultModel = models[0];
@@ -119,6 +120,36 @@ export function Composer({ models, compact, sessionId, onCreated, onImagesGenera
     const controller = new AbortController();
     let active = true;
     setDraftHydrated(false);
+    if (restore?.targetSessionId === sessionId) {
+      const state = restore.state;
+      for (const transfer of uploadControllers.current.values()) transfer.abort();
+      uploadControllers.current.clear();
+      for (const url of localPreviewUrls.current) URL.revokeObjectURL(url);
+      localPreviewUrls.current.clear();
+      setEngine(state.engine);
+      setPrompt(state.prompt);
+      setModelId(models.some((item) => item.id === state.modelId) ? state.modelId : (defaultModel?.id ?? ""));
+      setMode(state.mode);
+      setRatio(state.ratio);
+      setResolution(state.resolution);
+      setDuration(state.duration);
+      setGenerateAudio(state.generateAudio);
+      setCameraFixed(state.cameraFixed);
+      setWatermark(state.watermark);
+      setSeed(state.seed);
+      setImageModelId(state.imageModelId);
+      setImageRatio(state.imageRatio);
+      setImageResolution(state.imageResolution);
+      setImageCount(state.imageCount);
+      setAssets(state.assets.map((asset) => ({ ...asset })));
+      setOpen(null);
+      setError("");
+      setDraftHydrated(true);
+      setDraftNotice(restore.omittedAssets
+        ? `已载入上次创作，${restore.omittedAssets} 个过期素材已移除`
+        : `已载入上次创作${state.assets.length ? ` · ${state.assets.length} 个参考素材` : ""}`);
+      return () => { active = false; controller.abort(); };
+    }
     void composerDraftCache.read(userId, sessionId).then(async (restored) => {
       if (!active || !restored) { if (active) setDraftHydrated(true); return; }
       const state = restored.state;
@@ -155,7 +186,7 @@ export function Composer({ models, compact, sessionId, onCreated, onImagesGenera
       if (state.prompt.trim() || state.assets.length || restored.droppedAssets) setDraftNotice(invalid ? `已恢复草稿，${invalid} 个过期素材已移除` : "已恢复上次未发送的内容");
     }).catch(() => { if (active) setDraftHydrated(true); });
     return () => { active = false; controller.abort(); };
-  }, [userId, sessionId]);
+  }, [userId, sessionId, restore?.nonce]);
   const draftState = useMemo<ComposerDraftState>(() => ({ engine, prompt, modelId, mode, ratio, resolution, duration, generateAudio, cameraFixed, watermark, seed, imageModelId, imageRatio, imageResolution, imageCount, assets }), [engine, prompt, modelId, mode, ratio, resolution, duration, generateAudio, cameraFixed, watermark, seed, imageModelId, imageRatio, imageResolution, imageCount, assets]);
   useEffect(() => {
     if (!draftHydrated) return;
@@ -250,6 +281,7 @@ export function Composer({ models, compact, sessionId, onCreated, onImagesGenera
     const clearSubmittedComposer = () => {
       setPrompt(""); clearAttachedAssets();
       clearComposerDraftInBackground(composerDraftCache, userId, sessionId);
+      onRestoreConsumed?.();
     };
     try {
       if (engine === "image") {
@@ -305,7 +337,7 @@ export function Composer({ models, compact, sessionId, onCreated, onImagesGenera
       {!!assets.length && <div className="asset-strip">{assets.map((asset, index) => <div className="asset-chip" key={asset.id}>{asset.preview ? <RecoveringThumbnail src={asset.preview} alt={asset.name || "参考素材"} fallbackClassName="asset-chip__media" manualRecovery={false} /> : asset.type === "image" ? <ImageIcon /> : asset.type === "video" ? <Video /> : <AudioLines />}<span><b>{asset.role === "first_frame" ? "首帧" : asset.role === "last_frame" ? "尾帧" : `${asset.type === "image" ? "图片" : asset.type === "video" ? "视频" : "音频"} ${index + 1}`}</b><small>{asset.status === "Processing" ? "正在恢复素材引用" : asset.phase === "preparing" ? "正在检查图片" : asset.phase === "verifying" ? `${asset.name} · 已上传，可立即生成` : asset.progress === 100 ? `${asset.name}${asset.normalized ? " · 已自动补白" : ""}` : `上传 ${asset.progress ?? 0}%`}</small></span>{asset.progress !== 100 && <i style={{ width: `${asset.progress ?? 0}%` }} />}<button onClick={() => removeAttachedAsset(asset.id)}><X /></button></div>)}</div>}
       <div className={`prompt-row ${referenceSlots.length > 1 ? "prompt-row--dual" : ""} ${!referenceSlots.length ? "prompt-row--text" : ""}`}>
         {!!referenceSlots.length && <div className="reference-slots">{referenceSlots.map((label, index) => <button className="add-reference" key={label} onClick={() => { void persistPrivateMediaStorage(); fileInput.current?.click(); }} disabled={(mode === "first_frame" && assets.length >= 1) || (mode === "first_last" && assets.length > index)}><Plus /><span>{label}</span></button>)}</div>}
-        <PromptEditor value={prompt} change={setPrompt} placeholder={engine === "image" ? "描述你想生成的画面；上传参考图即可进行图生图……" : modePlaceholders[mode]} assets={assets} disabled={mode === "text" && engine === "video"} attach={attachMentionAsset} />
+        <PromptEditor value={prompt} change={setPrompt} placeholder={engine === "image" ? "描述你想生成的画面；上传参考图即可进行图生图……" : modePlaceholders[mode]} assets={assets} disabled={mode === "text" && engine === "video"} attach={attachMentionAsset} focusSignal={restore?.targetSessionId === sessionId ? restore.nonce : undefined} />
         <input ref={fileInput} hidden type="file" multiple={mode !== "first_frame"} accept={fileAccept} onChange={(e) => pickFiles(e.target.files)} />
       </div>
       <div className="control-row">

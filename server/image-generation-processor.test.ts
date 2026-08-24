@@ -16,6 +16,7 @@ const taskFixture = (requestedCount = 1): ImageGenerationTask => ({
   ratio: "16:9",
   resolution: "1024",
   prompt: "cinematic firefly",
+  referenceUploadIds: [],
   requestedCount,
   status: "running",
   items: [],

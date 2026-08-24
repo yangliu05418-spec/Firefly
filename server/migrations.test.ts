@@ -23,11 +23,12 @@ describe("versioned database migrations", () => {
     const database = new Database(target, { readonly: true });
     expect(schemaVersion(database)).toBe(CURRENT_SCHEMA_VERSION);
     expect(assertSchemaVersion(database)).toBe(CURRENT_SCHEMA_VERSION);
-    expect((database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number }).count).toBe(8);
+    expect((database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number }).count).toBe(9);
     const assetColumns = (database.prepare("PRAGMA table_info(user_assets)").all() as { name: string }[]).map((column) => column.name);
     expect(assetColumns).toEqual(expect.arrayContaining(["category", "provider_asset_id", "last_error"]));
     expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='canvas_project_assets'").get() as { name: string }).name).toBe("canvas_project_assets");
     expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='image_generation_tasks'").get() as { name: string }).name).toBe("image_generation_tasks");
+    expect((database.prepare("PRAGMA table_info(image_generation_tasks)").all() as { name: string }[]).map((column) => column.name)).toContain("references_json");
     expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='creation_sessions'").get() as { name: string }).name).toBe("creation_sessions");
     expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='async_job_outbox'").get() as { name: string }).name).toBe("async_job_outbox");
     expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='upload_sessions'").get() as { name: string }).name).toBe("upload_sessions");
@@ -82,7 +83,7 @@ describe("versioned database migrations", () => {
     const target = databasePath();
     migrateDatabase(target);
     const database = new Database(target);
-    database.exec("DELETE FROM schema_migrations WHERE version = 8; DROP TABLE upload_sessions");
+    database.exec("DELETE FROM schema_migrations WHERE version >= 8; DROP TABLE upload_sessions");
     database.close();
     expect(migrateDatabase(target)).toBe(CURRENT_SCHEMA_VERSION);
     const upgraded = new Database(target, { readonly: true });
@@ -90,11 +91,26 @@ describe("versioned database migrations", () => {
     upgraded.close();
   });
 
+  it("upgrades schema eight without changing existing image history", () => {
+    const target = databasePath();
+    migrateDatabase(target);
+    const database = new Database(target);
+    database.prepare("DELETE FROM schema_migrations WHERE version = 9").run();
+    database.exec("ALTER TABLE image_generation_tasks DROP COLUMN references_json");
+    database.prepare(`INSERT INTO image_generation_tasks (id, session_id, owner_id, model, model_name, ratio, resolution, prompt, requested_count, status, items_json, failures_json, created_at, updated_at) VALUES ('image-old', NULL, 'owner-1', 'model-1', 'Model', '1:1', '1024', 'Prompt', 1, 'failed', '[]', '[]', 1, 1)`).run();
+    database.close();
+
+    expect(migrateDatabase(target)).toBe(CURRENT_SCHEMA_VERSION);
+    const upgraded = new Database(target, { readonly: true });
+    expect(upgraded.prepare("SELECT prompt, references_json FROM image_generation_tasks WHERE id = 'image-old'").get()).toMatchObject({ prompt: "Prompt", references_json: "[]" });
+    upgraded.close();
+  });
+
   it("rejects a database newer than the rollback compatibility ceiling", () => {
     const target = databasePath();
     migrateDatabase(target);
     const database = new Database(target);
-    database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (9, 'future-incompatible', ?)").run(Date.now());
+    database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (10, 'future-incompatible', ?)").run(Date.now());
     database.close();
     expect(() => migrateDatabase(target)).toThrow("newer than this release");
     const incompatible = new Database(target, { readonly: true });

@@ -43,14 +43,14 @@ const json = (route: Route, body: unknown, status = 200) => route.fulfill({ stat
 async function mockAuthenticatedApi(page: Page, options: {
   leaseHeld?: boolean; expireLeaseOnce?: boolean; document?: CanvasDocumentV2; imageGenerationDelayMs?: number; projectAssets?: CanvasProjectAsset[];
   creationSessions?: Array<{ id: string; title: string; createdAt: number; updatedAt: number }>;
-  imageHistory?: Array<Record<string, unknown>>; imageSessionFailures?: string[]; holdGenerationAdmission?: boolean; generationAdmissionResponseLost?: boolean; creationSessionAdmissionResponseLost?: boolean;
+  imageHistory?: Array<Record<string, unknown>>; videoHistory?: Array<Record<string, unknown>>; imageSessionFailures?: string[]; holdGenerationAdmission?: boolean; generationAdmissionResponseLost?: boolean; creationSessionAdmissionResponseLost?: boolean;
   authSessionFailures?: number;
 } = {}) {
   let revision = 0;
   let storedDocument = structuredClone(options.document ?? documentV2);
   let leaseReleaseCount = 0;
   let imageHistory: Array<Record<string, unknown>> = structuredClone(options.imageHistory ?? []);
-  let videoHistory: Array<Record<string, unknown>> = [];
+  let videoHistory: Array<Record<string, unknown>> = structuredClone(options.videoHistory ?? []);
   let creationSessions = structuredClone(options.creationSessions ?? [{ id: "session-e2e", title: "新创作", createdAt: Date.now(), updatedAt: Date.now() }]);
   const postedSessionRequests: string[] = [];
   const postedGenerations: Array<Record<string, unknown>> = [];
@@ -108,6 +108,11 @@ async function mockAuthenticatedApi(page: Page, options: {
       const task = imageHistory.find((item) => item.id === decodeURIComponent(path.split("/").at(-1)!));
       return task ? json(route, task) : json(route, { error: "图片任务不存在" }, 404);
     }
+    if (/^\/api\/image-generations\/[^/]+\/reedit$/.test(path) && request.method() === "GET") {
+      const task = imageHistory.find((item) => item.id === decodeURIComponent(path.split("/").at(-2)!));
+      if (!task) return json(route, { error: "图片任务不存在" }, 404);
+      return json(route, { sourceId: task.id, sourceType: "image", sessionId: task.sessionId, omittedAssets: 0, state: { engine: "image", prompt: task.prompt, modelId: videoModels[0].id, mode: "omni", ratio: "16:9", resolution: "720p", duration: 4, generateAudio: true, cameraFixed: false, watermark: false, seed: -1, imageModelId: imageModels[0].id, imageRatio: task.ratio, imageResolution: task.resolution, imageCount: task.requestedCount, assets: [] } });
+    }
     if (path === "/api/image-generation" && request.method() === "POST") {
       const body = request.postDataJSON() as { requestId: string; sessionId: string; prompt: string; ratio: string; resolution: string; count: number };
       const pending = { id: body.requestId, sessionId: body.sessionId, modelName: imageModels[0].name, ratio: body.ratio, resolution: body.resolution, prompt: body.prompt, requestedCount: body.count, status: "generating", items: [], failed: [], createdAt: Date.now() };
@@ -133,6 +138,12 @@ async function mockAuthenticatedApi(page: Page, options: {
       const task = videoHistory.find((item) => item.id === decodeURIComponent(path.split("/").at(-1)!));
       return task ? json(route, task) : json(route, { error: "任务不存在" }, 404);
     }
+    if (/^\/api\/generations\/[^/]+\/reedit$/.test(path) && request.method() === "GET") {
+      const task = videoHistory.find((item) => item.id === decodeURIComponent(path.split("/").at(-2)!));
+      if (!task) return json(route, { error: "任务不存在" }, 404);
+      return json(route, { sourceId: task.id, sourceType: "video", sessionId: task.sessionId, omittedAssets: 0, state: { engine: "video", prompt: task.prompt, modelId: task.model, mode: task.mode, ratio: task.ratio, resolution: task.resolution, duration: task.duration, generateAudio: false, cameraFixed: true, watermark: false, seed: 42, imageModelId: "", imageRatio: "1:1", imageResolution: "", imageCount: 1, assets: [{ id: "reedit-reference", uploadId: "upload-reedit-1234567890123456", name: "角色参考.png", type: "image", size: 128, role: "reference_image", progress: 100, phase: "ready", preview: "/api/uploads/upload-reedit-1234567890123456/source?variant=thumbnail" }] } });
+    }
+    if (path === "/api/uploads/upload-reedit-1234567890123456/source") return route.fulfill({ status: 200, contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><path fill="#b8d9cf" d="M0 0h8v8H0z"/></svg>' });
     if (path === "/api/assets") return json(route, { Items: [], HasMore: false });
     if (path === "/api/canvas/config") return json(route, { enabled: true });
     if (path === "/api/canvases/canvas-e2e/lease" && request.method() === "POST") {
@@ -230,6 +241,28 @@ test("studio recovers transient session bootstrap failures without showing a fal
   await expect(page.locator(".prompt-editor")).toBeVisible({ timeout: 30_000 });
   await expect.poll(mock.authSessionRequests).toBe(3);
   expect(await page.evaluate(() => (window as typeof window & { __feishuLoginSeen: boolean }).__feishuLoginSeen)).toBe(false);
+});
+
+test("completed creation can be loaded back into the composer without a page refresh", async ({ page }) => {
+  const createdAt = Date.now() - 60_000;
+  await mockAuthenticatedApi(page, { videoHistory: [{
+    id: "video-reedit-e2e", sessionId: "session-e2e", caseId: "video-reedit-e2e", visibility: "private",
+    status: "failed", mediaStatus: "none", prompt: "雨夜街道上的低机位跟拍", model: videoModels[0].id,
+    mode: "omni", ratio: "9:16", resolution: "1080p", duration: 8, error: "上游暂时繁忙", createdAt, updatedAt: createdAt,
+  }] });
+  await page.goto("/studio/sessions/session-e2e");
+
+  const editor = page.getByRole("textbox", { name: "创作提示词" });
+  await expect(editor).toBeVisible();
+  await page.getByRole("button", { name: "重新编辑" }).click();
+
+  await expect(editor).toContainText("雨夜街道上的低机位跟拍");
+  await expect(editor).toBeFocused();
+  await expect(page.locator(".composer-draft-status")).toContainText("已载入上次创作");
+  await expect(page.locator(".asset-chip")).toContainText("角色参考.png");
+  await expect(page).toHaveURL(/\/studio\/sessions\/session-e2e$/);
+  await expect(page.locator(".control-row")).toContainText("全能参考");
+  await expect(page.locator(".control-row")).toContainText("1080p");
 });
 
 test("composer keeps uploaded assets available through the inline mention picker", async ({ page }) => {

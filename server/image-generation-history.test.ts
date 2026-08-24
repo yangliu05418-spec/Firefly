@@ -20,7 +20,7 @@ describe("image generation history", () => {
 
   const makeTask = (id: string, ownerId: string, createdAt: number): ImageGenerationTask => ({
     id, ownerId, model: "model-1", modelName: "Nano Banana", ratio: "1:1", resolution: "1024",
-    prompt: "雨夜窗边的台灯", requestedCount: 1, status: "running", items: [], failures: [],
+    prompt: "雨夜窗边的台灯", referenceUploadIds: [], requestedCount: 1, status: "running", items: [], failures: [],
     createdAt, updatedAt: createdAt,
   });
 
@@ -28,14 +28,14 @@ describe("image generation history", () => {
     const store = freshStore();
     const owner = store.upsertFromFeishu({ openId: "ou_owner", unionId: "on_owner", tenantKey: "tenant", email: "owner@dokuai.tv", name: "Owner", avatarUrl: "" });
     const other = store.upsertFromFeishu({ openId: "ou_other", unionId: "on_other", tenantKey: "tenant", email: "other@dokuai.tv", name: "Other", avatarUrl: "" });
-    store.createImageGeneration(makeTask("image-task-1", owner.id, 10));
+    store.createImageGeneration({ ...makeTask("image-task-1", owner.id, 10), referenceUploadIds: ["upload-reference-1234567890"] });
     store.createImageGeneration(makeTask("image-task-2", other.id, 20));
 
     store.updateImageGeneration("image-task-1", owner.id, { status: "succeeded", items: [{ mediaId: "gen-1" }], failures: [] });
     expect(store.listImageGenerations(owner.id).map((task) => task.id)).toEqual(["image-task-1"]);
     expect(store.listImageGenerations(other.id).map((task) => task.id)).toEqual(["image-task-2"]);
     expect(publicImageGeneration(store.readImageGeneration("image-task-1")!)).not.toHaveProperty("ownerId");
-    expect(store.readImageGeneration("image-task-1")).toMatchObject({ status: "succeeded", items: [{ mediaId: "gen-1" }] });
+    expect(store.readImageGeneration("image-task-1")).toMatchObject({ status: "succeeded", referenceUploadIds: ["upload-reference-1234567890"], items: [{ mediaId: "gen-1" }] });
     store.close();
   });
 

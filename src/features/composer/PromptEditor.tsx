@@ -17,9 +17,10 @@ type PromptEditorProps = {
   disabled: boolean;
   attach: (asset: UploadAsset) => UploadAsset | null;
   change: (value: string) => void;
+  focusSignal?: number;
 };
 
-export function PromptEditor({ value, placeholder, assets, disabled, attach, change }: PromptEditorProps) {
+export function PromptEditor({ value, placeholder, assets, disabled, attach, change, focusSignal }: PromptEditorProps) {
   const userId = useAssetCacheUserId();
   const editor = useRef<HTMLDivElement>(null); const mentionRange = useRef<Range | null>(null);
   const [open, setOpen] = useState(false); const [query, setQuery] = useState(""); const [active, setActive] = useState(0); const [anchor, setAnchor] = useState({ left: 12, top: 12, above: false });
@@ -42,6 +43,21 @@ export function PromptEditor({ value, placeholder, assets, disabled, attach, cha
     });
     if (rendered !== value || staleToken) renderPromptValue(node, value, assets);
   }, [value, assets]);
+  useEffect(() => {
+    if (!focusSignal || !editor.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      const node = editor.current;
+      if (!node) return;
+      node.focus({ preventScroll: true });
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      range.collapse(false);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [focusSignal]);
   useEffect(() => {
     if (!editor.current) return;
     const attached = new Set(assets.map((asset) => asset.id)); let removed = false;

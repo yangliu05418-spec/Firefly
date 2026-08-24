@@ -44,6 +44,7 @@ import { canvasGeneratedMediaId } from "./canvas-job-media.js";
 import { MediaValidationError, validateMedia } from "./media-validation.js";
 import { withinDeadline } from "./deadline.js";
 import { startAsyncJobControlPlane } from "./async-job-control-plane.js";
+import { buildImageReeditPayload, buildVideoReeditPayload } from "./generation-reedit.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -266,6 +267,22 @@ const respondUploadState = async (res: express.Response, uploadId: string, owner
 app.get("/api/uploads/:id", requireAuth, async (req, res) => {
   try { return await respondUploadState(res, param(req.params.id), (res.locals.user as SessionUser).id); }
   catch (error) { respondError(res, error, 500); }
+});
+
+app.get("/api/uploads/:id/source", requireAuth, async (req, res) => {
+  try {
+    const user = res.locals.user as SessionUser;
+    const media = users.readUpload(param(req.params.id));
+    const retentionMs = config.tosInputRetentionDays * 24 * 60 * 60 * 1000;
+    const expiredInput = Boolean(media?.objectKey.startsWith("inputs/") && Date.now() - media.createdAt >= retentionMs);
+    if (!media || media.ownerId !== user.id || media.status !== "ready" || expiredInput) return res.status(404).json({ error: "素材源文件不存在或已过期" });
+    res.setHeader("Cache-Control", previewRedirectCacheHeader);
+    res.setHeader("Vary", "Cookie");
+    const process = req.query.variant === "thumbnail" && media.contentType.startsWith("image/")
+      ? "image/resize,w_640/format,webp"
+      : undefined;
+    res.redirect(302, await stablePreviewUrl({ objectKey: media.objectKey, fileName: media.fileName, process }));
+  } catch (error) { respondError(res, error, 502); }
 });
 
 app.post("/api/uploads/:id/chunks", requireAuth, express.raw({ type: "application/octet-stream", limit: "17mb" }), async (req, res) => {
@@ -532,6 +549,20 @@ app.get("/api/generations", requireAuth, async (req, res) => {
 app.get("/api/generations/:id", requireAuth, async (req, res) => {
   const task = await readTask(param(req.params.id));
   task && canAccessTask(task, (res.locals.user as SessionUser).id) ? res.json(publicGenerationTask(task)) : res.status(404).json({ error: "任务不存在或已过期" });
+});
+
+const reeditDependencies = {
+  readUploadState: (uploadId: string) => users.readUploadState(uploadId),
+  readUserAsset: (assetId: string) => users.readUserAsset(assetId),
+  now: () => Date.now(),
+  inputRetentionDays: config.tosInputRetentionDays,
+};
+
+app.get("/api/generations/:id/reedit", requireAuth, async (req, res) => {
+  const user = res.locals.user as SessionUser;
+  const task = await readTask(param(req.params.id));
+  if (!task || task.ownerId !== user.id) return res.status(404).json({ error: "任务不存在或无权访问" });
+  res.json(buildVideoReeditPayload(task, user.id, reeditDependencies));
 });
 
 const accessibleTask = async (req: express.Request, res: express.Response) => {
@@ -807,6 +838,13 @@ app.get("/api/image-generations/:id", requireAuth, (req, res) => {
   task && task.ownerId === user.id ? res.json(publicImageGeneration(task)) : res.status(404).json({ error: "图片任务不存在" });
 });
 
+app.get("/api/image-generations/:id/reedit", requireAuth, (req, res) => {
+  const user = res.locals.user as SessionUser;
+  const task = users.readImageGeneration(param(req.params.id));
+  if (!task || task.ownerId !== user.id) return res.status(404).json({ error: "图片任务不存在或无权访问" });
+  res.json(buildImageReeditPayload(task, user.id, MODELS[0]?.id ?? "", reeditDependencies));
+});
+
 app.delete("/api/image-generations/:id", requireAuth, (req, res) => {
   const user = res.locals.user as SessionUser;
   const taskId = param(req.params.id);
@@ -847,7 +885,7 @@ app.post("/api/image-generation", requireAuth, async (req, res) => {
     const startedAt = Date.now();
     const activeTask: ImageGenerationTask = {
       id: requestId, sessionId: activeSession.id, ownerId: user.id, model: body.model, modelName: spec.name, ratio: body.ratio,
-      resolution: body.resolution, prompt: body.prompt, requestedCount: body.count, status: "running",
+      resolution: body.resolution, prompt: body.prompt, referenceUploadIds: body.references, requestedCount: body.count, status: "running",
       items: [], failures: [], createdAt: startedAt, updatedAt: startedAt,
     };
     const payload = {
