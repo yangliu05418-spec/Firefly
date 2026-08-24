@@ -1,4 +1,4 @@
-import { AssetApiError, callAssetApi } from "./asset-api.js";
+import { AssetApiError, AUTO_REFERENCE_GROUP_TYPE, callAssetApi } from "./asset-api.js";
 import { ensureAutoReferenceGroup } from "./asset-registration.js";
 import type { UserAsset } from "./db.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
@@ -64,7 +64,7 @@ const isAmbiguousCreateFailure = (error: unknown) => !(error instanceof AssetApi
 
 const reconcileCreatedAsset = async (asset: UserAsset, groupId: string, providerName: string, deps: AssetIngestDependencies) => {
   const result = await deps.callAsset<{ Items?: ProviderAssetRecord[] }>("ListAssets", {
-    Filter: { GroupIds: [groupId], Name: providerName },
+    Filter: { GroupType: AUTO_REFERENCE_GROUP_TYPE, GroupIds: [groupId], Name: providerName },
     PageNumber: 1,
     PageSize: 100,
   });

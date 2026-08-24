@@ -30,6 +30,9 @@ describe("trusted asset registration", () => {
       resolveMediaUrl: vi.fn(async () => "https://tos.example/asset") as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 1)
     });
     expect(result.assets[0]).toMatchObject({ uploadId: "upload-12345678901234567890", assetId: "asset-1" });
+    expect(callAsset).toHaveBeenCalledWith("ListAssets", expect.objectContaining({
+      Filter: expect.objectContaining({ GroupType: "AIGC", GroupIds: ["group-1"] })
+    }));
     expect(callAsset).toHaveBeenCalledWith("CreateAsset", expect.objectContaining({ GroupId: "group-1", AssetType: "Image" }));
     expect(buildProviderPayload(result).content).toEqual([
       { type: "text", text: "Image 1 walks through a room" },

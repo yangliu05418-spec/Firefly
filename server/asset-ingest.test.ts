@@ -36,6 +36,9 @@ describe("background asset ingestion", () => {
   it("persists the provider id and activates a TOS upload without blocking the upload request", async () => {
     const context = setup();
     await registerQueuedAsset("asset-local-1", context.deps);
+    expect(context.callAsset).toHaveBeenCalledWith("ListAssets", expect.objectContaining({
+      Filter: expect.objectContaining({ GroupType: "AIGC", GroupIds: ["group-1"] })
+    }));
     expect(context.callAsset).toHaveBeenCalledWith("CreateAsset", expect.objectContaining({ GroupId: "group-1", AssetType: "Image" }));
     expect(context.stored()).toMatchObject({ id: "asset-local-1", providerAssetId: "asset-provider-1", status: "Active", url: "https://provider.example/actor.png" });
   });

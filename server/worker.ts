@@ -16,6 +16,7 @@ import { pollProviderTaskUntilTerminal, ProviderPollingTerminalError } from "./p
 import { generationReplayAction } from "./generation-replay.js";
 import { canKeepPreparingReference, UploadReferencePendingError } from "./asset-upload-admission.js";
 import { requeueExhaustedAsyncJob } from "./async-job-outbox.js";
+import { AssetApiError } from "./asset-api.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const archiveRecoveryBucketMs = 15 * 60 * 1000;
@@ -50,7 +51,22 @@ const processGenerationJob = async (job: Job<{ input: unknown }>) => {
     if (!task.ownerId) throw new UnrecoverableError("任务缺少素材所有者信息");
     input = resolveCanvasGenerationReferences(input, task.ownerId);
     try { input = await prepareProviderAssets(input, task.ownerId); }
-    catch (error) { if (error instanceof AssetRegistrationRejected && !isRetryableAssetRejection(error)) throw new UnrecoverableError(error.message); throw error; }
+    catch (error) {
+      console.warn(JSON.stringify({
+        type: "generation_reference_prepare_failed",
+        at: new Date().toISOString(),
+        taskId: task.id,
+        userId: task.ownerId,
+        attempt: job.attemptsMade + 1,
+        providerAction: error instanceof AssetApiError ? error.action : undefined,
+        providerCode: error instanceof AssetApiError ? error.providerCode : (error as { code?: string }).code,
+        providerStatus: error instanceof AssetApiError ? error.status : undefined,
+        retryable: error instanceof AssetApiError ? error.retryable : undefined
+      }));
+      if (error instanceof AssetRegistrationRejected && !isRetryableAssetRejection(error)) throw new UnrecoverableError(error.message);
+      if (error instanceof AssetApiError && !error.retryable) throw new UnrecoverableError(error.message);
+      throw error;
+    }
     console.info(JSON.stringify({ type: "generation_submitting", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt: job.attemptsMade + 1 }));
     task = await submitProviderTaskOnce(task, input, { save: saveTask });
     console.info(JSON.stringify({ type: "generation_submitted", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, providerId: task.providerId }));
