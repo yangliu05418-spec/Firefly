@@ -50,6 +50,7 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
   const [generateAudio, setGenerateAudio] = useState(true); const [cameraFixed, setCameraFixed] = useState(false); const [watermark, setWatermark] = useState(false); const [seed, setSeed] = useState(-1);
   const [loading, setLoading] = useState(false); const [error, setError] = useState(""); const fileInput = useRef<HTMLInputElement>(null);
   const [draftHydrated, setDraftHydrated] = useState(false); const [draftNotice, setDraftNotice] = useState("");
+  const [promptFocusSignal, setPromptFocusSignal] = useState<number | undefined>();
   const uploadControllers = useRef(new Map<string, AbortController>());
   const localPreviewUrls = useRef(new Set<string>());
   const consumedRestore = useRef<number | null>(null);
@@ -133,6 +134,7 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
       localPreviewUrls.current.clear();
       setEngine(state.engine);
       setPrompt(state.prompt);
+      setPromptFocusSignal(restore.nonce);
       setModelId(models.some((item) => item.id === state.modelId) ? state.modelId : (defaultModel?.id ?? ""));
       setMode(state.mode);
       setRatio(state.ratio);
@@ -369,7 +371,7 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
       {!!assets.length && <div className="asset-strip">{assets.map((asset) => <div className="asset-chip" key={referenceBindingId(asset)}>{asset.preview ? <RecoveringThumbnail src={asset.preview} alt={asset.name || "参考素材"} loading="lazy" decoding="async" fallbackClassName="asset-chip__media" manualRecovery={false} /> : asset.type === "image" ? <ImageIcon /> : asset.type === "video" ? <Video /> : <AudioLines />}<span><b>{asset.role === "first_frame" ? "首帧" : asset.role === "last_frame" ? "尾帧" : promptAssetLabel(asset, assets).replace("Image", "图片").replace("Video", "视频").replace("Audio", "音频")}</b><small>{asset.status === "Processing" ? "正在恢复素材引用" : asset.phase === "preparing" ? "正在检查图片" : asset.phase === "verifying" ? `${asset.name} · 已上传，可立即生成` : asset.progress === 100 ? `${asset.name}${asset.normalized ? " · 已自动补白" : ""}` : `上传 ${asset.progress ?? 0}%`}</small></span>{asset.progress !== 100 && <i style={{ width: `${asset.progress ?? 0}%` }} />}<button aria-label={`移除 ${asset.name}`} onClick={() => removeAttachedAsset(asset.id)}><X /></button></div>)}</div>}
       <div className={`prompt-row ${referenceSlots.length > 1 ? "prompt-row--dual" : ""} ${!referenceSlots.length ? "prompt-row--text" : ""}`}>
         {!!referenceSlots.length && <div className="reference-slots">{referenceSlots.map((label, index) => <button className="add-reference" key={label} onClick={() => { void persistPrivateMediaStorage(); fileInput.current?.click(); }} disabled={(mode === "first_frame" && assets.length >= 1) || (mode === "first_last" && assets.length > index)}><Plus /><span>{label}</span></button>)}</div>}
-        <PromptEditor value={prompt} change={setPrompt} placeholder={engine === "image" ? "描述你想生成的画面；上传参考图即可进行图生图……" : modePlaceholders[mode]} assets={assets} disabled={mode === "text" && engine === "video"} attach={attachMentionAsset} focusSignal={restore?.targetSessionId === sessionId ? restore.nonce : undefined} />
+        <PromptEditor value={prompt} change={setPrompt} placeholder={engine === "image" ? "描述你想生成的画面；上传参考图即可进行图生图……" : modePlaceholders[mode]} assets={assets} disabled={mode === "text" && engine === "video"} attach={attachMentionAsset} focusSignal={promptFocusSignal} />
         <input ref={fileInput} hidden type="file" multiple={mode !== "first_frame"} accept={fileAccept} onChange={(e) => pickFiles(e.target.files)} />
       </div>
       <div className="control-row">
