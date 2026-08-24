@@ -173,7 +173,7 @@ async function uploadTosPart(uploadId: string, initial: SignedPart, blob: Blob, 
   throw lastError ?? new Error("TOS 分片上传失败");
 }
 
-export type UploadedFile = { id: string; uploadId?: string; name: string; type: UploadKind; size: number; url?: string; normalized?: boolean };
+export type UploadedFile = { id: string; uploadId?: string; name: string; type: UploadKind; size: number; url?: string; normalized?: boolean; expiresAt?: number };
 type UploadCompletionResponse = UploadedFile & { state?: "processing" | "ready" };
 export type UploadProgressPhase = "preparing" | "uploading" | "verifying" | "ready";
 export type UploadFileOptions = { signal?: AbortSignal; onTransportComplete?: (upload: UploadedFile) => void; onPreparedPreview?: (blob: Blob) => void; waitForReady?: boolean };

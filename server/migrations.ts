@@ -2,10 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 
-export const CURRENT_SCHEMA_VERSION = 9;
-// Keep the rollback release readable after the expand-only re-edit schema lands.
-// This release never creates v10; it only tolerates it so a traffic rollback does
-// not strand the old web/workers on an otherwise backwards-compatible database.
+export const CURRENT_SCHEMA_VERSION = 10;
 export const MAX_SUPPORTED_SCHEMA_VERSION = 10;
 
 const baseSchema = `
@@ -421,6 +418,72 @@ const addImageGenerationReferences = (database: Database.Database) => {
   if (!columns.has("references_json")) database.exec("ALTER TABLE image_generation_tasks ADD COLUMN references_json TEXT NOT NULL DEFAULT '[]'");
 };
 
+const addCreationSnapshots = (database: Database.Database) => {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS creation_snapshots (
+      source_type TEXT NOT NULL CHECK (source_type IN ('video', 'image')),
+      source_id TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      session_id TEXT,
+      editor_prompt TEXT NOT NULL,
+      provider_prompt TEXT NOT NULL,
+      parameters_json TEXT NOT NULL,
+      binding_version INTEGER NOT NULL DEFAULT 1,
+      recovery_quality TEXT NOT NULL CHECK (recovery_quality IN ('exact', 'partial', 'unknown')),
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (source_type, source_id),
+      FOREIGN KEY (owner_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS creation_snapshots_owner_created_idx
+      ON creation_snapshots(owner_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS creation_snapshot_references (
+      id TEXT PRIMARY KEY,
+      source_type TEXT NOT NULL CHECK (source_type IN ('video', 'image')),
+      source_id TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      binding_id TEXT NOT NULL,
+      position INTEGER NOT NULL CHECK (position >= 0),
+      media_type TEXT NOT NULL CHECK (media_type IN ('image', 'video', 'audio')),
+      role TEXT NOT NULL CHECK (role IN ('reference_image', 'reference_video', 'reference_audio', 'first_frame', 'last_frame')),
+      display_name TEXT NOT NULL,
+      original_upload_id TEXT,
+      original_asset_id TEXT,
+      provider_asset_id TEXT,
+      source_object_key TEXT,
+      object_key TEXT,
+      content_type TEXT NOT NULL DEFAULT '',
+      size INTEGER NOT NULL DEFAULT 0,
+      etag TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL CHECK (status IN ('promoting', 'ready', 'unavailable', 'delete_pending', 'deleted')),
+      last_error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      deleted_at INTEGER,
+      UNIQUE (source_type, source_id, binding_id),
+      FOREIGN KEY (owner_id) REFERENCES users(id),
+      FOREIGN KEY (source_type, source_id) REFERENCES creation_snapshots(source_type, source_id)
+    );
+    CREATE INDEX IF NOT EXISTS creation_snapshot_references_source_idx
+      ON creation_snapshot_references(source_type, source_id, position);
+    CREATE INDEX IF NOT EXISTS creation_snapshot_references_status_idx
+      ON creation_snapshot_references(status, updated_at);
+
+    CREATE TABLE IF NOT EXISTS reedit_session_links (
+      owner_id TEXT NOT NULL,
+      source_type TEXT NOT NULL CHECK (source_type IN ('video', 'image')),
+      source_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (owner_id, source_type, source_id),
+      UNIQUE (session_id),
+      FOREIGN KEY (owner_id) REFERENCES users(id),
+      FOREIGN KEY (session_id) REFERENCES creation_sessions(id)
+    );
+  `);
+};
+
 export const migrateDatabase = (databasePath: string) => {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const database = new Database(databasePath);
@@ -467,6 +530,10 @@ export const migrateDatabase = (databasePath: string) => {
       if (version < 9) {
         addImageGenerationReferences(database);
         database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(9, "add-image-generation-references", Date.now());
+      }
+      if (version < 10) {
+        addCreationSnapshots(database);
+        database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(10, "add-creation-snapshots", Date.now());
       }
       assertSchemaVersion(database);
     }).exclusive();

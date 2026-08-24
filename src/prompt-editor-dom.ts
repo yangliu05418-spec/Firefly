@@ -1,4 +1,4 @@
-import { parsePromptReferences, promptAssetMarker } from "./prompt-references";
+import { parsePromptReferences, promptAssetMarker, referenceBindingId } from "./prompt-references";
 import type { UploadAsset } from "./types";
 
 export const promptNodeText = (node: Node): string => {
@@ -32,7 +32,7 @@ export const renderPromptValue = (editor: HTMLDivElement, value: string, assets:
   const fragment = document.createDocumentFragment();
   for (const part of parsePromptReferences(value)) {
     if (part.type === "text") fragment.append(document.createTextNode(part.value));
-    else fragment.append(createPromptAssetToken(assets.find((asset) => asset.id === part.id), part.id));
+    else fragment.append(createPromptAssetToken(assets.find((asset) => referenceBindingId(asset) === part.id || asset.id === part.id), part.id));
   }
   editor.replaceChildren(fragment);
 };

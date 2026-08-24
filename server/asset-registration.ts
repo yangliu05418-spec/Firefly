@@ -3,9 +3,11 @@ import { AssetApiError, AUTO_REFERENCE_GROUP_TYPE, callAssetApi } from "./asset-
 import { users } from "./store.js";
 import { redis } from "./redis.js";
 import { resolveUploadMediaUrl } from "./media-url.js";
+import { signedProviderObjectUrl } from "./tos.js";
 import { acquireAssetCreationLock, releaseAssetCreationLock } from "./upload-slots.js";
 import { providerAssetName } from "./asset-name.js";
 import { UploadReferencePendingError } from "./asset-upload-admission.js";
+import { deleteProviderAssetSafely } from "./asset-cleanup.js";
 
 import type { GenerationInput } from "./provider.js";
 
@@ -43,6 +45,9 @@ type RegistrationDeps = {
   now: () => number;
   readOwnedAsset?: (assetId: string, ownerId: string) => { providerAssetId?: string; status: "Active" | "Processing" | "Failed" } | null;
   readRegisteredAsset?: (ownerId: string, uploadId: string) => { id: string; providerAssetId?: string } | undefined;
+  readSnapshotReference?: typeof users.readCreationSnapshotReference;
+  updateSnapshotReference?: typeof users.updateCreationSnapshotReference;
+  resolveSnapshotMediaUrl?: (objectKey: string) => string;
   acquireAssetLock?: (ownerId: string, uploadId: string) => Promise<{ key: string; token: string } | null>;
   releaseAssetLock?: (lock: { key: string; token: string }) => Promise<unknown>;
   saveAsset?: (asset: { id: string; providerAssetId?: string; ownerId: string; groupId: string; uploadId?: string; name: string; assetType: "Image" | "Video" | "Audio"; status: "Active" | "Processing" | "Failed"; url?: string; createdAt: number; updatedAt: number }) => unknown;
@@ -60,6 +65,9 @@ const defaultDeps = () => productionDeps ??= {
   now: Date.now,
   readOwnedAsset: (assetId, ownerId) => { const asset = users.readUserAsset(assetId); return asset?.ownerId === ownerId ? asset : null; },
   readRegisteredAsset: (ownerId, uploadId) => users.readUserAssetByUpload(ownerId, uploadId) ?? undefined,
+  readSnapshotReference: users.readCreationSnapshotReference.bind(users),
+  updateSnapshotReference: users.updateCreationSnapshotReference.bind(users),
+  resolveSnapshotMediaUrl: signedProviderObjectUrl,
   acquireAssetLock: (ownerId, uploadId) => acquireAssetCreationLock(redis, ownerId, uploadId),
   releaseAssetLock: (lock) => releaseAssetCreationLock(redis, lock),
   saveAsset: (asset) => users.upsertUserAsset({ ...asset, category: users.readUserAsset(asset.id)?.category ?? "material" })
@@ -192,6 +200,99 @@ const registerUpload = async (uploadId: string, ownerId: string, name: string, i
   return assetId;
 };
 
+const registerSnapshotReference = async (referenceId: string, ownerId: string, name: string, inputType: "image" | "video" | "audio", deps: RegistrationDeps) => {
+  if (!deps.readSnapshotReference || !deps.updateSnapshotReference || !deps.resolveSnapshotMediaUrl) {
+    throw new AssetRegistrationRejected(`参考素材「${name}」无法完成可信资产注册`, "ASSET_PROVIDER_FAILED");
+  }
+  const cacheKey = `provider-snapshot-asset:${ownerId}:${referenceId}`;
+  let reference = deps.readSnapshotReference(referenceId);
+  if (!reference || reference.ownerId !== ownerId) throw new AssetRegistrationRejected(`参考素材「${name}」不属于当前用户`, "ASSET_NOT_OWNED");
+  if (reference.status !== "ready" || !reference.objectKey || reference.mediaType !== inputType) {
+    throw new AssetRegistrationRejected(`参考素材「${name}」尚未完成任务归档`, "ASSET_PROCESSING_TIMEOUT");
+  }
+  let cached = readCachedRegistration(await deps.cacheGet(cacheKey));
+  let assetId = reference.providerAssetId ?? cached.assetId;
+  let unknownSince = cached.unknownSince;
+  let creationLock: { key: string; token: string } | null = null;
+  let groupId = "";
+  const assetType: "Image" | "Video" | "Audio" = inputType === "video" ? "Video" : inputType === "audio" ? "Audio" : "Image";
+  const preserveForCleanup = async (providerAssetId: string) => {
+    deps.updateSnapshotReference!(referenceId, { status: "delete_pending", providerAssetId });
+    try {
+      await deleteProviderAssetSafely(providerAssetId, deps.callAsset);
+      deps.updateSnapshotReference!(referenceId, { providerAssetId: null });
+    } catch (error) {
+      console.warn(JSON.stringify({ type: "provider_snapshot_asset_delete_deferred", at: new Date().toISOString(), ownerId, referenceId, providerAssetId, code: (error as { code?: string }).code ?? "unknown" }));
+    }
+  };
+  if (!assetId && deps.acquireAssetLock) {
+    creationLock = await deps.acquireAssetLock(ownerId, `snapshot-${referenceId}`);
+    if (!creationLock) throw new AssetRegistrationRejected(`参考素材「${name}」正在可信资产注册中，请稍后重试`, "ASSET_PROCESSING_TIMEOUT");
+    reference = deps.readSnapshotReference(referenceId);
+    if (!reference || reference.ownerId !== ownerId) throw new AssetRegistrationRejected(`参考素材「${name}」不属于当前用户`, "ASSET_NOT_OWNED");
+    cached = readCachedRegistration(await deps.cacheGet(cacheKey));
+    assetId = reference.providerAssetId ?? cached.assetId;
+    unknownSince = cached.unknownSince;
+  }
+  try {
+    if (!assetId) {
+      if (reference.status !== "ready" || !reference.objectKey || reference.mediaType !== inputType) {
+        throw new AssetRegistrationRejected(`参考素材「${name}」尚未完成任务归档`, "ASSET_PROCESSING_TIMEOUT");
+      }
+      groupId = await ensureGroupId(deps);
+      const providerName = providerAssetName(name, `snapshot:${referenceId}`);
+      let created = await reconcileUploadAsset(groupId, providerName, assetType, deps);
+      if (!created) {
+        if (unknownSince !== undefined && deps.now() - unknownSince < UNKNOWN_CREATE_TTL_MS) {
+          throw new AssetRegistrationRejected(`参考素材「${name}」正在确认生成引用，请稍后重试`, "ASSET_PROCESSING_TIMEOUT");
+        }
+        try {
+          created = await deps.callAsset<AssetRecord>("CreateAsset", {
+            GroupId: groupId,
+            URL: deps.resolveSnapshotMediaUrl(reference.objectKey),
+            AssetType: assetType,
+            Name: providerName,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (/real[ -]?person|real human|真人|人脸/i.test(message)) {
+            throw new AssetRegistrationRejected(`参考素材「${name}」包含真人面孔，请先完成真人认证并加入真人资产库`, "ASSET_REAL_PERSON");
+          }
+          if (error instanceof AssetApiError && error.status < 500 && error.status !== 429) {
+            throw new AssetRegistrationRejected(`参考素材「${name}」注册失败：${message}`, "ASSET_PROVIDER_FAILED");
+          }
+          if (error instanceof AssetApiError && error.status === 429) {
+            throw new AssetRegistrationRejected(`参考素材服务繁忙，「${name}」将在稍后继续处理`, "ASSET_PROCESSING_TIMEOUT");
+          }
+          await deps.cacheSet(cacheKey, `${UNKNOWN_CREATE_CACHE_PREFIX}${deps.now()}`);
+          console.warn(JSON.stringify({ type: "provider_snapshot_asset_create_unknown", at: new Date().toISOString(), ownerId, referenceId, groupId, code: (error as { code?: string }).code ?? "unknown" }));
+          try { created = await reconcileUploadAsset(groupId, providerName, assetType, deps); }
+          catch { throw new AssetRegistrationRejected(`参考素材「${name}」正在确认生成引用，请稍后重试`, "ASSET_PROCESSING_TIMEOUT"); }
+          if (!created) throw new AssetRegistrationRejected(`参考素材「${name}」正在确认生成引用，请稍后重试`, "ASSET_PROCESSING_TIMEOUT");
+        }
+      }
+      assetId = created.Id;
+      const remembered = deps.updateSnapshotReference(referenceId, { providerAssetId: assetId, expectedStatus: "ready" });
+      if (!remembered) {
+        await preserveForCleanup(assetId);
+        throw new AssetRegistrationRejected(`参考素材「${name}」所属任务已被删除`, "ASSET_PROVIDER_FAILED");
+      }
+      await deps.cacheSet(cacheKey, assetId);
+      console.info(JSON.stringify({ type: "provider_snapshot_asset_registered", at: new Date().toISOString(), ownerId, referenceId, assetId, groupId }));
+    }
+  } finally {
+    if (creationLock && deps.releaseAssetLock) await deps.releaseAssetLock(creationLock).catch(() => undefined);
+  }
+  const active = await waitForActive(assetId, name, deps);
+  const activeReference = deps.updateSnapshotReference(referenceId, { providerAssetId: assetId, lastError: null, expectedStatus: "ready" });
+  if (!activeReference) {
+    await preserveForCleanup(assetId);
+    throw new AssetRegistrationRejected(`参考素材「${name}」所属任务已被删除`, "ASSET_PROVIDER_FAILED");
+  }
+  console.info(JSON.stringify({ type: "provider_snapshot_asset_active", at: new Date().toISOString(), ownerId, referenceId, assetId, groupId: active.GroupId ?? groupId }));
+  return assetId;
+};
+
 export const prepareProviderAssets = async (input: GenerationInput, ownerId: string, deps: RegistrationDeps = defaultDeps()): Promise<GenerationInput> => {
   if (!input.model.startsWith("dreamina-seedance-2-")) return input;
   const assets = new Array<GenerationInput["assets"][number]>(input.assets.length);
@@ -201,7 +302,10 @@ export const prepareProviderAssets = async (input: GenerationInput, ownerId: str
       const index = cursor++;
       const asset = input.assets[index];
       if (!asset) continue;
-      if (asset.assetId) {
+      if (asset.snapshotReferenceId) {
+        const assetId = await registerSnapshotReference(asset.snapshotReferenceId, ownerId, asset.name, asset.type, deps);
+        assets[index] = { ...asset, snapshotReferenceId: undefined, uploadId: undefined, assetId, url: undefined };
+      } else if (asset.assetId) {
         const owned = deps.readOwnedAsset?.(asset.assetId, ownerId);
         if (deps.readOwnedAsset && !owned) throw new AssetRegistrationRejected(`参考素材「${asset.name}」不属于当前用户`, "ASSET_NOT_OWNED");
         const providerAssetId = owned?.providerAssetId ?? (!asset.assetId.startsWith("asset-local-") ? asset.assetId : undefined);

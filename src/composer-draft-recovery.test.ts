@@ -7,6 +7,7 @@ const upload = (patch: Partial<UploadAsset> = {}): UploadAsset => ({ id: "upload
 const deps = (patch: Partial<ComposerDraftRecoveryDeps> = {}): ComposerDraftRecoveryDeps => ({
   getUpload: async () => ({ id: "upload-1", name: "frame.png", type: "image", size: 10, state: "ready" }),
   getAsset: async () => ({ Id: "asset-1", Name: "Hero", AssetType: "Image", Status: "Active", URL: "/api/assets/asset-1/source", GroupId: "group", Category: "character" }),
+  getSnapshotReference: async () => ({ id: "snapshot-1", bindingId: "binding-1", name: "Snapshot", type: "image", size: 10, state: "ready", preview: "/api/creation-references/snapshot-1/source?variant=thumbnail" }),
   wait: async () => undefined,
   now: () => 1_000,
   ...patch,
@@ -30,5 +31,10 @@ describe("composer draft asset recovery", () => {
   it("drops expired or failed references", async () => {
     expect(await recoverComposerDraftAsset(upload(), undefined, deps({ getUpload: async () => { throw new ApiError("gone", 404); } }))).toBeNull();
     expect(await recoverComposerDraftAsset(upload({ assetId: "asset-1" }), undefined, deps({ getAsset: async () => ({ Id: "asset-1", Name: "Hero", AssetType: "Image", Status: "Failed", GroupId: "group", Category: "character" }) }))).toBeNull();
+  });
+
+  it("restores a task-level immutable reference through a stable authenticated URL", async () => {
+    const result = await recoverComposerDraftAsset(upload({ id: "binding-1", uploadId: undefined, snapshotReferenceId: "snapshot-1", bindingId: "binding-1" }), undefined, deps());
+    expect(result).toMatchObject({ snapshotReferenceId: "snapshot-1", bindingId: "binding-1", phase: "ready", preview: "/api/creation-references/snapshot-1/source?variant=thumbnail" });
   });
 });

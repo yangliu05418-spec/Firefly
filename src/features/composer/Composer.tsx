@@ -5,7 +5,7 @@ import { useAssetCacheUserId } from "../../asset-cache-context";
 import { reconcileComposerAssets } from "../../composer-assets";
 import { clearComposerDraftInBackground, composerDraftCache, type ComposerDraftState } from "../../composer-draft-cache";
 import { recoverComposerDraftAsset } from "../../composer-draft-recovery";
-import { materializePromptReferences } from "../../prompt-references";
+import { materializePromptReferences, promptAssetLabel, referenceBindingId } from "../../prompt-references";
 import { RecoveringThumbnail } from "../../recovering-image";
 import { isAmbiguousSubmissionFailure } from "../../studio-sync";
 import type { CreationMode, ImageGenResponse, ImageResultBundle, ModelCapability, Task, UploadAsset } from "../../types";
@@ -52,6 +52,9 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
   const [draftHydrated, setDraftHydrated] = useState(false); const [draftNotice, setDraftNotice] = useState("");
   const uploadControllers = useRef(new Map<string, AbortController>());
   const localPreviewUrls = useRef(new Set<string>());
+  const consumedRestore = useRef<number | null>(null);
+  const restoringDraft = useRef(false);
+  const skipHydrationAfterRestore = useRef<string | null>(null);
 
   const releaseLocalPreview = (url?: string) => {
     if (url && localPreviewUrls.current.delete(url)) URL.revokeObjectURL(url);
@@ -122,6 +125,8 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
     setDraftHydrated(false);
     if (restore?.targetSessionId === sessionId) {
       const state = restore.state;
+      restoringDraft.current = true;
+      skipHydrationAfterRestore.current = sessionId;
       for (const transfer of uploadControllers.current.values()) transfer.abort();
       uploadControllers.current.clear();
       for (const url of localPreviewUrls.current) URL.revokeObjectURL(url);
@@ -146,8 +151,28 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
       setError("");
       setDraftHydrated(true);
       setDraftNotice(restore.omittedAssets
-        ? `已载入上次创作，${restore.omittedAssets} 个过期素材已移除`
+        ? `已载入上次创作，${restore.omittedAssets} 个素材暂未恢复`
         : `已载入上次创作${state.assets.length ? ` · ${state.assets.length} 个参考素材` : ""}`);
+      if (consumedRestore.current !== restore.nonce) {
+        consumedRestore.current = restore.nonce;
+        // Re-assert the accepted snapshot after any already-scheduled autosave
+        // from the previous draft. Consume the one-shot intent only once the
+        // durable browser draft reflects the state visible in the composer.
+        void composerDraftCache.write(userId, sessionId, state).finally(() => {
+          restoringDraft.current = false;
+          if (active) onRestoreConsumed?.();
+        });
+      } else {
+        restoringDraft.current = false;
+      }
+      return () => { active = false; controller.abort(); };
+    }
+    // Clearing the consumed one-shot intent changes the prop but does not
+    // represent a new session. Re-reading the same IndexedDB record here would
+    // replace the precise restore notice and needlessly revalidate every asset.
+    if (skipHydrationAfterRestore.current === sessionId) {
+      skipHydrationAfterRestore.current = null;
+      setDraftHydrated(true);
       return () => { active = false; controller.abort(); };
     }
     void composerDraftCache.read(userId, sessionId).then(async (restored) => {
@@ -190,7 +215,9 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
   const draftState = useMemo<ComposerDraftState>(() => ({ engine, prompt, modelId, mode, ratio, resolution, duration, generateAudio, cameraFixed, watermark, seed, imageModelId, imageRatio, imageResolution, imageCount, assets }), [engine, prompt, modelId, mode, ratio, resolution, duration, generateAudio, cameraFixed, watermark, seed, imageModelId, imageRatio, imageResolution, imageCount, assets]);
   useEffect(() => {
     if (!draftHydrated) return;
-    const timer = window.setTimeout(() => { void composerDraftCache.write(userId, sessionId, draftState); }, 350);
+    const timer = window.setTimeout(() => {
+      if (!restoringDraft.current) void composerDraftCache.write(userId, sessionId, draftState);
+    }, 350);
     return () => window.clearTimeout(timer);
   }, [draftHydrated, userId, sessionId, draftState]);
   useEffect(() => {
@@ -218,13 +245,13 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
       if ((mode === "first_frame" || mode === "first_last") && type !== "image") { setError("首帧与首尾帧模式只接受图片"); continue; }
       if (mode === "first_frame" && plannedAssets.length >= 1) { setError("首帧模式只接受一张图片"); continue; }
       if (mode === "first_last" && plannedAssets.length >= 2) { setError("首尾帧模式只接受两张图片"); continue; }
-      const allowed = type === "image" ? model.imageLimit : type === "video" ? model.videoLimit : model.audioLimit;
+      const allowed = engine === "image" ? (imageSpec?.maxReferences ?? 4) : type === "image" ? model.imageLimit : type === "video" ? model.videoLimit : model.audioLimit;
       if (!allowed || plannedAssets.filter((a) => a.type === type).length >= allowed) { setError(`当前模型最多支持 ${allowed} 个${type === "image" ? "图片" : type === "video" ? "视频" : "音频"}参考`); continue; }
       const tempId = crypto.randomUUID();
       const role: UploadAsset["role"] = mode === "first_frame" ? "first_frame" : mode === "first_last" ? (plannedAssets.some((a) => a.role === "first_frame") ? "last_frame" : "first_frame") : type === "image" ? "reference_image" : type === "video" ? "reference_video" : "reference_audio";
       const preview = type === "image" ? URL.createObjectURL(file) : undefined;
       if (preview) localPreviewUrls.current.add(preview);
-      const pending = { id: tempId, name: file.name, size: file.size, type, role, progress: 0, phase: type === "image" ? "preparing" : "uploading", preview } satisfies UploadAsset;
+      const pending = { id: tempId, bindingId: tempId, name: file.name, size: file.size, type, role, progress: 0, phase: type === "image" ? "preparing" : "uploading", preview } satisfies UploadAsset;
       plannedAssets.push(pending);
       const controller = new AbortController();
       uploadControllers.current.set(tempId, controller);
@@ -263,14 +290,14 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
     const existing = assets.find((asset) => asset.id === candidate.id || (candidate.assetId && asset.assetId === candidate.assetId));
     if (existing) return existing;
     const typeCount = assets.filter((asset) => asset.type === candidate.type).length;
-    const allowed = candidate.type === "image" ? model.imageLimit : candidate.type === "video" ? model.videoLimit : model.audioLimit;
+    const allowed = engine === "image" ? (imageSpec?.maxReferences ?? 4) : candidate.type === "image" ? model.imageLimit : candidate.type === "video" ? model.videoLimit : model.audioLimit;
     if (!allowed || typeCount >= allowed) { setError(`当前模型最多支持 ${allowed} 个${candidate.type === "image" ? "图片" : candidate.type === "video" ? "视频" : "音频"}参考`); return null; }
     if (mode === "text" && engine === "video") { setError("文本生成模式不接受参考素材"); return null; }
     if (engine === "image" && candidate.type !== "image") { setError("图片生成只接受图片参考（图生图）"); return null; }
     if (mode === "first_frame" && (candidate.type !== "image" || assets.length)) { setError("首帧模式只接受一张图片"); return null; }
     if (mode === "first_last" && (candidate.type !== "image" || assets.length >= 2)) { setError("首尾帧模式只接受两张图片"); return null; }
     const role: UploadAsset["role"] = mode === "first_frame" ? "first_frame" : mode === "first_last" ? (assets.some((asset) => asset.role === "first_frame") ? "last_frame" : "first_frame") : candidate.type === "image" ? "reference_image" : candidate.type === "video" ? "reference_video" : "reference_audio";
-    const attached = { ...candidate, role, progress: 100 };
+    const attached = { ...candidate, bindingId: candidate.bindingId ?? crypto.randomUUID(), role, progress: 100 };
     setAssets((old) => [...old, attached]); setError(""); return attached;
   };
 
@@ -281,24 +308,29 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
     const clearSubmittedComposer = () => {
       setPrompt(""); clearAttachedAssets();
       clearComposerDraftInBackground(composerDraftCache, userId, sessionId);
-      onRestoreConsumed?.();
     };
     try {
       if (engine === "image") {
         const spec = imageModels.find((item) => item.id === imageModelId) ?? imageModels[0];
-        const submittedPrompt = prompt.trim();
+        const editorPrompt = prompt.trim();
+        const submittedPrompt = materializePromptReferences(editorPrompt, assets);
         pendingImage = { id: crypto.randomUUID(), sessionId, modelName: spec?.name ?? imageModelId, ratio: imageRatio, resolution: imageResolution, prompt: submittedPrompt, items: [], createdAt: Date.now(), status: "generating", requestedCount: imageCount };
-        const references = assets.filter((asset) => asset.type === "image" && asset.uploadId).map((asset) => asset.uploadId!);
+        const references = assets.filter((asset) => asset.type === "image").map((asset) => ({
+          id: asset.id, bindingId: referenceBindingId(asset), uploadId: asset.uploadId,
+          assetId: asset.assetId, snapshotReferenceId: asset.snapshotReferenceId,
+          name: asset.name, type: "image" as const, role: "reference_image" as const,
+        }));
         clearSubmittedComposer();
         onImagesGenerated?.(pendingImage);
-        await api.post<ImageGenResponse>("/api/image-generation", { requestId: pendingImage.id, sessionId, model: imageModelId, ratio: imageRatio, resolution: imageResolution, count: imageCount, prompt: submittedPrompt, references }, { timeoutMs: 8_000 });
+        await api.post<ImageGenResponse>("/api/image-generation", { requestId: pendingImage.id, sessionId, model: imageModelId, ratio: imageRatio, resolution: imageResolution, count: imageCount, prompt: submittedPrompt, editorPrompt, references }, { timeoutMs: 8_000 });
         return;
       }
       const requestId = crypto.randomUUID();
-      const submittedPrompt = materializePromptReferences(prompt, assets);
+      const editorPrompt = prompt;
+      const submittedPrompt = materializePromptReferences(editorPrompt, assets);
       const submittedAt = Date.now();
       pendingVideo = { id: requestId, sessionId, caseId: requestId, ownerId: userId, visibility: "private", status: "submitting", mediaStatus: "none", prompt: submittedPrompt, model: model.id, mode, ratio, resolution, duration, createdAt: submittedAt, updatedAt: submittedAt };
-      const task = await api.post<Task>("/api/generations", { requestId, sessionId, prompt: submittedPrompt, model: model.id, mode, ratio, resolution, duration, generateAudio: model.supportsAudio && generateAudio, seed, cameraFixed, watermark, outputFormat: "mp4", assets: assets.map(({ preview, progress, size, ...asset }) => asset) }, { timeoutMs: 8_000 });
+      const task = await api.post<Task>("/api/generations", { requestId, sessionId, prompt: submittedPrompt, editorPrompt, model: model.id, mode, ratio, resolution, duration, generateAudio: model.supportsAudio && generateAudio, seed, cameraFixed, watermark, outputFormat: "mp4", assets: assets.map((attached) => { const { preview, progress, size, ...asset } = attached; return { ...asset, bindingId: referenceBindingId(attached) }; }) }, { timeoutMs: 8_000 });
       clearSubmittedComposer(); onCreated(task);
     } catch (e) {
       const message = e instanceof Error ? e.message : "无法创建任务";
@@ -334,7 +366,7 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
   return <div className={`composer ${compact ? "composer--compact" : ""}`} onClick={(e) => e.stopPropagation()}>
     {!compact && <h1>今晚，想创造什么？</h1>}
     <div className="composer-shell">
-      {!!assets.length && <div className="asset-strip">{assets.map((asset, index) => <div className="asset-chip" key={asset.id}>{asset.preview ? <RecoveringThumbnail src={asset.preview} alt={asset.name || "参考素材"} fallbackClassName="asset-chip__media" manualRecovery={false} /> : asset.type === "image" ? <ImageIcon /> : asset.type === "video" ? <Video /> : <AudioLines />}<span><b>{asset.role === "first_frame" ? "首帧" : asset.role === "last_frame" ? "尾帧" : `${asset.type === "image" ? "图片" : asset.type === "video" ? "视频" : "音频"} ${index + 1}`}</b><small>{asset.status === "Processing" ? "正在恢复素材引用" : asset.phase === "preparing" ? "正在检查图片" : asset.phase === "verifying" ? `${asset.name} · 已上传，可立即生成` : asset.progress === 100 ? `${asset.name}${asset.normalized ? " · 已自动补白" : ""}` : `上传 ${asset.progress ?? 0}%`}</small></span>{asset.progress !== 100 && <i style={{ width: `${asset.progress ?? 0}%` }} />}<button onClick={() => removeAttachedAsset(asset.id)}><X /></button></div>)}</div>}
+      {!!assets.length && <div className="asset-strip">{assets.map((asset) => <div className="asset-chip" key={referenceBindingId(asset)}>{asset.preview ? <RecoveringThumbnail src={asset.preview} alt={asset.name || "参考素材"} loading="lazy" decoding="async" fallbackClassName="asset-chip__media" manualRecovery={false} /> : asset.type === "image" ? <ImageIcon /> : asset.type === "video" ? <Video /> : <AudioLines />}<span><b>{asset.role === "first_frame" ? "首帧" : asset.role === "last_frame" ? "尾帧" : promptAssetLabel(asset, assets).replace("Image", "图片").replace("Video", "视频").replace("Audio", "音频")}</b><small>{asset.status === "Processing" ? "正在恢复素材引用" : asset.phase === "preparing" ? "正在检查图片" : asset.phase === "verifying" ? `${asset.name} · 已上传，可立即生成` : asset.progress === 100 ? `${asset.name}${asset.normalized ? " · 已自动补白" : ""}` : `上传 ${asset.progress ?? 0}%`}</small></span>{asset.progress !== 100 && <i style={{ width: `${asset.progress ?? 0}%` }} />}<button aria-label={`移除 ${asset.name}`} onClick={() => removeAttachedAsset(asset.id)}><X /></button></div>)}</div>}
       <div className={`prompt-row ${referenceSlots.length > 1 ? "prompt-row--dual" : ""} ${!referenceSlots.length ? "prompt-row--text" : ""}`}>
         {!!referenceSlots.length && <div className="reference-slots">{referenceSlots.map((label, index) => <button className="add-reference" key={label} onClick={() => { void persistPrivateMediaStorage(); fileInput.current?.click(); }} disabled={(mode === "first_frame" && assets.length >= 1) || (mode === "first_last" && assets.length > index)}><Plus /><span>{label}</span></button>)}</div>}
         <PromptEditor value={prompt} change={setPrompt} placeholder={engine === "image" ? "描述你想生成的画面；上传参考图即可进行图生图……" : modePlaceholders[mode]} assets={assets} disabled={mode === "text" && engine === "video"} attach={attachMentionAsset} focusSignal={restore?.targetSessionId === sessionId ? restore.nonce : undefined} />

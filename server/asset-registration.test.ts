@@ -50,6 +50,35 @@ describe("trusted asset registration", () => {
     expect(callAsset).toHaveBeenCalledTimes(1);
   });
 
+  it("registers an immutable snapshot reference and persists its provider identity", async () => {
+    const selected = input();
+    const referenceId = "a".repeat(64);
+    selected.assets[0] = { ...selected.assets[0]!, uploadId: undefined, snapshotReferenceId: referenceId };
+    const updateSnapshotReference = vi.fn(() => ({ id: referenceId, ownerId: "owner-1", status: "ready" }));
+    const callAsset = vi.fn(async (action: string) => {
+      if (action === "ListAssetGroups") return { Items: [{ Id: "group-1", Name: "Firefly Auto References" }] };
+      if (action === "ListAssets") return { Items: [] };
+      if (action === "CreateAsset") return { Id: "asset-snapshot-1" };
+      if (action === "GetAsset") return { Id: "asset-snapshot-1", Status: "Active", GroupId: "group-1", AssetType: "Image" };
+      throw new Error(action);
+    });
+    const result = await prepareProviderAssets(selected, "owner-1", {
+      readUpload: vi.fn() as never,
+      readSnapshotReference: vi.fn(() => ({ id: referenceId, ownerId: "owner-1", status: "ready", objectKey: "task-inputs/a/reference.png", mediaType: "image" })) as never,
+      updateSnapshotReference: updateSnapshotReference as never,
+      resolveSnapshotMediaUrl: vi.fn(() => "https://tos.example/task-reference"),
+      cacheGet: vi.fn(async () => null), cacheSet: vi.fn(async () => undefined), callAsset: callAsset as never,
+      resolveMediaUrl: vi.fn(async () => "https://unused.example") as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 1),
+    });
+    expect(result.assets[0]).toMatchObject({ assetId: "asset-snapshot-1", snapshotReferenceId: undefined, url: undefined });
+    expect(callAsset).toHaveBeenCalledWith("CreateAsset", expect.objectContaining({ URL: "https://tos.example/task-reference", AssetType: "Image" }));
+    expect(updateSnapshotReference).toHaveBeenCalledWith(referenceId, expect.objectContaining({ providerAssetId: "asset-snapshot-1" }));
+    expect(buildProviderPayload(result).content).toEqual([
+      { type: "text", text: "Image 1 walks through a room" },
+      { type: "image_url", image_url: { url: "asset://asset-snapshot-1" }, role: "reference_image" },
+    ]);
+  });
+
   it("defers provider asset registration until deep upload validation is ready", async () => {
     const callAsset = vi.fn();
     await expect(prepareProviderAssets(input(), "owner-1", {

@@ -8,7 +8,7 @@ import { z } from "zod";
 import { config } from "./config.js";
 import { MODELS } from "./capabilities.js";
 import { clearSession, createSession, getSessionUser, publicUser, requireAuth, type SessionUser } from "./auth.js";
-import type { AssetCategory, CanvasJob, CanvasProject, CanvasProjectAsset, CreationSession, ImageGenerationTask, UploadSession, UserAsset } from "./db.js";
+import type { AssetCategory, CanvasJob, CanvasProject, CanvasProjectAsset, CreationSession, CreationSnapshotBundle, ImageGenerationTask, UploadSession, UserAsset } from "./db.js";
 import { users } from "./store.js";
 import { canvasDocumentSchema, DEFAULT_CANVAS_DOCUMENT, DEFAULT_CANVAS_DOCUMENT_V1, parseCanvasDocumentSafe, toCanvasDocumentV2 } from "./canvas-document.js";
 import { resolveCanvasContext } from "./canvas-context.js";
@@ -45,6 +45,8 @@ import { MediaValidationError, validateMedia } from "./media-validation.js";
 import { withinDeadline } from "./deadline.js";
 import { startAsyncJobControlPlane } from "./async-job-control-plane.js";
 import { buildImageReeditPayload, buildVideoReeditPayload } from "./generation-reedit.js";
+import { buildCreationSnapshot, type CreationReferenceInput } from "./creation-snapshots.js";
+import { buildLegacyImageSnapshot, buildLegacyVideoSnapshot } from "./legacy-creation-snapshot.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -88,6 +90,25 @@ const publicCreationSession = ({ ownerId: _ownerId, deletedAt: _deletedAt, ...se
 const createCreationSession = (ownerId: string, title = "新创作") => {
   const now = Date.now();
   return users.createCreationSession({ id: crypto.randomUUID(), ownerId, title, createdAt: now, updatedAt: now });
+};
+const creationSnapshotDependencies = {
+  readUploadState: (uploadId: string) => users.readUploadState(uploadId),
+  readUserAsset: (assetId: string) => users.readUserAsset(assetId),
+  readSnapshotReference: (id: string) => users.readCreationSnapshotReference(id),
+};
+const enqueueSnapshotPromotions = (bundle: CreationSnapshotBundle) => {
+  if (!config.taskReferenceArchiveEnabled) return;
+  for (const reference of bundle.references) {
+    if (reference.status !== "promoting") continue;
+    scheduleBestEffort(
+      () => mediaQueue.add("promote-creation-reference", { referenceId: reference.id }, {
+        jobId: `promote-reference-${reference.id}`, attempts: 5,
+        backoff: { type: "exponential", delay: 5000, jitter: .5 },
+        removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 },
+      }),
+      (error) => console.warn(JSON.stringify({ type: "reedit_reference_handoff_failed", at: new Date().toISOString(), taskId: bundle.snapshot.sourceId, referenceId: reference.id, code: (error as { code?: string }).code ?? "unknown" })),
+    );
+  }
 };
 
 class UploadIntegrityError extends Error {
@@ -257,7 +278,9 @@ const enqueueUploadFinalization = (uploadId: string) => {
 const respondUploadState = async (res: express.Response, uploadId: string, ownerId: string) => {
   const media = users.readUploadState(uploadId);
   if (!media || media.ownerId !== ownerId) return res.status(404).json({ error: "上传不存在或已过期", requestId: res.locals.requestId });
-  const base = { id: uploadId, uploadId, name: media.fileName, type: uploadKindFromContentType(media.contentType), size: media.size };
+  const expiresAt = media.objectKey.startsWith("inputs/") ? media.createdAt + config.tosInputRetentionDays * 24 * 60 * 60 * 1000 : undefined;
+  if (expiresAt && expiresAt <= Date.now()) return res.status(410).json({ error: "上传素材已过期，请重新上传", code: "UPLOAD_EXPIRED", requestId: res.locals.requestId });
+  const base = { id: uploadId, uploadId, name: media.fileName, type: uploadKindFromContentType(media.contentType), size: media.size, expiresAt };
   if (media.status === "ready") return res.json({ ...base, state: "ready" });
   if (media.status === "uploading") return res.status(202).json({ ...base, state: "processing" });
   const cachedError = await redis.get(`upload:error:${uploadId}`).catch(() => null);
@@ -357,7 +380,7 @@ app.post("/api/uploads/:id/complete", requireAuth, async (req, res) => {
           enqueueUploadFinalization(uploadId);
           stageLog("finalization_scheduled");
           console.info(JSON.stringify({ type: "tos_upload_transport_completed", at: new Date().toISOString(), userId: meta.ownerId, uploadId, size, requestId: head.requestId }));
-          return res.status(202).json({ id: uploadId, uploadId, name: meta.name, type: meta.type, size, state: "processing" });
+          return res.status(202).json({ id: uploadId, uploadId, name: meta.name, type: meta.type, size, state: "processing", expiresAt: Date.now() + config.tosInputRetentionDays * 24 * 60 * 60 * 1000 });
         } catch (error) {
           const destructive = error instanceof UploadIntegrityError;
           console.warn(JSON.stringify({ type: "tos_upload_failed", at: new Date().toISOString(), userId: meta.ownerId, uploadId, retryable: !destructive, errorCode: (error as { code?: string }).code ?? (destructive ? "validation_failed" : "transient_failure"), message: error instanceof Error ? error.message.slice(0, 400) : undefined }));
@@ -476,6 +499,53 @@ app.delete("/api/creation-sessions/:id", requireAuth, (req, res) => {
   users.softDeleteCreationSession(param(req.params.id), user.id) ? res.status(204).end() : res.status(404).json({ error: "创作会话不存在" });
 });
 
+app.get("/api/creation-references/:id/source", requireAuth, async (req, res) => {
+  try {
+    const user = res.locals.user as SessionUser;
+    const reference = users.readCreationSnapshotReference(param(req.params.id));
+    if (!reference || reference.ownerId !== user.id) return res.status(404).json({ error: "任务素材不存在" });
+    if (reference.status !== "ready" || !reference.objectKey) return res.status(reference.status === "promoting" ? 425 : 410).json({ error: reference.status === "promoting" ? "任务素材正在长期归档" : "任务素材无法恢复" });
+    res.setHeader("Cache-Control", previewRedirectCacheHeader);
+    res.setHeader("Vary", "Cookie");
+    const process = req.query.variant === "thumbnail" && reference.mediaType === "image" ? "image/resize,w_640/format,webp" : undefined;
+    res.redirect(302, await stablePreviewUrl({ objectKey: reference.objectKey, fileName: reference.displayName, process }));
+  } catch (error) { respondError(res, error, 502); }
+});
+
+app.get("/api/creation-references/:id", requireAuth, (req, res) => {
+  const user = res.locals.user as SessionUser;
+  const reference = users.readCreationSnapshotReference(param(req.params.id));
+  if (!reference || reference.ownerId !== user.id || reference.status === "deleted") return res.status(404).json({ error: "任务素材不存在" });
+  res.status(reference.status === "promoting" ? 202 : 200).json({
+    id: reference.id,
+    bindingId: reference.bindingId,
+    name: reference.displayName,
+    type: reference.mediaType,
+    size: reference.size,
+    state: reference.status === "ready" ? "ready" : reference.status === "promoting" ? "processing" : "unavailable",
+    preview: reference.status === "ready" && reference.mediaType === "image" ? `/api/creation-references/${encodeURIComponent(reference.id)}/source?variant=thumbnail` : undefined,
+  });
+});
+
+app.post("/api/reedit-sessions", requireAuth, (req, res) => {
+  try {
+    const body = z.object({ sourceType: z.enum(["video", "image"]), sourceId: z.string().min(1).max(200) }).parse(req.body);
+    const user = res.locals.user as SessionUser;
+    const source = body.sourceType === "video" ? users.readTask(body.sourceId) : users.readImageGeneration(body.sourceId);
+    if (!source || source.ownerId !== user.id) return res.status(404).json({ error: "创作记录不存在或无权访问" });
+    const terminal = body.sourceType === "video" ? ["succeeded", "failed"].includes(source.status) : source.status !== "running";
+    if (!terminal) return res.status(409).json({ error: "任务仍在生成，暂时不能重新编辑" });
+    const prompt = source.prompt.trim();
+    const now = Date.now();
+    const admitted = users.admitReeditSession(user.id, body.sourceType, body.sourceId, {
+      id: crypto.randomUUID(), ownerId: user.id,
+      title: prompt ? `重新编辑 · ${prompt.slice(0, 32)}` : "重新编辑",
+      createdAt: now, updatedAt: now,
+    });
+    res.status(admitted.status === "created" ? 201 : 200).json(publicCreationSession(admitted.session));
+  } catch (error) { respondError(res, error); }
+});
+
 app.post("/api/generations", requireAuth, async (req, res) => {
   try {
     const requestedTaskId = z.string().uuid().optional().parse(req.body?.requestId);
@@ -498,7 +568,7 @@ app.post("/api/generations", requireAuth, async (req, res) => {
       if (asset.canvasProjectAssetId) return res.status(404).json({ error: "引用素材不存在或无权访问" });
       if (asset.uploadId) {
         const media = users.readUploadState(asset.uploadId);
-        if (!canCreatePendingAsset(media, owner.id)) return res.status(404).json({ error: "引用素材不存在或已过期" });
+        if (!canCreatePendingAsset(media, owner.id, config.tosInputRetentionDays)) return res.status(404).json({ error: "引用素材不存在或已过期" });
         assets.push(asset);
         continue;
       }
@@ -506,6 +576,12 @@ app.post("/api/generations", requireAuth, async (req, res) => {
         const owned = users.readUserAsset(asset.assetId);
         if (!owned || owned.ownerId !== owner.id) return res.status(404).json({ error: "引用素材不存在或无权访问" });
         if (owned.status !== "Active") return res.status(409).json({ error: `参考素材「${asset.name}」仍在处理中，请稍后再试` });
+        assets.push(asset);
+        continue;
+      }
+      if (asset.snapshotReferenceId) {
+        const reference = users.readCreationSnapshotReference(asset.snapshotReferenceId);
+        if (!reference || reference.ownerId !== owner.id || reference.status !== "ready" || reference.mediaType !== asset.type) return res.status(404).json({ error: "引用素材不存在或尚未归档完成" });
         assets.push(asset);
         continue;
       }
@@ -518,18 +594,32 @@ app.post("/api/generations", requireAuth, async (req, res) => {
       }
       assets.push(asset);
     }
-    const input = validateGeneration({ ...requestedInput, assets });
     const id = requestedTaskId ?? crypto.randomUUID();
     const now = Date.now();
-    const task: StoredTask = { id, sessionId: activeSession.id, ownerId: owner.id, visibility: "private", status: "queued", mediaStatus: "none", mediaRevision: 0, prompt: input.prompt, model: input.model, mode: input.mode, ratio: input.ratio, resolution: input.resolution, duration: input.duration, request: requestedInput, createdAt: now, updatedAt: now };
+    const editorPrompt = requestedInput.editorPrompt ?? requestedInput.prompt;
+    const snapshot = buildCreationSnapshot({
+      sourceType: "video", sourceId: id, ownerId: owner.id, sessionId: activeSession.id,
+      editorPrompt, parameters: {
+        model: requestedInput.model, mode: requestedInput.mode, ratio: requestedInput.ratio,
+        resolution: requestedInput.resolution, duration: requestedInput.duration,
+        generateAudio: requestedInput.generateAudio, seed: requestedInput.seed,
+        cameraFixed: requestedInput.cameraFixed, watermark: requestedInput.watermark,
+      },
+      references: assets as CreationReferenceInput[], createdAt: now,
+    }, creationSnapshotDependencies);
+    if (snapshot.references.some((reference) => reference.status === "unavailable")) return res.status(409).json({ error: "有参考素材刚刚失效，请重新选择后提交" });
+    const input = validateGeneration({ ...requestedInput, editorPrompt, prompt: snapshot.snapshot.providerPrompt, assets });
+    const persistedRequest = { ...input, assets };
+    const task: StoredTask = { id, sessionId: activeSession.id, ownerId: owner.id, visibility: "private", status: "queued", mediaStatus: "none", mediaRevision: 0, prompt: input.prompt, model: input.model, mode: input.mode, ratio: input.ratio, resolution: input.resolution, duration: input.duration, request: persistedRequest, createdAt: now, updatedAt: now };
     const intent = { queueName: "generation" as const, jobId: id, jobName: "generate", payload: { input } };
-    const admission = users.admitTaskWithinLimit(task, config.maxActiveGenerationsPerUser, intent);
+    const admission = users.admitTaskWithinLimit(task, config.maxActiveGenerationsPerUser, intent, snapshot);
     if (admission.status === "limit") return res.status(429).json({ error: `你已有 ${config.maxActiveGenerationsPerUser} 个任务正在生成，请等待其中一个完成`, requestId: res.locals.requestId });
     if (admission.status === "existing") {
       if (admission.task.ownerId !== owner.id || admission.task.deletedAt) return res.status(409).json({ error: "请求标识已被使用", requestId: res.locals.requestId });
       const active = ["queued", "submitting", "running"].includes(admission.task.status) || admission.task.mediaStatus === "archiving";
       return res.status(active ? 202 : 200).json(publicGenerationTask(admission.task));
     }
+    enqueueSnapshotPromotions(snapshot);
     users.touchCreationSession(activeSession.id, owner.id, input.prompt);
     console.info(JSON.stringify({ type: "generation_admitted", at: new Date().toISOString(), requestId: res.locals.requestId, taskId: id, userId: owner.id, model: input.model, mode: input.mode, assetCount: input.assets.length }));
     res.status(202).json(publicGenerationTask(task));
@@ -554,15 +644,65 @@ app.get("/api/generations/:id", requireAuth, async (req, res) => {
 const reeditDependencies = {
   readUploadState: (uploadId: string) => users.readUploadState(uploadId),
   readUserAsset: (assetId: string) => users.readUserAsset(assetId),
+  readSnapshot: (sourceType: "video" | "image", sourceId: string) => users.readCreationSnapshot(sourceType, sourceId),
+  listSnapshotReferences: (sourceType: "video" | "image", sourceId: string) => users.listCreationSnapshotReferences(sourceType, sourceId),
+  readSession: (sessionId: string, includeDeleted = false) => users.readCreationSession(sessionId, includeDeleted),
   now: () => Date.now(),
   inputRetentionDays: config.tosInputRetentionDays,
+};
+
+const legacyReeditDependencies = {
+  readUploadState: reeditDependencies.readUploadState,
+  readUserAsset: reeditDependencies.readUserAsset,
+  readSession: reeditDependencies.readSession,
+  now: reeditDependencies.now,
+  inputRetentionDays: reeditDependencies.inputRetentionDays,
+};
+const ensureVideoSnapshot = (task: StoredTask) => {
+  if (!config.reeditV2Enabled || users.readCreationSnapshot("video", task.id)) return;
+  const bundle = buildLegacyVideoSnapshot(task, creationSnapshotDependencies);
+  if (users.createCreationSnapshotIfMissing(bundle).status === "created") enqueueSnapshotPromotions(bundle);
+};
+const ensureImageSnapshot = (task: ImageGenerationTask) => {
+  if (!config.reeditV2Enabled || users.readCreationSnapshot("image", task.id)) return;
+  const bundle = buildLegacyImageSnapshot(task, creationSnapshotDependencies);
+  if (users.createCreationSnapshotIfMissing(bundle).status === "created") enqueueSnapshotPromotions(bundle);
+};
+const logReeditDiagnostics = (payload: ReturnType<typeof buildVideoReeditPayload>, requestId: string, userId: string) => {
+  for (const warning of payload.warnings) if (warning.bindingId && ["REFERENCE_ARCHIVING", "REFERENCE_UNAVAILABLE", "LEGACY_REFERENCE_MISSING"].includes(warning.code)) console.warn(JSON.stringify({
+    type: "reedit_reference_missing", at: new Date().toISOString(), requestId, taskId: payload.sourceId,
+    sourceType: payload.sourceType, userId, bindingId: warning.bindingId, mediaType: warning.type, code: warning.code,
+  }));
+  for (const adjustment of payload.adjustments) console.info(JSON.stringify({
+    type: "reedit_capability_adjusted", at: new Date().toISOString(), requestId, taskId: payload.sourceId,
+    sourceType: payload.sourceType, userId, field: adjustment.field, requested: adjustment.requested,
+    effective: adjustment.effective,
+  }));
+};
+const trackReeditMetric = (metric: "started" | "failed") => {
+  const key = `metrics:reedit:${Math.floor(Date.now() / 60_000)}:${metric}`;
+  scheduleBestEffort(() => redis.multi().incr(key).expire(key, 10 * 60).exec(), () => undefined);
 };
 
 app.get("/api/generations/:id/reedit", requireAuth, async (req, res) => {
   const user = res.locals.user as SessionUser;
   const task = await readTask(param(req.params.id));
   if (!task || task.ownerId !== user.id) return res.status(404).json({ error: "任务不存在或无权访问" });
-  res.json(buildVideoReeditPayload(task, user.id, reeditDependencies));
+  if (!["succeeded", "failed"].includes(task.status)) return res.status(409).json({ error: "任务仍在生成，请完成后再重新编辑" });
+  const startedAt = Date.now();
+  trackReeditMetric("started");
+  console.info(JSON.stringify({ type: "reedit_started", at: new Date().toISOString(), requestId: res.locals.requestId, taskId: task.id, sourceType: "video", userId: user.id }));
+  try {
+    ensureVideoSnapshot(task);
+    const payload = buildVideoReeditPayload(task, user.id, config.reeditV2Enabled ? reeditDependencies : legacyReeditDependencies);
+    logReeditDiagnostics(payload, res.locals.requestId, user.id);
+    console.info(JSON.stringify({ type: payload.recoveryQuality === "exact" ? "reedit_snapshot_loaded" : "reedit_snapshot_partial", at: new Date().toISOString(), requestId: res.locals.requestId, taskId: task.id, sourceType: "video", userId: user.id, bindings: payload.state.assets.length, omitted: payload.omittedAssets, recoveryQuality: payload.recoveryQuality, elapsedMs: Date.now() - startedAt }));
+    res.json(payload);
+  } catch (error) {
+    trackReeditMetric("failed");
+    console.error(JSON.stringify({ type: "reedit_failed", at: new Date().toISOString(), requestId: res.locals.requestId, taskId: task.id, sourceType: "video", userId: user.id, code: (error as { code?: string }).code ?? "internal", elapsedMs: Date.now() - startedAt }));
+    respondError(res, error, 500);
+  }
 });
 
 const accessibleTask = async (req: express.Request, res: express.Response) => {
@@ -699,7 +839,7 @@ app.post("/api/assets", requireAuth, async (req, res) => {
       const existing = users.readUserAssetByUpload(user.id, body.uploadId);
       if (existing) return res.status(202).json(publicUserAsset(existing));
       const media = users.readUploadState(body.uploadId);
-      if (!canCreatePendingAsset(media, user.id)) return res.status(404).json({ error: "引用素材不存在或尚未上传完成" });
+      if (!canCreatePendingAsset(media, user.id, config.tosInputRetentionDays)) return res.status(404).json({ error: "引用素材不存在或尚未上传完成" });
       assetType = media.contentType.startsWith("video/") ? "Video" : media.contentType.startsWith("audio/") ? "Audio" : "Image";
       providerName = providerAssetName(body.name);
       const now = Date.now();
@@ -804,6 +944,19 @@ app.delete("/api/assets/:id", requireAuth, async (req, res) => {
 
 
 // ---- OpenRouter 图片生成 ----
+const imageReferenceSchema = z.union([
+  z.string().min(20).max(200),
+  z.object({
+    id: z.string().min(1).max(200).optional(),
+    bindingId: z.string().min(1).max(200),
+    uploadId: z.string().min(20).max(200).optional(),
+    assetId: z.string().min(1).max(200).optional(),
+    snapshotReferenceId: z.string().min(32).max(128).optional(),
+    name: z.string().min(1).max(180),
+    type: z.literal("image").default("image"),
+    role: z.literal("reference_image").default("reference_image"),
+  }).refine((reference) => Boolean(reference.uploadId || reference.assetId || reference.snapshotReferenceId), "参考图缺少可用来源"),
+]);
 const imageGenerationSchema = z.object({
   requestId: z.string().uuid().optional(),
   sessionId: z.string().min(1).max(200).optional(),
@@ -812,7 +965,8 @@ const imageGenerationSchema = z.object({
   resolution: z.string().min(1).max(20),
   count: z.number().int().min(1).max(4),
   prompt: z.string().trim().min(1).max(2000),
-  references: z.array(z.string().min(20).max(200)).max(4).default([]),
+  editorPrompt: z.string().max(2000).optional(),
+  references: z.array(imageReferenceSchema).max(4).default([]),
 });
 
 app.get("/api/image-models", requireAuth, async (_req, res) => {
@@ -842,7 +996,37 @@ app.get("/api/image-generations/:id/reedit", requireAuth, (req, res) => {
   const user = res.locals.user as SessionUser;
   const task = users.readImageGeneration(param(req.params.id));
   if (!task || task.ownerId !== user.id) return res.status(404).json({ error: "图片任务不存在或无权访问" });
-  res.json(buildImageReeditPayload(task, user.id, MODELS[0]?.id ?? "", reeditDependencies));
+  if (task.status === "running") return res.status(409).json({ error: "任务仍在生成，请完成后再重新编辑" });
+  const startedAt = Date.now();
+  trackReeditMetric("started");
+  console.info(JSON.stringify({ type: "reedit_started", at: new Date().toISOString(), requestId: res.locals.requestId, taskId: task.id, sourceType: "image", userId: user.id }));
+  try {
+    ensureImageSnapshot(task);
+    const payload = buildImageReeditPayload(task, user.id, MODELS[0]?.id ?? "", config.reeditV2Enabled ? reeditDependencies : legacyReeditDependencies);
+    logReeditDiagnostics(payload, res.locals.requestId, user.id);
+    console.info(JSON.stringify({ type: payload.recoveryQuality === "exact" ? "reedit_snapshot_loaded" : "reedit_snapshot_partial", at: new Date().toISOString(), requestId: res.locals.requestId, taskId: task.id, sourceType: "image", userId: user.id, bindings: payload.state.assets.length, omitted: payload.omittedAssets, recoveryQuality: payload.recoveryQuality, elapsedMs: Date.now() - startedAt }));
+    res.json(payload);
+  } catch (error) {
+    trackReeditMetric("failed");
+    console.error(JSON.stringify({ type: "reedit_failed", at: new Date().toISOString(), requestId: res.locals.requestId, taskId: task.id, sourceType: "image", userId: user.id, code: (error as { code?: string }).code ?? "internal", elapsedMs: Date.now() - startedAt }));
+    respondError(res, error, 500);
+  }
+});
+
+const reeditClientEventSchema = z.object({
+  type: z.enum(["reedit_draft_conflict", "reedit_completed", "reedit_failed"]),
+  sourceType: z.enum(["video", "image"]), sourceId: z.string().min(1).max(200),
+  restoreIntentId: z.string().uuid().optional(), code: z.string().min(1).max(80).optional(),
+});
+app.post("/api/reedit-events", requireAuth, (req, res) => {
+  try {
+    const body = reeditClientEventSchema.parse(req.body);
+    const user = res.locals.user as SessionUser;
+    const source = body.sourceType === "video" ? users.readTask(body.sourceId) : users.readImageGeneration(body.sourceId);
+    if (!source || source.ownerId !== user.id) return res.status(404).json({ error: "创作记录不存在或无权访问" });
+    console.info(JSON.stringify({ type: body.type, at: new Date().toISOString(), requestId: res.locals.requestId, taskId: body.sourceId, sourceType: body.sourceType, userId: user.id, restoreIntentId: body.restoreIntentId, code: body.code }));
+    res.status(204).end();
+  } catch (error) { respondError(res, error); }
 });
 
 app.delete("/api/image-generations/:id", requireAuth, (req, res) => {
@@ -871,29 +1055,53 @@ app.post("/api/image-generation", requireAuth, async (req, res) => {
     const spec = imageModelById(body.model);
     if (!spec) return res.status(400).json({ error: "未知的图片模型" });
     if (body.count > spec.maxCount) return res.status(400).json({ error: "该模型单次最多生成 " + spec.maxCount + " 张" });
+    if (body.references.length > spec.maxReferences) return res.status(400).json({ error: "该模型单次最多引用 " + spec.maxReferences + " 张图片" });
     if (!spec.resolutions.includes(body.resolution)) return res.status(400).json({ error: "该模型不支持此分辨率档位" });
     const session = body.sessionId ? users.readCreationSession(body.sessionId) : null;
     if (body.sessionId && (!session || session.ownerId !== user.id)) return res.status(404).json({ error: "创作会话不存在" });
     const activeSession = session ?? createCreationSession(user.id);
-    // Only persist opaque upload ids in BullMQ. The worker signs fresh URLs
-    // immediately before the provider call, so queue delays cannot expire them.
-    for (const uploadId of body.references) {
-      const media = users.readUploadState(uploadId);
-      if (!canCreatePendingAsset(media, user.id)) return res.status(404).json({ error: "参考素材不存在或已过期" });
+    const references: CreationReferenceInput[] = body.references.map((reference, index) => typeof reference === "string"
+      ? { id: reference, bindingId: reference, uploadId: reference, name: `参考图 ${index + 1}`, type: "image", role: "reference_image" }
+      : reference);
+    const queueReferences: { uploadId?: string; snapshotReferenceId?: string }[] = [];
+    for (const reference of references) {
+      if (reference.snapshotReferenceId) {
+        const stored = users.readCreationSnapshotReference(reference.snapshotReferenceId);
+        if (!stored || stored.ownerId !== user.id || stored.status !== "ready" || stored.mediaType !== "image") return res.status(404).json({ error: "参考素材不存在或尚未归档完成" });
+        queueReferences.push({ snapshotReferenceId: stored.id });
+        continue;
+      }
+      let uploadId = reference.uploadId;
+      if (reference.assetId) {
+        const asset = users.readUserAsset(reference.assetId);
+        if (!asset || asset.ownerId !== user.id || asset.status !== "Active" || !asset.uploadId) return res.status(404).json({ error: "参考素材不存在或无权访问" });
+        uploadId = asset.uploadId;
+      }
+      const media = uploadId ? users.readUploadState(uploadId) : null;
+      if (!uploadId || !canCreatePendingAsset(media, user.id, config.tosInputRetentionDays)) return res.status(404).json({ error: "参考素材不存在或已过期" });
+      queueReferences.push({ uploadId });
     }
     if (!openRouterPool().size) return res.status(503).json({ error: "服务端尚未配置 OpenRouter API Key" });
     const startedAt = Date.now();
+    const editorPrompt = body.editorPrompt ?? body.prompt;
+    const snapshot = buildCreationSnapshot({
+      sourceType: "image", sourceId: requestId, ownerId: user.id, sessionId: activeSession.id,
+      editorPrompt, parameters: { model: body.model, ratio: body.ratio, resolution: body.resolution, count: body.count },
+      references, createdAt: startedAt,
+    }, creationSnapshotDependencies);
+    if (snapshot.references.some((reference) => reference.status === "unavailable")) return res.status(409).json({ error: "有参考素材刚刚失效，请重新选择后提交" });
     const activeTask: ImageGenerationTask = {
       id: requestId, sessionId: activeSession.id, ownerId: user.id, model: body.model, modelName: spec.name, ratio: body.ratio,
-      resolution: body.resolution, prompt: body.prompt, referenceUploadIds: body.references, requestedCount: body.count, status: "running",
+      resolution: body.resolution, prompt: snapshot.snapshot.providerPrompt,
+      referenceUploadIds: queueReferences.flatMap((reference) => reference.uploadId ? [reference.uploadId] : []), requestedCount: body.count, status: "running",
       items: [], failures: [], createdAt: startedAt, updatedAt: startedAt,
     };
     const payload = {
-      ownerId: user.id, model: body.model, prompt: body.prompt, ratio: body.ratio,
-      resolution: body.resolution, count: body.count, referenceUploadIds: body.references,
+      ownerId: user.id, model: body.model, prompt: snapshot.snapshot.providerPrompt, ratio: body.ratio,
+      resolution: body.resolution, count: body.count, references: queueReferences,
     };
     const intent = { queueName: "image-generation" as const, jobId: requestId, jobName: "generate-image", payload };
-    const admission = users.admitImageGenerationWithinLimit(activeTask, 2, intent);
+    const admission = users.admitImageGenerationWithinLimit(activeTask, 2, intent, snapshot);
     if (admission.status === "limit") return res.status(429).json({ error: "图片生成繁忙，请等当前生成完成后再试（每用户同时最多 2 组）" });
     if (admission.status === "existing") {
       const admitted = admission.task;
@@ -902,8 +1110,9 @@ app.post("/api/image-generation", requireAuth, async (req, res) => {
       if (admitted.status === "running") return res.status(202).json({ Id: admitted.id, Items: admitted.items, Model: admitted.model, Ratio: admitted.ratio, Resolution: admitted.resolution, Failed: admitted.failures, Status: "generating" });
       return res.status(409).json({ error: admitted.error ?? "该请求未生成成功" });
     }
-    users.touchCreationSession(activeSession.id, user.id, body.prompt);
-    console.info(JSON.stringify({ type: "image_generation_admitted", at: new Date().toISOString(), taskId: activeTask.id, userId: user.id, model: body.model, ratio: body.ratio, resolution: body.resolution, count: body.count, references: body.references.length, healthyKeys: openRouterPool().healthyCount() }));
+    enqueueSnapshotPromotions(snapshot);
+    users.touchCreationSession(activeSession.id, user.id, snapshot.snapshot.providerPrompt);
+    console.info(JSON.stringify({ type: "image_generation_admitted", at: new Date().toISOString(), taskId: activeTask.id, userId: user.id, model: body.model, ratio: body.ratio, resolution: body.resolution, count: body.count, references: references.length, healthyKeys: openRouterPool().healthyCount() }));
     res.status(202).json({ Id: activeTask.id, Items: [], Model: body.model, Ratio: body.ratio, Resolution: body.resolution, Failed: [], Status: "generating" });
   } catch (error) {
     respondError(res, error, 400);

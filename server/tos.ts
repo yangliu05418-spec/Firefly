@@ -36,6 +36,11 @@ export const shard = (id: string) => crypto.createHash("sha256").update(id).dige
 
 export const inputObjectKey = (ownerId: string, uploadId: string, fileName: string) => `inputs/${shard(uploadId)}/${ownerId}/${uploadId}/${safeSegment(fileName)}`;
 export const assetObjectKey = (ownerId: string, uploadId: string, fileName: string) => `assets/${shard(uploadId)}/${ownerId}/${uploadId}/${safeSegment(fileName)}`;
+export const taskReferenceObjectKey = (ownerId: string, sourceType: "video" | "image", sourceId: string, bindingId: string, fileName: string) => {
+  const bindingHash = crypto.createHash("sha256").update(bindingId).digest("hex").slice(0, 16);
+  const bindingSegment = `${safeSegment(bindingId).slice(-80)}-${bindingHash}`;
+  return `task-inputs/${shard(sourceId)}/${ownerId}/${sourceType}/${sourceId}/${bindingSegment}/${safeSegment(fileName)}`;
+};
 export const outputObjectKey = (ownerId: string, taskId: string, extension: string) => `outputs/${shard(taskId)}/${ownerId}/${taskId}/result${extension.startsWith(".") ? extension : `.${extension}`}`;
 export const previewObjectKey = (ownerId: string, taskId: string) => `previews/${shard(taskId)}/${ownerId}/${taskId}/preview.mp4`;
 export const posterObjectKey = (ownerId: string, taskId: string) => `posters/${shard(taskId)}/${ownerId}/${taskId}/poster.webp`;

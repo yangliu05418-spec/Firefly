@@ -23,7 +23,7 @@ describe("versioned database migrations", () => {
     const database = new Database(target, { readonly: true });
     expect(schemaVersion(database)).toBe(CURRENT_SCHEMA_VERSION);
     expect(assertSchemaVersion(database)).toBe(CURRENT_SCHEMA_VERSION);
-    expect((database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number }).count).toBe(9);
+    expect((database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number }).count).toBe(10);
     const assetColumns = (database.prepare("PRAGMA table_info(user_assets)").all() as { name: string }[]).map((column) => column.name);
     expect(assetColumns).toEqual(expect.arrayContaining(["category", "provider_asset_id", "last_error"]));
     expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='canvas_project_assets'").get() as { name: string }).name).toBe("canvas_project_assets");
@@ -32,6 +32,10 @@ describe("versioned database migrations", () => {
     expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='creation_sessions'").get() as { name: string }).name).toBe("creation_sessions");
     expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='async_job_outbox'").get() as { name: string }).name).toBe("async_job_outbox");
     expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='upload_sessions'").get() as { name: string }).name).toBe("upload_sessions");
+    expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='creation_snapshots'").get() as { name: string }).name).toBe("creation_snapshots");
+    expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='creation_snapshot_references'").get() as { name: string }).name).toBe("creation_snapshot_references");
+    expect((database.prepare("PRAGMA table_info(creation_snapshot_references)").all() as { name: string }[]).map((column) => column.name)).toContain("provider_asset_id");
+    expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='reedit_session_links'").get() as { name: string }).name).toBe("reedit_session_links");
     database.close();
   });
 
@@ -95,7 +99,7 @@ describe("versioned database migrations", () => {
     const target = databasePath();
     migrateDatabase(target);
     const database = new Database(target);
-    database.prepare("DELETE FROM schema_migrations WHERE version = 9").run();
+    database.prepare("DELETE FROM schema_migrations WHERE version >= 9").run();
     database.exec("ALTER TABLE image_generation_tasks DROP COLUMN references_json");
     database.prepare(`INSERT INTO users (id, feishu_open_id, feishu_union_id, tenant_key, email, name, avatar_url, status, created_at, last_login_at) VALUES ('owner-1', 'open-schema-8', 'union-schema-8', 'tenant-1', 'schema8@dokuai.tv', 'Schema 8 Owner', '', 'active', 1, 1)`).run();
     database.prepare(`INSERT INTO image_generation_tasks (id, session_id, owner_id, model, model_name, ratio, resolution, prompt, requested_count, status, items_json, failures_json, created_at, updated_at) VALUES ('image-old', NULL, 'owner-1', 'model-1', 'Model', '1:1', '1024', 'Prompt', 1, 'failed', '[]', '[]', 1, 1)`).run();

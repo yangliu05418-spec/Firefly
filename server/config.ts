@@ -68,6 +68,8 @@ export const config = {
   canvasV2Enabled: (process.env.CANVAS_V2_ENABLED ?? "true").toLowerCase() === "true",
   canvasV2Allowlist: (process.env.CANVAS_V2_ALLOWLIST ?? "").split(",").map((email) => email.trim().toLowerCase()).filter(Boolean),
   canvasTextModel: process.env.CANVAS_TEXT_MODEL ?? "google/gemini-2.5-flash",
+  reeditV2Enabled: (process.env.REEDIT_V2_ENABLED ?? "true").toLowerCase() === "true",
+  taskReferenceArchiveEnabled: (process.env.TASK_REFERENCE_ARCHIVE_ENABLED ?? "true").toLowerCase() === "true",
   shutdownGraceMs: positiveInt("SHUTDOWN_GRACE_MS", 30_000),
   workerReadinessGraceMs: boundedInt("WORKER_READINESS_GRACE_MS", 8_000, 1_000, 60_000),
   revision: process.env.FIREFLY_REVISION ?? "development",

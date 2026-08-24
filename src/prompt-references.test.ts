@@ -25,4 +25,9 @@ describe("prompt asset references", () => {
       { type: "text", value: " gently" },
     ]);
   });
+
+  it("accepts the legacy marker but always serializes the stable binding marker", () => {
+    expect(parsePromptReferences("[[firefly-asset:image-a]]")).toEqual([{ type: "asset", id: "image-a" }]);
+    expect(promptAssetMarker("image-a")).toBe("[[firefly-ref:image-a]]");
+  });
 });

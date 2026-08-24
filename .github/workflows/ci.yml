@@ -138,11 +138,16 @@ jobs:
           grep -q 'image-worker:dist-server/image-worker.js' ops/firefly-deploy.sh
           grep -q 'ensure_deploy_space' ops/firefly-deploy.sh
           grep -q 'failed_disk_space' ops/firefly-deploy.sh
+          grep -q 'dist-server/reedit-smoke.js' ops/firefly-deploy.sh
+          grep -q 'failed_reedit_smoke' ops/firefly-deploy.sh
           grep -q 'label=\$firefly_image_label' ops/firefly-deploy.sh
           grep -q "builder prune -af --filter 'until=24h'" ops/firefly-deploy.sh
           preflight_line=$(grep -n '^ensure_deploy_space$' ops/firefly-deploy.sh | cut -d: -f1)
           pull_line=$(grep -n 'docker pull "\$image"' ops/firefly-deploy.sh | cut -d: -f1)
           test "$preflight_line" -lt "$pull_line"
+          reedit_smoke_line=$(grep -n 'node dist-server/reedit-smoke.js' ops/firefly-deploy.sh | cut -d: -f1)
+          stop_old_line=$(grep -n '^stop_old_workers$' ops/firefly-deploy.sh | cut -d: -f1)
+          test "$reedit_smoke_line" -lt "$stop_old_line"
           grep -q 'web worker image-worker media-worker canvas-worker' ops/firefly-retire-slot.sh
 
       - name: Verify co-hosted Nginx configuration is preserved

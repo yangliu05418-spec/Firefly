@@ -48,6 +48,7 @@ const harness = (initialTask = taskFixture()) => {
     readTask: () => task,
     readUpload: (() => null) as ImageGenerationProcessorDependencies["readUpload"],
     readUploadState: (() => null) as ImageGenerationProcessorDependencies["readUploadState"],
+    readSnapshotReference: (() => null) as ImageGenerationProcessorDependencies["readSnapshotReference"],
     updateTask: ((id, ownerId, patch) => {
       if (!task || task.id !== id || task.ownerId !== ownerId) return null;
       task = { ...task, ...patch, updatedAt: task.updatedAt + 1 };

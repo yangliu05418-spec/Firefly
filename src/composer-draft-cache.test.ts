@@ -50,6 +50,13 @@ describe("composer draft cache", () => {
     expect((await cache.read("user-a", "session-a"))?.state.assets).toEqual([]);
   });
 
+  it("persists immutable task snapshot references without inventing an expiry", async () => {
+    const { store } = memoryStore();
+    const cache = createComposerDraftCache(store, () => 1000);
+    await cache.write("user-a", "session-a", state({ assets: [{ id: "binding-1", bindingId: "binding-1", snapshotReferenceId: "snapshot-1", name: "snapshot.png", type: "image", size: 10, role: "reference_image", progress: 100, phase: "ready" }] }));
+    expect((await cache.read("user-a", "session-a"))?.state.assets[0]).toMatchObject({ snapshotReferenceId: "snapshot-1", bindingId: "binding-1" });
+  });
+
   it("clears every session owned by a signed-out user", async () => {
     const { store } = memoryStore();
     const cache = createComposerDraftCache(store, () => 1000);

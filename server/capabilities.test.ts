@@ -28,5 +28,11 @@ describe("Seedance capability registry", () => {
     const input = validateGeneration({ ...base, model: "dreamina-seedance-2-0-mini-260615", generateAudio: false, cameraFixed: true });
     expect(buildProviderPayload(input)).not.toHaveProperty("camera_fixed");
   });
+  it("blocks an unresolved internal reference marker at the provider boundary", () => {
+    expect(() => buildProviderPayload({ ...validateGeneration(base), prompt: "使用 [[firefly-ref:missing]]" })).toThrow("未解析");
+  });
+  it("rejects media whose role does not match its type", () => {
+    expect(() => validateGeneration({ ...base, mode: "omni", assets: [{ id: "bad", name: "wrong.mp4", type: "video", role: "reference_image", url: "https://example.com/wrong.mp4" }] })).toThrow("类型与引用角色");
+  });
   it("does not expose audio generation on Seedance 1.0", () => expect(() => validateGeneration({ ...base, model: "seedance-1-0-pro-250528" })).toThrow("不支持生成音频"));
 });

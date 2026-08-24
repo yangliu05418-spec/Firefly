@@ -12,6 +12,8 @@ export type ImageModelSpec = {
   defaultResolution: string;
   /** 单次最多生成数量 */
   maxCount: number;
+  /** 单次最多引用图片数 */
+  maxReferences: number;
   /** 最长边上限（px） */
   maxSize: number;
 };
@@ -25,6 +27,7 @@ export const IMAGE_MODELS: ImageModelSpec[] = [
     resolutions: ["1024"],
     defaultResolution: "1024",
     maxCount: 4,
+    maxReferences: 4,
     maxSize: 1024,
   },
   {
@@ -33,6 +36,7 @@ export const IMAGE_MODELS: ImageModelSpec[] = [
     resolutions: ["512", "768", "1024", "1536"],
     defaultResolution: "1024",
     maxCount: 4,
+    maxReferences: 4,
     maxSize: 1536,
   },
   {
@@ -41,6 +45,7 @@ export const IMAGE_MODELS: ImageModelSpec[] = [
     resolutions: ["768", "1024", "1536", "2048"],
     defaultResolution: "1024",
     maxCount: 4,
+    maxReferences: 4,
     maxSize: 2048,
   },
   {
@@ -49,6 +54,7 @@ export const IMAGE_MODELS: ImageModelSpec[] = [
     resolutions: ["512", "768", "1024", "1536"],
     defaultResolution: "1024",
     maxCount: 4,
+    maxReferences: 4,
     maxSize: 1536,
   },
   {
@@ -57,6 +63,7 @@ export const IMAGE_MODELS: ImageModelSpec[] = [
     resolutions: ["512", "768", "1024"],
     defaultResolution: "1024",
     maxCount: 4,
+    maxReferences: 4,
     maxSize: 1024,
   },
   {
@@ -65,6 +72,7 @@ export const IMAGE_MODELS: ImageModelSpec[] = [
     resolutions: ["512", "768", "1024", "1536"],
     defaultResolution: "1024",
     maxCount: 4,
+    maxReferences: 4,
     maxSize: 1536,
   },
   {
@@ -73,6 +81,7 @@ export const IMAGE_MODELS: ImageModelSpec[] = [
     resolutions: ["512", "768", "1024", "1536"],
     defaultResolution: "1024",
     maxCount: 4,
+    maxReferences: 4,
     maxSize: 1536,
   },
 ];
