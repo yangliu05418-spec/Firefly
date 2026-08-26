@@ -20,6 +20,7 @@ for mapping in \
   'install-nginx-config.sh:firefly-install-nginx' \
   'harden-ssh-host.sh:firefly-harden-ssh' \
   'run-health-audit-host.sh:firefly-health-audit' \
+  'firefly-logs.sh:firefly-logs' \
   'run-backup-host.sh:firefly-backup'; do
   source_name=${mapping%%:*}; target_name=${mapping#*:}
   install -o root -g root -m 0755 "/opt/firefly/ops/$source_name" "/usr/local/sbin/$target_name"

@@ -16,6 +16,7 @@ APIKEY+MODEL.txt
 *.tgz
 *.tar.gz
 *.png
+!e2e/**/*-snapshots/*.png
 
 # 本地工具与测试产物
 output/

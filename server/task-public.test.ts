@@ -32,6 +32,7 @@ describe("publicTask media exposure", () => {
     expect(task.mediaSource).toBeUndefined();
     expect(task.downloadUrl).toBeUndefined();
     expect(task.posterUrl).toBeUndefined();
+    expect(task.posterStatus).toBe("processing");
     expect(task).not.toHaveProperty("sourceVideoUrl");
     expect(task).not.toHaveProperty("sourceVideoExpiresAt");
   });
@@ -53,12 +54,13 @@ describe("publicTask media exposure", () => {
   });
 
   it("only exposes stable Firefly routes after TOS verification", () => {
-    const task = publicTask(makeTask("ready"));
+    const task = publicTask(makeTask("ready"), { stablePosterReady: true });
 
     expect(task.caseId).toBe("task-1");
     expect(task.videoUrl).toBe("/api/generations/task-1/media?rev=3");
     expect(task.downloadUrl).toBe("/api/generations/task-1/download?rev=3");
     expect(task.posterUrl).toBe("/api/generations/task-1/poster?rev=3");
+    expect(task.posterStatus).toBe("ready");
     expect(task.mediaSource).toBe("tos");
     expect(task.temporaryVideoUrl).toBeUndefined();
   });
@@ -70,6 +72,7 @@ describe("publicTask media exposure", () => {
     expect(task.videoUrl).toBeUndefined();
     expect(task.downloadUrl).toBeUndefined();
     expect(task.posterUrl).toBeUndefined();
+    expect(task.posterStatus).toBe("processing");
     expect(task.temporaryVideoUrl).toBe("https://provider.example/temporary.mp4?secret=1");
     expect(task.mediaSource).toBeUndefined();
   });
@@ -98,6 +101,15 @@ describe("publicTask media exposure", () => {
     expect(task.videoUrl).toBeUndefined();
     expect(task.downloadUrl).toBeUndefined();
     expect(task.posterUrl).toBeUndefined();
+    expect(task.posterStatus).toBe("unavailable");
     expect(task.temporaryVideoUrl).toBeUndefined();
+  });
+
+  it("does not advertise a poster route until the poster object is verified", () => {
+    const task = publicTask(makeTask("ready"), { stableOutputReady: true, stablePosterReady: false });
+
+    expect(task.downloadUrl).toBe("/api/generations/task-1/download?rev=3");
+    expect(task.posterStatus).toBe("processing");
+    expect(task.posterUrl).toBeUndefined();
   });
 });

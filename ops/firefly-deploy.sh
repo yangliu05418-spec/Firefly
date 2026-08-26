@@ -204,7 +204,7 @@ if /usr/bin/docker ps -q --filter "publish=$next_port" | grep -q .; then
 fi
 /usr/bin/docker run -d --name "firefly-web-$next_slot" --restart unless-stopped --stop-timeout 35 \
   --network "$network" --label com.firefly.role=web --label com.firefly.slot="$next_slot" --security-opt no-new-privileges --cap-drop ALL \
-  --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 \
+  --log-driver journald --log-opt 'tag=firefly/{{.Name}}' \
   --env-file "$app_env" --env-file "$feishu_env" -e FIREFLY_REVISION="$revision" -e FIREFLY_IMAGE_DIGEST="${image##*@}" \
   -p "127.0.0.1:$next_port:8090" -v /srv/firefly/uploads:/data/uploads -v /srv/firefly/data:/data "$image" node dist-server/index.js >/dev/null
 
@@ -233,7 +233,7 @@ for role_command in $worker_commands; do
   /usr/bin/docker run -d --name "firefly-$role-$next_slot" --restart unless-stopped --stop-timeout 35 \
     --network "$network" --label com.firefly.role="$role" --label com.firefly.slot="$next_slot" --security-opt no-new-privileges --cap-drop ALL \
     --health-cmd "node dist-server/worker-healthcheck.js $heartbeat_role" --health-interval 15s --health-timeout 5s --health-retries 3 \
-    --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 \
+    --log-driver journald --log-opt 'tag=firefly/{{.Name}}' \
     --env-file "$app_env" --env-file "$feishu_env" -e FIREFLY_REVISION="$revision" -e FIREFLY_IMAGE_DIGEST="${image##*@}" \
     -v /srv/firefly/uploads:/data/uploads -v /srv/firefly/data:/data "$image" node "$command" >/dev/null
 done

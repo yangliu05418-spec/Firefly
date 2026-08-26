@@ -7,6 +7,7 @@ import { config } from "./config.js";
 import { assertSchemaVersion } from "./migrations.js";
 import { tosHealth } from "./tos.js";
 import { readWorkerHealth, type WorkerHealthSnapshot } from "./worker-heartbeat.js";
+import { readJourneySlos, type JourneySlo } from "./journey-observability.js";
 
 const backupDirectory = process.env.BACKUP_DIR ?? "/data/backups";
 const maximumBackupAgeMs = 8 * 3600 * 1000;
@@ -35,6 +36,7 @@ const main = async () => {
   let workerHealth: WorkerHealthSnapshot | undefined;
   let creationReferences = { promoting: 0, stalled: 0, failedRecent: 0 };
   let reeditMetrics = { started: 0, failed: 0, failureRate: 0 };
+  let journeySlos: JourneySlo[] = [];
   try {
     await redis.ping().catch(() => { reasons.push("redis_unavailable"); });
     try {
@@ -70,6 +72,8 @@ const main = async () => {
       reeditMetrics.failed = metricValues.filter((_value, index) => index % 2 === 1).reduce((sum, value) => sum + Number(value ?? 0), 0);
       reeditMetrics.failureRate = reeditMetrics.started ? Number((reeditMetrics.failed / reeditMetrics.started).toFixed(4)) : 0;
       if (reeditMetrics.started > 0 && reeditMetrics.failureRate > 0.05) reasons.push("reedit_failure_rate_high");
+      journeySlos = await readJourneySlos(redis, 15);
+      for (const slo of journeySlos) if (slo.sampleStatus === "breached") reasons.push(`slo_${slo.journey}_breached`);
       const [generationCounts, mediaCounts, previewCounts, assetCounts, imageCounts, canvasCounts, uploadCounts] = await Promise.all([
         generation.getJobCounts("wait", "active", "failed"), media.getJobCounts("wait", "active", "failed"), preview.getJobCounts("wait", "active", "failed"), assets.getJobCounts("wait", "active", "failed"), images.getJobCounts("wait", "active", "failed"), canvas.getJobCounts("wait", "active", "failed"), uploads.getJobCounts("wait", "active", "failed")
       ]);
@@ -92,7 +96,7 @@ const main = async () => {
     redis.disconnect();
   }
   const blockingReasons = reasons;
-  const result = { type: "health_audit", at: new Date().toISOString(), ok: blockingReasons.length === 0, state: blockingReasons.sort().join(",") || "ok", warnings: [], backupAgeSeconds: Number.isFinite(backupAgeMs) ? Math.round(backupAgeMs / 1000) : null, queueCounts, outboxCounts, creationReferences, reeditMetrics, workerHealth, tos, revision: config.revision, imageDigest: config.imageDigest };
+  const result = { type: "health_audit", at: new Date().toISOString(), ok: blockingReasons.length === 0, state: blockingReasons.sort().join(",") || "ok", warnings: [], backupAgeSeconds: Number.isFinite(backupAgeMs) ? Math.round(backupAgeMs / 1000) : null, queueCounts, outboxCounts, creationReferences, reeditMetrics, journeySlos, workerHealth, tos, revision: config.revision, imageDigest: config.imageDigest };
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (!result.ok) process.exitCode = 1;
 };

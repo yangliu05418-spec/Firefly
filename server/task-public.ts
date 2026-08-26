@@ -22,12 +22,19 @@ export const publicTask = (
   {
     stableOutputReady = true,
     stablePreviewReady = false,
+    stablePosterReady = false,
     outputIsPreview = true,
-  }: { stableOutputReady?: boolean; stablePreviewReady?: boolean; outputIsPreview?: boolean } = {},
+  }: { stableOutputReady?: boolean; stablePreviewReady?: boolean; stablePosterReady?: boolean; outputIsPreview?: boolean } = {},
 ) => {
   const revision = task.mediaRevision ?? 0;
   const downloadable = task.status === "succeeded" && task.mediaStatus === "ready" && stableOutputReady;
   const previewable = task.status === "succeeded" && (stablePreviewReady || (outputIsPreview && downloadable));
+  const posterReady = task.status === "succeeded" && stablePosterReady;
+  const posterStatus = posterReady
+    ? "ready" as const
+    : task.status === "succeeded" && ["archiving", "ready"].includes(task.mediaStatus ?? "none")
+      ? "processing" as const
+      : "unavailable" as const;
   const mediaStatus = task.status === "succeeded" && task.mediaStatus === "ready" && !stableOutputReady
     ? "archiving" as const
     : task.mediaStatus;
@@ -43,7 +50,8 @@ export const publicTask = (
     caseId: task.id,
     videoUrl: previewable ? `/api/generations/${task.id}/media?rev=${revision}` : undefined,
     downloadUrl: downloadable ? `/api/generations/${task.id}/download?rev=${revision}` : undefined,
-    posterUrl: downloadable ? `/api/generations/${task.id}/poster?rev=${revision}` : undefined,
+    posterStatus,
+    posterUrl: posterReady ? `/api/generations/${task.id}/poster?rev=${revision}` : undefined,
     temporaryVideoUrl: temporary ? sourceVideoUrl : undefined,
     temporaryVideoExpiresAt: temporary ? sourceVideoExpiresAt : undefined,
     mediaSource: previewable ? ("tos" as const) : undefined

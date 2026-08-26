@@ -1,0 +1,7 @@
+.client-crash{min-height:100vh;padding:24px;display:grid;place-items:center;color:#e9e9e4;background:#090a0c}
+.client-crash>div{width:min(440px,100%);padding:34px;border:1px solid rgba(255,255,255,.1);border-radius:18px;background:#111317;box-shadow:0 28px 90px rgba(0,0,0,.44)}
+.client-crash span{color:#7f8984;font:10px var(--font-dotdigital);letter-spacing:.18em}
+.client-crash h1{margin:14px 0 9px;font:500 24px/1.25 var(--font-aeonikpro)}
+.client-crash p{margin:0;color:#858b88;font-size:12px;line-height:1.7}
+.client-crash button{height:40px;margin-top:22px;padding:0 16px;border:1px solid rgba(210,225,215,.22);border-radius:10px;color:#e7ece8;background:transparent;cursor:pointer}
+.client-crash button:hover,.client-crash button:focus-visible{outline:0;border-color:rgba(210,225,215,.48);background:rgba(210,225,215,.055)}

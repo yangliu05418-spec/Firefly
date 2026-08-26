@@ -136,6 +136,8 @@ jobs:
           grep -q 'failed_worker_readiness' ops/firefly-deploy.sh
           grep -q 'flock -w 30 9' ops/firefly-deploy.sh
           grep -q 'image-worker:dist-server/image-worker.js' ops/firefly-deploy.sh
+          grep -q -- "--log-driver journald" ops/firefly-deploy.sh
+          sh -n ops/firefly-logs.sh
           grep -q 'ensure_deploy_space' ops/firefly-deploy.sh
           grep -q 'failed_disk_space' ops/firefly-deploy.sh
           grep -q 'dist-server/reedit-smoke.js' ops/firefly-deploy.sh
