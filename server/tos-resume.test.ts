@@ -48,4 +48,42 @@ describe("resumable TOS archive", () => {
       parts: [{ partNumber: 1, eTag: "etag-1" }, { partNumber: 2, eTag: "etag-2" }],
     }));
   });
+
+  it("resumes from the durable checkpoint when ListParts permission is unavailable", async () => {
+    config.tosAccessKeyId = "test-ak";
+    config.tosSecretAccessKey = "test-sk";
+    config.tosBucket = "test-bucket";
+    config.tosEndpoint = "tos.example.test";
+    const totalSize = 10 * 1024 * 1024;
+    vi.spyOn(tos, "headObject")
+      .mockRejectedValueOnce(Object.assign(new Error("missing"), { statusCode: 404 }))
+      .mockResolvedValue({ data: { contentLength: totalSize, contentType: "video/mp4" }, headers: { "content-length": String(totalSize), "content-type": "video/mp4" } } as never);
+    vi.spyOn(tos, "getObjectV2").mockResolvedValue({ statusCode: 206, data: { content: Buffer.from([0]) }, headers: { "content-range": `bytes 0-0/${totalSize}` } } as never);
+    vi.spyOn(tos, "listParts").mockRejectedValue(Object.assign(new Error("AccessDenied"), { statusCode: 403, code: "AccessDenied" }));
+    const create = vi.spyOn(tos, "createMultipartUpload");
+    const complete = vi.spyOn(tos, "completeMultipartUpload").mockResolvedValue({} as never);
+    const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const range = new Headers(init?.headers).get("range");
+      if (range === "bytes=0-0") return new Response(new Uint8Array([0]), { status: 206, headers: { "content-range": `bytes 0-0/${totalSize}`, "content-type": "video/mp4" } });
+      if (range === `bytes=${5 * 1024 * 1024}-${totalSize - 1}`) return new Response(new Uint8Array(5 * 1024 * 1024), { status: 206 });
+      if (init?.method === "PUT") return new Response(null, { status: 200, headers: { etag: '"etag-2"' } });
+      throw new Error(`unexpected request ${range ?? init?.method}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const degraded = vi.fn();
+
+    await rangedObjectFromUrl(
+      "outputs/result.mp4", "https://provider.test/result.mp4", "result.mp4", "video/mp4", undefined,
+      5 * 1024 * 1024, 3,
+      { uploadId: "upload-existing", parts: [{ partNumber: 1, eTag: "etag-1" }] },
+      { listPartsDegraded: degraded },
+    );
+
+    expect(degraded).toHaveBeenCalledWith("upload-existing", 403, "AccessDenied");
+    expect(create).not.toHaveBeenCalled();
+    expect(complete).toHaveBeenCalledWith(expect.objectContaining({
+      uploadId: "upload-existing",
+      parts: [{ partNumber: 1, eTag: "etag-1" }, { partNumber: 2, eTag: "etag-2" }],
+    }));
+  });
 });

@@ -6,7 +6,7 @@ import express from "express";
 import cookieParser from "cookie-parser";
 import { z } from "zod";
 import { config } from "./config.js";
-import { MODELS } from "./capabilities.js";
+import { MODELS, availableModels } from "./capabilities.js";
 import { clearSession, createSession, getSessionUser, publicUser, requireAuth, type SessionUser } from "./auth.js";
 import type { AssetCategory, CanvasJob, CanvasProject, CanvasProjectAsset, CreationSession, CreationSnapshotBundle, ImageGenerationTask, UploadSession, UserAsset } from "./db.js";
 import { users } from "./store.js";
@@ -111,14 +111,12 @@ const rejectGeneration = (res: express.Response, status: number, code: string, e
 const param = (value: string | string[]) => Array.isArray(value) ? value[0] : value;
 const publicGenerationTask = (task: StoredTask) => {
   const stablePreviewReady = tosEnabled() && config.tosPreviewTranscodeEnabled && Boolean(users.readTaskMedia(task.id, "preview"));
-  const stableMediaReady = task.status !== "succeeded" || task.mediaStatus !== "ready"
+  const stableOutputReady = task.status !== "succeeded" || task.mediaStatus !== "ready"
     ? true
     : !tosEnabled()
       ? true
-      : config.tosPreviewTranscodeEnabled
-        ? Boolean(users.readTaskMedia(task.id, "preview"))
-        : Boolean(users.readTaskMedia(task.id, "output"));
-  return publicTask(task, { stableMediaReady, stablePreviewReady });
+      : Boolean(users.readTaskMedia(task.id, "output"));
+  return publicTask(task, { stableOutputReady, stablePreviewReady, outputIsPreview: !config.tosPreviewTranscodeEnabled });
 };
 const publicCreationSession = ({ ownerId: _ownerId, deletedAt: _deletedAt, ...session }: CreationSession) => session;
 const createCreationSession = (ownerId: string, title = "新创作") => {
@@ -197,7 +195,7 @@ app.get("/api/auth/feishu/callback", async (req, res) => {
 });
 app.delete("/api/auth/session", async (req, res) => { await clearSession(redis, req, res); res.status(204).end(); });
 
-app.get("/api/models", requireAuth, (_req, res) => res.json(MODELS));
+app.get("/api/models", requireAuth, (_req, res) => res.json(availableModels(config.disabledVideoModels)));
 
 const uploadMetaSchema = z.object({ name: z.string().min(1).max(180), size: z.number().int().positive().max(200 * 1024 * 1024), type: z.enum(["image", "video", "audio"]), mime: z.string().max(100) });
 const safeName = (name: string) => name.normalize("NFKC").replace(/[^\p{L}\p{N}._-]+/gu, "-").slice(-120) || "asset";
@@ -710,6 +708,7 @@ const reeditDependencies = {
   readSession: (sessionId: string, includeDeleted = false) => users.readCreationSession(sessionId, includeDeleted),
   now: () => Date.now(),
   inputRetentionDays: config.tosInputRetentionDays,
+  disabledVideoModels: config.disabledVideoModels,
 };
 
 const legacyReeditDependencies = {
@@ -718,6 +717,7 @@ const legacyReeditDependencies = {
   readSession: reeditDependencies.readSession,
   now: reeditDependencies.now,
   inputRetentionDays: reeditDependencies.inputRetentionDays,
+  disabledVideoModels: reeditDependencies.disabledVideoModels,
 };
 let reeditIntegrityCache: { checkedAt: number; error?: Error } = { checkedAt: 0 };
 const checkReeditIntegrity = () => {
@@ -1165,6 +1165,9 @@ app.post("/api/image-generation", requireAuth, async (req, res) => {
       editorPrompt, parameters: { model: body.model, ratio: body.ratio, resolution: body.resolution, count: body.count },
       references, createdAt: startedAt,
     }, creationSnapshotDependencies);
+    // Reference chips expand into provider-visible text. Validate the materialized
+    // prompt as the final server-side contract, not only the editor source.
+    assertPromptLength(snapshot.snapshot.providerPrompt, "prompt", IMAGE_PROVIDER_PROMPT_MAX_CHARS);
     if (snapshot.references.some((reference) => reference.status === "unavailable")) return res.status(409).json({ error: "有参考素材刚刚失效，请重新选择后提交" });
     const activeTask: ImageGenerationTask = {
       id: requestId, sessionId: activeSession.id, ownerId: user.id, model: body.model, modelName: spec.name, ratio: body.ratio,
@@ -1482,8 +1485,8 @@ app.get("/api/canvas-project-assets/:id/media", requireAuth, createCanvasProject
 const canvasJobBaseSchema = z.object({ nodeId: z.string().min(1).max(120), revision: z.number().int().min(0) });
 const canvasJobCreateSchema = z.discriminatedUnion("kind", [
   canvasJobBaseSchema.extend({ kind: z.literal("text"), payload: z.object({ instruction: z.string().trim().min(1).max(20_000) }) }),
-  canvasJobBaseSchema.extend({ kind: z.literal("image"), payload: z.object({ prompt: z.string().trim().min(1).max(20_000), model: z.string().min(1).max(120), ratio: z.string().min(1).max(20), resolution: z.string().min(1).max(20), referenceAssetIds: z.array(z.string().min(1).max(180)).max(30).default([]) }) }),
-  canvasJobBaseSchema.extend({ kind: z.literal("character_tool"), payload: z.object({ tool: z.enum(["turnaround", "closeup", "expressions", "portrait"]), prompt: z.string().trim().min(1).max(20_000), model: z.string().min(1).max(120), ratio: z.string().min(1).max(20), resolution: z.string().min(1).max(20), referenceAssetIds: z.array(z.string().min(1).max(180)).max(30).default([]) }) }),
+  canvasJobBaseSchema.extend({ kind: z.literal("image"), payload: z.object({ prompt: z.string().trim().min(1).max(IMAGE_PROVIDER_PROMPT_MAX_CHARS), model: z.string().min(1).max(120), ratio: z.string().min(1).max(20), resolution: z.string().min(1).max(20), referenceAssetIds: z.array(z.string().min(1).max(180)).max(30).default([]) }) }),
+  canvasJobBaseSchema.extend({ kind: z.literal("character_tool"), payload: z.object({ tool: z.enum(["turnaround", "closeup", "expressions", "portrait"]), prompt: z.string().trim().min(1).max(IMAGE_PROVIDER_PROMPT_MAX_CHARS), model: z.string().min(1).max(120), ratio: z.string().min(1).max(20), resolution: z.string().min(1).max(20), referenceAssetIds: z.array(z.string().min(1).max(180)).max(30).default([]) }) }),
   canvasJobBaseSchema.extend({ kind: z.literal("video"), payload: z.object({ generation: z.record(z.unknown()), references: z.array(z.object({ assetId: z.string().min(1).max(180), role: z.enum(["reference_image", "reference_video", "reference_audio", "first_frame", "last_frame"]) })).max(50).default([]) }) }),
 ]);
 
@@ -1534,6 +1537,7 @@ app.post("/api/canvases/:id/jobs", requireAuth, async (req, res) => {
     if (body.kind === "image" || body.kind === "character_tool") {
       const references = ownedCanvasProjectAssets(canvasId, user.id, [...context.assetIds, ...body.payload.referenceAssetIds]);
       const prompt = [context.text, body.kind === "character_tool" ? characterToolPrompts[body.payload.tool] : "", body.payload.prompt].filter(Boolean).join("\n\n");
+      assertPromptLength(prompt, "prompt", IMAGE_PROVIDER_PROMPT_MAX_CHARS);
       const payload = { canvasJobId: canvasJob.id, kind: body.kind, payload: { prompt, model: body.payload.model, ratio: body.payload.ratio, resolution: body.payload.resolution, referenceAssetIds: references.map((asset) => asset.id) } };
       const intent = { queueName: "canvas-jobs" as const, jobId: canvasJob.id, jobName: body.kind, payload };
       if (!users.createCanvasImageJobWithinLimit(canvasJob, 2, intent)) return res.status(429).json({ error: "你已有 2 个图片任务正在处理，请等待其中一个完成" });

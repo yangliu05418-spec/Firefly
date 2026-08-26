@@ -1,5 +1,5 @@
 import type { CreationSession, CreationSnapshot, CreationSnapshotReference, ImageGenerationTask, MediaObject, StoredTask, UserAsset } from "./db.js";
-import { MODELS } from "./capabilities.js";
+import { MODELS, availableModels } from "./capabilities.js";
 import { DEFAULT_IMAGE_MODEL, IMAGE_MODELS, IMAGE_RATIOS } from "./image-models.js";
 
 type ReferenceRole = "reference_image" | "reference_video" | "reference_audio" | "first_frame" | "last_frame";
@@ -48,6 +48,7 @@ export type GenerationReeditDependencies = {
   readSession?(sessionId: string, includeDeleted?: boolean): CreationSession | null;
   now(): number;
   inputRetentionDays: number;
+  disabledVideoModels?: string[];
 };
 
 const modes = new Set<GenerationReeditPayload["state"]["mode"]>(["omni", "first_frame", "first_last", "edit", "extend", "text"]);
@@ -114,10 +115,11 @@ const restoreSnapshotReferences = (references: CreationSnapshotReference[], owne
   return { assets, warnings, omitted };
 };
 
-const normalizeVideo = (parameters: Record<string, unknown>) => {
+const normalizeVideo = (parameters: Record<string, unknown>, disabledVideoModels: readonly string[] = []) => {
   const adjustments: ReeditAdjustment[] = [];
   const requestedModel = text(parameters.model);
-  const model = MODELS.find((item) => item.id === requestedModel) ?? MODELS[0];
+  const models = availableModels(disabledVideoModels);
+  const model = models.find((item) => item.id === requestedModel) ?? models[0];
   if (!model) throw new Error("当前没有可用的视频模型");
   if (requestedModel && requestedModel !== model.id) adjustments.push({ field: "modelId", requested: requestedModel, effective: model.id, reason: "原模型已下线，已切换到默认模型" });
   const requestedMode = text(parameters.mode, "omni") as GenerationReeditPayload["state"]["mode"];
@@ -158,7 +160,7 @@ const fromSnapshot = (snapshot: CreationSnapshot, deps: GenerationReeditDependen
   const parameters = record(snapshot.parameters);
   const restored = restoreSnapshotReferences(deps.listSnapshotReferences?.(snapshot.sourceType, snapshot.sourceId) ?? [], snapshot.ownerId, deps);
   if (snapshot.sourceType === "video") {
-    const normalized = normalizeVideo(parameters);
+    const normalized = normalizeVideo(parameters, deps.disabledVideoModels);
     return withPublicContract({ sourceId: snapshot.sourceId, sourceType: "video", sessionId: snapshot.sessionId, snapshotVersion: snapshot.bindingVersion, recoveryQuality: snapshot.recoveryQuality, sourceSessionStatus: sessionStatus(snapshot.sessionId, deps), omittedAssets: restored.omitted, warnings: restored.warnings, adjustments: normalized.adjustments, state: { engine: "video", prompt: snapshot.editorPrompt, modelId: normalized.model.id, mode: normalized.mode, ratio: normalized.ratio, resolution: normalized.resolution, duration: normalized.duration, generateAudio: bool(parameters.generateAudio, true) && normalized.model.supportsAudio, cameraFixed: bool(parameters.cameraFixed, false), watermark: bool(parameters.watermark, false), seed: integer(parameters.seed, -1), imageModelId: "", imageRatio: "1:1", imageResolution: "", imageCount: 1, assets: restored.assets } });
   }
   const normalized = normalizeImage(parameters);
@@ -172,7 +174,7 @@ export const buildVideoReeditPayload = (task: StoredTask, ownerId: string, deps:
   const sources = Array.isArray(request.assets) ? request.assets.map((item) => record(item) as StoredReference) : [];
   const assets = sources.flatMap((source) => restoreLegacyReference(source, ownerId, deps) ?? []);
   const omittedAssets = sources.length - assets.length;
-  const normalized = normalizeVideo({ ...request, model: text(request.model, task.model), mode: text(request.mode, task.mode), ratio: text(request.ratio, task.ratio), resolution: text(request.resolution, task.resolution), duration: integer(request.duration, task.duration) });
+  const normalized = normalizeVideo({ ...request, model: text(request.model, task.model), mode: text(request.mode, task.mode), ratio: text(request.ratio, task.ratio), resolution: text(request.resolution, task.resolution), duration: integer(request.duration, task.duration) }, deps.disabledVideoModels);
   return withPublicContract({ sourceId: task.id, sourceType: "video", sessionId: task.sessionId, snapshotVersion: 0, recoveryQuality: "partial", sourceSessionStatus: sessionStatus(task.sessionId, deps), omittedAssets, warnings: omittedAssets ? [{ code: "LEGACY_REFERENCE_MISSING", message: `${omittedAssets} 个历史素材无法恢复` }] : [{ code: "LEGACY_SNAPSHOT_PARTIAL", message: "该历史任务创建于精确快照启用前" }], adjustments: normalized.adjustments, state: { engine: "video", prompt: text(request.editorPrompt, text(request.prompt, task.prompt)), modelId: normalized.model.id, mode: normalized.mode, ratio: normalized.ratio, resolution: normalized.resolution, duration: normalized.duration, generateAudio: bool(request.generateAudio, true), cameraFixed: bool(request.cameraFixed, false), watermark: bool(request.watermark, false), seed: integer(request.seed, -1), imageModelId: "", imageRatio: "1:1", imageResolution: "", imageCount: 1, assets } });
 };
 

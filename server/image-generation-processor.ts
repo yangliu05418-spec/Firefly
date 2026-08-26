@@ -2,7 +2,7 @@ import { UnrecoverableError } from "bullmq";
 import type { ImageGenerationTask, MediaObject } from "./db.js";
 import { storeGeneratedImage } from "./generated-media.js";
 import { openRouterResolution } from "./image-models.js";
-import { downloadGeneratedImage, generateSingleImage, isRetryableOpenRouterFailure, OpenRouterError } from "./openrouter.js";
+import { classifyOpenRouterFailure, downloadGeneratedImage, generateSingleImage, isRetryableOpenRouterFailure, OpenRouterError } from "./openrouter.js";
 import type { ImageGenerationQueuePayload } from "./redis.js";
 import { users } from "./store.js";
 import { signedProviderObjectUrl } from "./tos.js";
@@ -109,12 +109,14 @@ export const processImageGenerationAttempt = async (
       }
       console.info(JSON.stringify({ type: "image_generation_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, mediaId: media.id, index, bytes: body.length, contentType }));
     } catch (error) {
-      const message = errorMessage(error);
+      const rawMessage = errorMessage(error);
+      const classified = classifyOpenRouterFailure(error);
+      const message = error instanceof OpenRouterError ? classified.publicMessage : rawMessage;
       const retryable = isRetryableOpenRouterFailure(error);
       if (retryable && job.attemptNumber < job.maxAttempts) {
         console.warn(JSON.stringify({
           type: "image_generation_item_retry", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId,
-          index, attempt: job.attemptNumber, status: error instanceof OpenRouterError ? error.status : undefined, message,
+          index, attempt: job.attemptNumber, status: error instanceof OpenRouterError ? error.status : undefined, errorCode: classified.errorCode,
         }));
         throw error;
       }
@@ -122,7 +124,7 @@ export const processImageGenerationAttempt = async (
       deps.updateTask(task.id, task.ownerId, { status: "running", items, failures });
       console.warn(JSON.stringify({
         type: "image_generation_item_failed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId,
-        index, attempt: job.attemptNumber, retryable, status: error instanceof OpenRouterError ? error.status : undefined, message,
+        index, attempt: job.attemptNumber, retryable, status: error instanceof OpenRouterError ? error.status : undefined, errorCode: classified.errorCode,
       }));
     }
   }

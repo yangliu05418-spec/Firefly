@@ -72,6 +72,32 @@ export class OpenRouterError extends Error {
   }
 }
 
+export type ImageProviderErrorCode =
+  | "IMAGE_CONTENT_REJECTED"
+  | "IMAGE_INVALID_PARAMETERS"
+  | "IMAGE_MODEL_UNAVAILABLE"
+  | "IMAGE_RATE_LIMITED"
+  | "IMAGE_PROVIDER_UNAVAILABLE"
+  | "IMAGE_PROVIDER_TIMEOUT"
+  | "IMAGE_PROVIDER_NETWORK_ERROR"
+  | "IMAGE_PROVIDER_UNKNOWN_ERROR";
+
+export const classifyOpenRouterFailure = (error: unknown) => {
+  const status = error instanceof OpenRouterError ? error.status : "network" as const;
+  const fingerprint = error instanceof Error ? error.message.toLowerCase() : "";
+  if (/content|safety|policy|moderation|sensitive/.test(fingerprint)) return { errorCode: "IMAGE_CONTENT_REJECTED" as const, publicMessage: "内容未通过安全审核，请调整提示词或参考图片后重试" };
+  if (status === 401 || status === 403 || /model.*(?:unavailable|permission|access|disabled)/.test(fingerprint)) return { errorCode: "IMAGE_MODEL_UNAVAILABLE" as const, publicMessage: "当前图片模型暂不可用，请联系管理员" };
+  if (status === 429) return { errorCode: "IMAGE_RATE_LIMITED" as const, publicMessage: "图片生成服务繁忙，请稍后重试" };
+  if (status === "network") {
+    return /timeout|timed out|超时/.test(fingerprint)
+      ? { errorCode: "IMAGE_PROVIDER_TIMEOUT" as const, publicMessage: "图片生成响应超时，请稍后重试" }
+      : { errorCode: "IMAGE_PROVIDER_NETWORK_ERROR" as const, publicMessage: "图片生成网络暂时异常，请稍后重试" };
+  }
+  if (status >= 500) return { errorCode: "IMAGE_PROVIDER_UNAVAILABLE" as const, publicMessage: "图片生成服务暂时不可用，请稍后重试" };
+  if (status >= 400) return { errorCode: "IMAGE_INVALID_PARAMETERS" as const, publicMessage: "图片生成参数或参考素材不符合模型要求，请调整后重试" };
+  return { errorCode: "IMAGE_PROVIDER_UNKNOWN_ERROR" as const, publicMessage: "图片生成失败，请稍后重试" };
+};
+
 export const isRetryableOpenRouterFailure = (error: unknown) => {
   if (!(error instanceof OpenRouterError)) return true;
   if (error.status === "network") return true;

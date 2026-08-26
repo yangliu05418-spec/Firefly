@@ -21,10 +21,12 @@ import { tosArchiveErrorCode } from "./tos-errors.js";
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const numberHeader = (value: unknown) => Number(value ?? 0) || 0;
 const recoveryBucketMs = 15 * 60 * 1000;
+const archivePollBucketMs = 10 * 1000;
 const posterRecoveryBucketMs = 15 * 60 * 1000;
 const previewRecoveryBucketMs = 15 * 60 * 1000;
 const uploadFinalizationDeadlineMs = 15 * 60 * 1000;
 const previewLeaseMs = config.tosTranscodeDeadlineMs + config.tosSourceStreamTimeoutMs + 60_000;
+const fetchWorkerPollingWindowMs = 30_000;
 
 const outputFormatFor = (task: { request?: unknown }) => (task.request as { outputFormat?: unknown } | undefined)?.outputFormat === "mov" ? "mov" as const : "mp4" as const;
 const enqueuePosterRecovery = async (taskId: string) => mediaQueue.add("create-poster", { taskId }, {
@@ -138,6 +140,19 @@ const enqueueArchiveRecovery = async (task: { id: string; sourceVideoUrl?: strin
   return true;
 };
 
+const enqueueArchivePoll = async (task: { id: string; sourceVideoUrl?: string; sourceVideoExpiresAt?: number; request?: unknown }, delay = 5_000) => {
+  if (!task.sourceVideoUrl || !task.sourceVideoExpiresAt || task.sourceVideoExpiresAt <= Date.now() + delay + 60_000) return false;
+  const bucket = Math.floor((Date.now() + delay) / archivePollBucketMs);
+  await mediaQueue.add("archive-output", { taskId: task.id, sourceUrl: task.sourceVideoUrl, outputFormat: outputFormatFor(task) }, {
+    jobId: `archive-poll-${task.id}-${bucket}`,
+    delay,
+    attempts: 1,
+    removeOnComplete: { age: 24 * 3600 },
+    removeOnFail: { age: 24 * 3600 },
+  });
+  return true;
+};
+
 const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputFormat: "mp4" | "mov"; existingObjectOnly?: boolean }, attempt: number) => {
   const task = await readTask(data.taskId, true);
   if (!task || task.deletedAt || !task.ownerId) return;
@@ -180,6 +195,7 @@ const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputF
         { uploadId: checkpoint.tosUploadId, sourceSize: checkpoint.sourceSize, contentType: checkpoint.contentType, parts: checkpoint.parts },
         {
           resumed: (uploadId, skippedParts) => console.info(JSON.stringify({ type: "tos_archive_checkpoint_resumed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, uploadId, skippedParts })),
+          listPartsDegraded: (uploadId, statusCode, code) => console.warn(JSON.stringify({ type: "tos_archive_list_parts_degraded", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, uploadId, statusCode, providerCode: code, fallback: "durable_checkpoint" })),
           checkpoint: (state) => { saveCheckpoint({ strategy: "stream_multipart", tosUploadId: state.uploadId, sourceSize: state.sourceSize, contentType: state.contentType, parts: state.parts }); },
         },
       );
@@ -194,7 +210,7 @@ const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputF
           }).catch((error) => console.warn(JSON.stringify({ type: "tos_fetch_trace_persist_failed", at: new Date().toISOString(), taskId: task.id, code: (error as { code?: string }).code ?? "unknown" })));
         },
         stateChanged: (fetchTaskId, state, error) => console.info(JSON.stringify({ type: "tos_fetch_task_state", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, fetchTaskId, state, error: error || undefined }))
-      }, checkpoint.fetchTaskId ?? task.fetchTaskId, Math.max(1_000, Math.min(config.tosFetchDeadlineMs, config.tosFetchMaxWaitMs - (Date.now() - (checkpoint.fetchStartedAt ?? Date.now())))));
+      }, checkpoint.fetchTaskId ?? task.fetchTaskId, Math.max(1_000, Math.min(fetchWorkerPollingWindowMs, config.tosFetchDeadlineMs, config.tosFetchMaxWaitMs - (Date.now() - (checkpoint.fetchStartedAt ?? Date.now())))));
     }
     const head = await optimizePlaybackObject(objectKey, { contentType: data.outputFormat === "mov" ? "video/quicktime" : "video/mp4", fileName: `result.${data.outputFormat}`, cacheSeconds: config.tosPreviewTtlSeconds });
     const dataOut = head.data as unknown as { contentLength?: number; etag?: string; contentType?: string };
@@ -235,13 +251,22 @@ const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputF
     console.info(JSON.stringify({ type: "tos_fetch_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, strategy, size, posterReady, elapsedMs: Date.now() - startedAt, requestId: head.requestId }));
   } catch (error) {
     const failureCode = tosArchiveErrorCode(error);
+    if (error instanceof TosFetchPendingError) {
+      if (checkpoint) saveCheckpoint({ strategy: "url_fetch", fetchTaskId: error.taskId, lastErrorCode: failureCode });
+      const queued = await enqueueArchivePoll(task);
+      console.info(JSON.stringify({ type: "tos_fetch_pending", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, strategy, fetchTaskId: error.taskId, elapsedMs: Date.now() - startedAt, pollQueued: queued }));
+      if (queued) return;
+    }
+    if (failureCode === "TOS_UPLOAD_MISSING" && checkpoint) {
+      checkpoint = saveCheckpoint({ strategy: "stream_multipart", tosUploadId: undefined, parts: [], lastErrorCode: failureCode });
+    }
     if (checkpoint) saveCheckpoint({ strategy: error instanceof TosFetchPendingError ? "url_fetch" : checkpoint.strategy, lastErrorCode: failureCode });
     const current = await readTask(task.id, true);
     if (current && !current.deletedAt) {
-      const trace = { phase: strategy, code: failureCode, statusCode: (error as { statusCode?: number }).statusCode ?? null, message: error instanceof Error ? error.message.slice(0, 500) : undefined, elapsedMs: Date.now() - startedAt };
+      const trace = { phase: strategy, stage: (error as { archiveStage?: string }).archiveStage ?? null, code: failureCode, statusCode: (error as { statusCode?: number }).statusCode ?? null, message: error instanceof Error ? error.message.slice(0, 500) : undefined, elapsedMs: Date.now() - startedAt };
       await saveTask({ ...current, mediaStatus: "archiving", mediaLastError: JSON.stringify(trace), updatedAt: Date.now() });
     }
-    console.warn(JSON.stringify({ type: "tos_fetch_failed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, strategy, elapsedMs: Date.now() - startedAt, code: failureCode, providerCode: (error as { code?: string }).code, statusCode: (error as { statusCode?: number }).statusCode }));
+    console.warn(JSON.stringify({ type: "tos_fetch_failed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, strategy, stage: (error as { archiveStage?: string }).archiveStage, elapsedMs: Date.now() - startedAt, code: failureCode, providerCode: (error as { code?: string }).code, statusCode: (error as { statusCode?: number }).statusCode, requestId: (error as { requestId?: string }).requestId }));
     throw error;
   }
 };

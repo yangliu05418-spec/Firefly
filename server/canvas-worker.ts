@@ -4,13 +4,14 @@ import { config } from "./config.js";
 import { users } from "./store.js";
 import { mediaQueue } from "./redis.js";
 import { imageModelById, openRouterResolution } from "./image-models.js";
-import { downloadGeneratedImage, generateCanvasText, generateSingleImage, isRetryableOpenRouterFailure } from "./openrouter.js";
+import { classifyOpenRouterFailure, downloadGeneratedImage, generateCanvasText, generateSingleImage, isRetryableOpenRouterFailure, OpenRouterError } from "./openrouter.js";
 import { storeGeneratedImage } from "./generated-media.js";
 import { canvasProjectAssetProviderUrl } from "./canvas-project-assets.js";
 import { closeWorkersWithin } from "./shutdown.js";
 import { startWorkerHeartbeat } from "./worker-heartbeat.js";
 import { canvasGeneratedAssetId, canvasGeneratedMediaId } from "./canvas-job-media.js";
 import { shouldFinalizeJobFailure } from "./job-failure.js";
+import { assertPromptLength, IMAGE_PROVIDER_PROMPT_MAX_CHARS } from "./prompt-policy.js";
 
 type TextPayload = { instruction: string; currentText: string; context: string };
 type ImagePayload = { prompt: string; model: string; ratio: string; resolution: string; referenceAssetIds: string[] };
@@ -54,6 +55,8 @@ const processCanvasJob = async (bullJob: Job<CanvasQueuePayload>) => {
     }
 
     const payload = bullJob.data.payload as ImagePayload;
+    // Protect queued jobs created by an older web process or stale tab as well.
+    assertPromptLength(payload.prompt, "prompt", IMAGE_PROVIDER_PROMPT_MAX_CHARS);
     const spec = imageModelById(payload.model);
     if (!spec) throw new Error("图片模型不存在或已下线");
     if (!spec.resolutions.includes(payload.resolution)) throw new Error("图片模型不支持当前分辨率");
@@ -103,14 +106,16 @@ const processCanvasJob = async (bullJob: Job<CanvasQueuePayload>) => {
     const finalAttempt = bullJob.attemptsMade + 1 >= (bullJob.opts.attempts ?? 1);
     const retryable = isRetryableOpenRouterFailure(error);
     const terminal = finalAttempt || !retryable;
+    const classified = classifyOpenRouterFailure(error);
+    const publicMessage = error instanceof OpenRouterError ? classified.publicMessage : error instanceof Error ? error.message : "画布任务失败";
     const next = users.transitionActiveCanvasJob(record.id, {
       status: terminal ? "failed" : "running",
-      error: terminal ? (error instanceof Error ? error.message.slice(0, 500) : "画布任务失败") : null,
+      error: terminal ? publicMessage.slice(0, 500) : null,
     });
     if (!next) return;
     if (terminal && bullJob.data.kind !== "text") await discardUncommittedMedia(canvasGeneratedMediaId(record.id), record.ownerId);
     await publish(record.canvasId, { type: "canvas_job", job: next });
-    if (!retryable) throw new UnrecoverableError(error instanceof Error ? error.message : "画布任务失败");
+    if (!retryable) throw new UnrecoverableError(publicMessage);
     throw error;
   }
 };
