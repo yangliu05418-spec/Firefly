@@ -264,6 +264,28 @@ fi
 
 stop_old_workers
 
+# A same-revision blue/green rollout briefly shares heartbeat keys between the
+# old and candidate workers. An old worker can win one final refresh immediately
+# before its token-guarded shutdown cleanup, leaving the key absent until the
+# candidate's next heartbeat. Re-establish three consecutive healthy snapshots
+# before applying the stricter post-cutover checks so this bounded handoff race
+# is not mistaken for a broken release.
+handoff_ready_count=0
+handoff_attempt=0
+while [ "$handoff_attempt" -lt 20 ] && [ "$handoff_ready_count" -lt 3 ]; do
+  handoff_attempt=$((handoff_attempt + 1))
+  if curl --fail --silent --max-time 5 "http://127.0.0.1:$next_port/api/health/workers" >/dev/null; then
+    handoff_ready_count=$((handoff_ready_count + 1))
+  else
+    handoff_ready_count=0
+  fi
+  [ "$handoff_ready_count" -ge 3 ] || sleep 2
+done
+if [ "$handoff_ready_count" -lt 3 ]; then
+  failure_event=failed_worker_handoff
+  exit 1
+fi
+
 failures=0
 checks=0
 # Synchronous cutover validation catches immediate regressions without making
