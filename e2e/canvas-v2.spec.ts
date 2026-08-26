@@ -77,6 +77,7 @@ async function mockAuthenticatedApi(page: Page, options: {
       if (authSessionRequests <= (options.authSessionFailures ?? 0)) return json(route, { error: "session service unavailable" }, 503);
       return json(route, { authenticated: true, user: { id: "user-e2e", email: "artist@dokuai.tv", name: "Artist", avatarUrl: "" } });
     }
+    if (path === "/api/client-events" && request.method() === "POST") return route.fulfill({ status: 204 });
     if (path === "/api/models") return json(route, videoModels);
     if (path === "/api/image-models") return json(route, { Items: imageModels, Ratios: ["16:9", "1:1", "9:16"], DefaultModel: imageModels[0].id });
     if (path === "/api/creation-sessions" && request.method() === "GET") return json(route, creationSessions);
@@ -161,6 +162,11 @@ async function mockAuthenticatedApi(page: Page, options: {
       if (!task) return json(route, { error: "任务不存在" }, 404);
       return json(route, { sourceId: task.id, sourceType: "video", sessionId: task.sessionId, snapshotVersion: 1, recoveryQuality: "exact", sourceSessionStatus: "active", omittedAssets: 0, warnings: [], adjustments: [], state: { engine: "video", prompt: task.editorPrompt ?? task.prompt, modelId: task.model, mode: task.mode, ratio: task.ratio, resolution: task.resolution, duration: task.duration, generateAudio: false, cameraFixed: true, watermark: false, seed: 42, imageModelId: "", imageRatio: "1:1", imageResolution: "", imageCount: 1, assets: [{ id: "reedit-reference", bindingId: "reedit-reference", snapshotReferenceId: "snapshot-reference-e2e", name: "角色参考.png", type: "image", size: 128, role: "reference_image", progress: 100, phase: "ready", preview: "/api/creation-references/snapshot-reference-e2e/source?variant=thumbnail" }] } });
     }
+    if (/^\/api\/generations\/[^/]+\/poster$/.test(path) && request.method() === "GET") return route.fulfill({
+      status: 200,
+      contentType: "image/svg+xml",
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#25312d"/><stop offset="1" stop-color="#090b0d"/></linearGradient></defs><path fill="url(#g)" d="M0 0h960v540H0z"/><circle cx="710" cy="155" r="118" fill="#b8d9cf" opacity=".2"/><path d="M0 430 260 250l180 112 150-90 370 268H0z" fill="#151c1a"/><path d="m363 216 118 54-118 54z" fill="#e7ece8" opacity=".92"/></svg>',
+    });
     if (path === "/api/creation-references/snapshot-reference-e2e") return json(route, { id: "snapshot-reference-e2e", bindingId: "reedit-reference", name: "角色参考.png", type: "image", size: 128, state: "ready", preview: "/api/creation-references/snapshot-reference-e2e/source?variant=thumbnail" });
     if (path === "/api/creation-references/snapshot-reference-e2e/source") return route.fulfill({ status: 200, contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><path fill="#b8d9cf" d="M0 0h8v8H0z"/></svg>' });
     if (path === "/api/assets") return json(route, { Items: options.libraryAssets ?? [], HasMore: false });
@@ -416,6 +422,25 @@ test("asset archive preserves the selected media view across refresh", async ({ 
 
   await page.getByRole("button", { name: "视频资产" }).click();
   await expect(page).toHaveURL(/\/studio\/assets$/);
+});
+
+test("asset archive renders decoded video posters at full opacity", async ({ page, browserName }) => {
+  test.skip(browserName !== "chromium", "one canonical visual baseline is sufficient; functional journeys still run in WebKit");
+  const taskId = "11111111-1111-4111-8111-111111111111";
+  await mockAuthenticatedApi(page, { videoHistory: [{
+    id: taskId, caseId: taskId, sessionId: "session-e2e", ownerId: "user-e2e", visibility: "private",
+    status: "succeeded", mediaStatus: "ready", mediaRevision: 2, posterStatus: "ready",
+    prompt: "雨夜里的缓慢推镜", model: videoModels[0].id, mode: "omni", ratio: "16:9", resolution: "1080p", duration: 8,
+    videoUrl: `/api/generations/${taskId}/media?rev=2`, downloadUrl: `/api/generations/${taskId}/download?rev=2`, posterUrl: `/api/generations/${taskId}/poster?rev=2`,
+    createdAt: Date.UTC(2026, 7, 18, 8, 0, 0), updatedAt: Date.UTC(2026, 7, 18, 8, 8, 0),
+  }] });
+  await page.goto("/studio/assets");
+
+  const poster = page.locator(".archive-card__poster");
+  await expect(poster).toHaveAttribute("data-recovery-state", "ready");
+  await expect.poll(() => poster.evaluate((image: HTMLImageElement) => ({ complete: image.complete, width: image.naturalWidth, opacity: getComputedStyle(image).opacity })))
+    .toEqual({ complete: true, width: 960, opacity: "1" });
+  await expect(page.locator(".archive-page")).toHaveScreenshot("asset-archive-video-posters.png", { animations: "disabled", maxDiffPixelRatio: 0.01 });
 });
 
 test("studio restores an unsent composer draft and isolates it between creation sessions", async ({ page }) => {

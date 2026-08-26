@@ -61,7 +61,7 @@ export function RecoveringImage({ src, fallback, retryDelays = DEFAULT_RETRY_DEL
   }
 
   const token = current.cycle * 10 + current.attempt;
-  return <img {...imageProps} key={`${src}:${token}`} src={imageRetrySource(src, token)} onLoad={(event) => {
+  return <img {...imageProps} data-recovery-state={current.phase} key={`${src}:${token}`} src={imageRetrySource(src, token)} onLoad={(event) => {
     clearTimer();
     setState((previous) => previous.source === src ? { ...previous, phase: "ready" } : previous);
     onLoad?.(event);

@@ -22,6 +22,7 @@
     "typecheck": "npm run typecheck:frontend && npm run typecheck:server",
     "db:migrate": "node dist-server/migrate.js",
     "health:audit": "node dist-server/health-audit.js",
+    "observability:report": "node dist-server/observability-report.js",
     "snapshots:backfill": "node dist-server/backfill-creation-snapshots.js",
     "smoke:reedit": "node dist-server/reedit-smoke.js",
     "user:disable": "node dist-server/user-admin.js disable"

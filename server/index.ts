@@ -49,6 +49,7 @@ import { runReeditIntegrityCheck } from "./reedit-integrity.js";
 import { buildCreationSnapshot, type CreationReferenceInput } from "./creation-snapshots.js";
 import { buildLegacyImageSnapshot, buildLegacyVideoSnapshot } from "./legacy-creation-snapshot.js";
 import { assertPromptLength, EDITOR_PROMPT_STORAGE_MAX_CHARS, IMAGE_PROVIDER_PROMPT_MAX_CHARS, PromptTooLongError } from "./prompt-policy.js";
+import { journeyNames, recordJourneyEvent } from "./journey-observability.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -111,12 +112,13 @@ const rejectGeneration = (res: express.Response, status: number, code: string, e
 const param = (value: string | string[]) => Array.isArray(value) ? value[0] : value;
 const publicGenerationTask = (task: StoredTask) => {
   const stablePreviewReady = tosEnabled() && config.tosPreviewTranscodeEnabled && Boolean(users.readTaskMedia(task.id, "preview"));
+  const stablePosterReady = tosEnabled() && Boolean(users.readTaskMedia(task.id, "poster"));
   const stableOutputReady = task.status !== "succeeded" || task.mediaStatus !== "ready"
     ? true
     : !tosEnabled()
       ? true
       : Boolean(users.readTaskMedia(task.id, "output"));
-  return publicTask(task, { stableOutputReady, stablePreviewReady, outputIsPreview: !config.tosPreviewTranscodeEnabled });
+  return publicTask(task, { stableOutputReady, stablePreviewReady, stablePosterReady, outputIsPreview: !config.tosPreviewTranscodeEnabled });
 };
 const publicCreationSession = ({ ownerId: _ownerId, deletedAt: _deletedAt, ...session }: CreationSession) => session;
 const createCreationSession = (ownerId: string, title = "新创作") => {
@@ -860,6 +862,32 @@ app.post("/api/media-events", requireAuth, async (req, res) => {
     const task = await readTask(event.taskId);
     if (!task || !canAccessTask(task, user.id)) return res.status(404).json({ error: "任务不存在或已过期" });
     console.info(JSON.stringify({ type: "media_event", at: new Date().toISOString(), userId: user.id, ...event }));
+    res.status(204).end();
+  } catch (error) { respondError(res, error); }
+});
+
+const clientEventSchema = z.object({
+  journey: z.enum(journeyNames),
+  outcome: z.enum(["success", "failure"]),
+  elapsedMs: z.number().int().nonnegative().max(10 * 60_000).optional(),
+  taskId: z.string().uuid().optional(),
+  route: z.string().max(160).regex(/^\/(?:studio(?:\/.*)?|)$/).optional(),
+  component: z.string().max(80).regex(/^[\w .:/-]+$/).optional(),
+  errorCode: z.string().max(64).regex(/^[A-Za-z0-9_.:-]+$/).optional(),
+  fingerprint: z.string().max(160).optional(),
+});
+app.post("/api/client-events", requireAuth, async (req, res) => {
+  try {
+    const event = clientEventSchema.parse(req.body);
+    const user = res.locals.user as SessionUser;
+    if (event.taskId) {
+      const task = await readTask(event.taskId);
+      if (!task || !canAccessTask(task, user.id)) return res.status(404).json({ error: "任务不存在或已过期" });
+    }
+    const rateKey = `client-events:${user.id}:${Math.floor(Date.now() / 60_000)}`;
+    const count = await redis.incr(rateKey);
+    if (count === 1) await redis.expire(rateKey, 120);
+    if (count <= 120) await recordJourneyEvent(redis, { ...event, userId: user.id, requestId: res.locals.requestId });
     res.status(204).end();
   } catch (error) { respondError(res, error); }
 });

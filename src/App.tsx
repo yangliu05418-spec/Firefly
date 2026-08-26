@@ -19,6 +19,8 @@ import { RecoveringImage, RecoveringThumbnail } from "./recovering-image";
 import { bootstrapSession } from "./auth-bootstrap";
 import type { ComposerRestore, ComposerRestorePayload } from "./composer-restore";
 import { hasMeaningfulComposerDraft, loadReeditPayload } from "./reedit-client";
+import { ArchivePoster } from "./features/assets/ArchivePoster";
+import { clientRouteElapsed, markClientRouteStart, reportClientJourney } from "./client-observability";
 const statusText: Record<Task["status"], string> = { queued: "等待调度", submitting: "正在提交", running: "正在生成", succeeded: "生成完成", failed: "生成失败" };
 const taskStatusText = (task: Task) => task.status === "succeeded" && task.mediaStatus === "archiving" ? "正在归档成片" : task.status === "succeeded" && task.mediaStatus === "failed" ? "成片归档待恢复" : statusText[task.status];
 const waitingMoments = [
@@ -352,6 +354,12 @@ function AssetArchive({ tasks, imageResults, models, onCreate, onDelete, onRemov
   };
   const archived = useMemo(() => tasks.filter((task) => task.visibility !== "shared" && task.status === "succeeded" && task.mediaStatus === "ready" && task.videoUrl), [tasks]);
   const filtered = useMemo(() => archived.filter((task) => (task.prompt || "参考素材生成").toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())), [archived, query]);
+  const viewReported = useRef(false);
+  useEffect(() => {
+    if (viewReported.current) return;
+    viewReported.current = true;
+    reportClientJourney({ journey: "asset_archive_view", outcome: "success", elapsedMs: clientRouteElapsed("/studio/assets") });
+  }, []);
   useEffect(() => () => { if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current); }, []);
   const announceDownload = (task: Task) => {
     reportMediaEvent(task.id, "download_click", Date.now());
@@ -375,7 +383,7 @@ function AssetArchive({ tasks, imageResults, models, onCreate, onDelete, onRemov
       : !filtered.length ? <div className="archive-empty archive-empty--search"><Search /><h2>没有找到相关视频</h2><p>换一个关键词，或清除当前搜索。</p><button onClick={() => setQuery("")}>清除搜索</button></div>
       : <div className="archive-grid">{filtered.map((task) => { const model = models.find((item) => item.id === task.model); return <article className="archive-card" key={task.id}>
         <button className="archive-card__media" onClick={() => setPreview(task)} aria-label={`预览 ${task.prompt || "生成视频"}`}>
-          <div className="archive-card__fallback"><Film /><span>{task.ratio}</span></div>{task.posterUrl && <RecoveringImage key={`${task.id}-${task.mediaRevision ?? 0}`} src={task.posterUrl} alt="" loading="lazy" decoding="async" fallback={() => null} />}<span className="archive-card__play"><Play /></span><small>{task.duration}s</small>
+          <div className="archive-card__fallback"><Film /><span>{task.ratio}</span></div><ArchivePoster task={task} /><span className="archive-card__play"><Play /></span><small>{task.duration}s</small>
         </button>
         <div className="archive-card__body"><h2 title={task.prompt || "参考素材生成"}>{task.prompt || "参考素材生成"}</h2><p>{model?.name ?? task.model} · {task.resolution} · {task.ratio}</p><footer><time>{new Date(task.createdAt).toLocaleDateString("zh-CN")}</time><div><CaseIdButton task={task} compact /><button disabled={reeditBusyId === task.id} aria-label="重新编辑这次视频创作" title="重新编辑" onClick={() => onReedit("video", task.id)}>{reeditBusyId === task.id ? <LoaderCircle className="spin" /> : <RotateCcw />}</button><a href={task.downloadUrl ?? task.videoUrl} target="_blank" rel="noreferrer" aria-label="下载视频" title="下载视频" onClick={() => announceDownload(task)}><Download /></a><button aria-label="插入画布" title="插入画布" onClick={() => onInsertCanvas({ kind: "video", task })}><LayoutGrid /></button><button aria-label="删除项目" title="删除项目" onClick={() => onDelete(task)}><Trash2 /></button></div></footer></div>
       </article>; })}</div>}
@@ -416,6 +424,8 @@ function Studio({ user, route, navigate, logout }: { user: SessionUser; route: s
   const [videoAdmissionPending, setVideoAdmissionPending] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Task | null>(null); const [deleting, setDeleting] = useState(false); const [deleteError, setDeleteError] = useState(""); const [sessionDeleteTarget, setSessionDeleteTarget] = useState<CreationSession | null>(null); const [editingSessionId, setEditingSessionId] = useState<string | null>(null); const [sessionTitleDraft, setSessionTitleDraft] = useState(""); const [sessionBusy, setSessionBusy] = useState(false); const [profileOpen, setProfileOpen] = useState(false); const [featureNotice, setFeatureNotice] = useState<{ kind: "atlas"; nonce: number; leaving?: boolean } | null>(null); const [pendingCanvasCreate, setPendingCanvasCreate] = useState(false); const [canvasInsertTarget, setCanvasInsertTarget] = useState<{ kind: "video"; task: Task } | { kind: "image"; asset: LibraryAsset } | { kind: "generated"; mediaId: string; title: string } | null>(null); const [imageResults, setImageResults] = useState<ImageResultBundle[]>([]); const [assetImageResults, setAssetImageResults] = useState<ImageResultBundle[]>([]); const [selectedSessionId, setSelectedSessionId] = useState(""); const [composerRestore, setComposerRestore] = useState<ComposerRestore | null>(null); const [reeditBusyId, setReeditBusyId] = useState<string | null>(null); const [reeditError, setReeditError] = useState(""); const [reeditInfo, setReeditInfo] = useState(""); const [reeditConflict, setReeditConflict] = useState<ReeditConflict | null>(null); const [reeditUndo, setReeditUndo] = useState<ReeditUndo | null>(null); const profileRef = useRef<HTMLDivElement>(null); const sessionRequestSequence = useRef(0); const reeditRequest = useRef<AbortController | null>(null); const atlasExitTimer = useRef<number | undefined>(undefined); const atlasAutoTimer = useRef<number | undefined>(undefined);
   const sessionCreateIntent = useRef<string | null>(null);
+  const bootstrapStartedAt = useRef(performance.now());
+  const bootstrapReported = useRef(false);
   const activeSessionId = routedSessionId || selectedSessionId || sessions[0]?.id || "";
   const markSessionUsed = (prompt: string) => setSessions((current) => current.map((session) => session.id === activeSessionId ? { ...session, title: session.title === "新创作" && prompt.trim() ? prompt.trim().slice(0, 40) : session.title, updatedAt: Date.now() } : session).sort((a, b) => b.updatedAt - a.updatedAt));
   const mergeImageResult = (current: ImageResultBundle[], bundle: ImageResultBundle) => upsertStudioItem(current, bundle);
@@ -483,9 +493,14 @@ function Studio({ user, route, navigate, logout }: { user: SessionUser; route: s
       const target = loaded.sessions.some((session) => session.id === routedSessionId) ? routedSessionId : loaded.sessions[0].id;
       const snapshot = selectSessionSnapshot(loaded.tasks, loaded.images, target);
       setModels(loaded.models); setAssetTasks(loaded.tasks); setAssetImageResults(loaded.images); setSessions(loaded.sessions); setSelectedSessionId(target); setTasks(snapshot.tasks); setImageResults(snapshot.images); setSyncIssue(loaded.degraded);
+      if (!bootstrapReported.current) { bootstrapReported.current = true; reportClientJourney({ journey: "studio_bootstrap", outcome: "success", elapsedMs: Math.round(performance.now() - bootstrapStartedAt.current) }); }
       void refreshGenerationCapacity();
       if (view === "create" && route !== `/studio/sessions/${encodeURIComponent(target)}`) navigate(`/studio/sessions/${encodeURIComponent(target)}`);
-    } catch (error) { setLoadError(error instanceof Error ? error.message : "创作台暂时无法载入"); }
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : "创作台暂时无法载入");
+      if (!bootstrapReported.current) { bootstrapReported.current = true; reportClientJourney({ journey: "studio_bootstrap", outcome: "failure", elapsedMs: Math.round(performance.now() - bootstrapStartedAt.current), errorCode: "STUDIO_BOOTSTRAP_FAILED" }); }
+      if (view === "assets") reportClientJourney({ journey: "asset_archive_view", outcome: "failure", elapsedMs: clientRouteElapsed("/studio/assets"), errorCode: "ASSET_ARCHIVE_LOAD_FAILED" });
+    }
     finally { setLoading(false); }
   };
   useEffect(() => { void initialLoad(); }, []);
@@ -651,7 +666,7 @@ function Studio({ user, route, navigate, logout }: { user: SessionUser; route: s
 export function App() {
   const [route, setRoute] = useState(location.pathname); const [auth, setAuth] = useState<SessionUser | null | undefined>(undefined);
   const [authError, setAuthError] = useState(false); const [authRetry, setAuthRetry] = useState(0);
-  const navigate = (path: string) => { history.pushState({}, "", path); setRoute(path); };
+  const navigate = (path: string) => { markClientRouteStart(path); history.pushState({}, "", path); setRoute(path); };
   useEffect(() => { const pop = () => setRoute(location.pathname); addEventListener("popstate", pop); return () => removeEventListener("popstate", pop); }, []);
   useEffect(() => { let active = true; setAuthError(false); bootstrapSession({ load: () => api.get<{ authenticated: boolean; user?: SessionUser }>("/api/auth/session", { timeoutMs: 8000 }), activateMediaScope: scopePrivateMediaCacheToUser, deactivateMediaScope: deactivatePrivateMediaCacheScope }).then((user) => { if (active) setAuth(user); }).catch(() => { void deactivatePrivateMediaCacheScope(); if (active) setAuthError(true); }); return () => { active = false; }; }, [authRetry]);
   useEffect(() => listenForSignedOut((reason) => { if (reason === "explicit" && auth?.id) { void assetMetadataCache.clear(auth.id); void composerDraftCache.clearUser(auth.id); void forgetPrivateMediaCacheUser(); } else void deactivatePrivateMediaCacheScope(); setAuth(null); }), [auth?.id]);

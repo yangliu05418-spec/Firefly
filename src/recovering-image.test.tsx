@@ -58,6 +58,15 @@ describe("recovering private images", () => {
     await act(async () => root.unmount());
   });
 
+  it("exposes an explicit ready state after the browser decodes the image", async () => {
+    const root = createRoot(container);
+    await act(async () => { root.render(<RecoveringImage src="/api/generations/task-1/poster" alt="poster" fallback={() => null} />); });
+    expect(container.querySelector("img")?.getAttribute("data-recovery-state")).toBe("loading");
+    await act(async () => { container.querySelector("img")?.dispatchEvent(new Event("load")); });
+    expect(container.querySelector("img")?.getAttribute("data-recovery-state")).toBe("ready");
+    await act(async () => root.unmount());
+  });
+
   it("does not create a nested interactive control inside asset buttons", async () => {
     const root = createRoot(container);
     await act(async () => {
