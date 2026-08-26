@@ -140,6 +140,8 @@ jobs:
           grep -q 'failed_disk_space' ops/firefly-deploy.sh
           grep -q 'dist-server/reedit-smoke.js' ops/firefly-deploy.sh
           grep -q 'failed_reedit_smoke' ops/firefly-deploy.sh
+          grep -q 'FIREFLY_BACKUP_ALLOW_LOCAL_FALLBACK=true TOS_BACKUP_REQUEST_TIMEOUT_MS=60000' ops/firefly-deploy.sh
+          grep -q 'ALLOW_LOCAL_BACKUP_FALLBACK' ops/backup-db.mjs
           grep -q 'label=\$firefly_image_label' ops/firefly-deploy.sh
           grep -q "builder prune -af --filter 'until=24h'" ops/firefly-deploy.sh
           preflight_line=$(grep -n '^ensure_deploy_space$' ops/firefly-deploy.sh | cut -d: -f1)
