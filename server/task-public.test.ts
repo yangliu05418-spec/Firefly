@@ -63,8 +63,8 @@ describe("publicTask media exposure", () => {
     expect(task.temporaryVideoUrl).toBeUndefined();
   });
 
-  it("keeps a database-ready original behind the archive state until its streaming preview is verified", () => {
-    const task = publicTask(makeTask("ready"), { stableMediaReady: false });
+  it("keeps a database-ready original behind the archive state until its output object is verified", () => {
+    const task = publicTask(makeTask("ready"), { stableOutputReady: false });
 
     expect(task.mediaStatus).toBe("archiving");
     expect(task.videoUrl).toBeUndefined();
@@ -75,13 +75,22 @@ describe("publicTask media exposure", () => {
   });
 
   it("opens a browser-compatible TOS preview while the original is still archiving", () => {
-    const task = publicTask(makeTask("archiving"), { stableMediaReady: false, stablePreviewReady: true });
+    const task = publicTask(makeTask("archiving"), { stableOutputReady: false, stablePreviewReady: true, outputIsPreview: false });
 
     expect(task.mediaStatus).toBe("archiving");
     expect(task.videoUrl).toBe("/api/generations/task-1/media?rev=3");
     expect(task.downloadUrl).toBeUndefined();
     expect(task.temporaryVideoUrl).toBeUndefined();
     expect(task.mediaSource).toBe("tos");
+  });
+
+  it("opens the verified original for download without waiting for a separate streaming preview", () => {
+    const task = publicTask(makeTask("ready"), { stableOutputReady: true, stablePreviewReady: false, outputIsPreview: false });
+
+    expect(task.mediaStatus).toBe("ready");
+    expect(task.downloadUrl).toBe("/api/generations/task-1/download?rev=3");
+    expect(task.videoUrl).toBeUndefined();
+    expect(task.temporaryVideoUrl).toBe("https://provider.example/temporary.mp4?secret=1");
   });
 
   it("never exposes media for non-succeeded tasks", () => {

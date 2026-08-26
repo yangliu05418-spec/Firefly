@@ -1,10 +1,12 @@
-import { describe, expect, it } from "vitest";
-import { MODELS } from "./capabilities.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { MODELS, availableModels } from "./capabilities.js";
+import { config } from "./config.js";
 import { buildProviderPayload, validateGeneration } from "./provider.js";
 
 const base = { prompt: "雨夜城市的微距镜头", model: "dreamina-seedance-2-5-260628", mode: "text", ratio: "16:9", resolution: "720p", duration: 4, generateAudio: true, seed: -1, cameraFixed: false, watermark: false, outputFormat: "mp4", assets: [] };
 
 describe("Seedance capability registry", () => {
+  afterEach(() => { config.disabledVideoModels = []; });
   it("contains every supported production model", () => expect(MODELS).toHaveLength(7));
   it("allows the current Seedance 2.5 baseline", () => expect(validateGeneration(base).model).toBe(base.model));
   it("allows the documented Seedance 2.5 1080p output", () => {
@@ -43,4 +45,9 @@ describe("Seedance capability registry", () => {
     expect(() => validateGeneration({ ...base, mode: "omni", assets: [{ id: "bad", name: "wrong.mp4", type: "video", role: "reference_image", url: "https://example.com/wrong.mp4" }] })).toThrow("类型与引用角色");
   });
   it("does not expose audio generation on Seedance 1.0", () => expect(() => validateGeneration({ ...base, model: "seedance-1-0-pro-250528" })).toThrow("不支持生成音频"));
+  it("hides and rejects models disabled by the production capability policy", () => {
+    config.disabledVideoModels = ["seedance-1-0-pro-fast-251015"];
+    expect(availableModels(config.disabledVideoModels).some((model) => model.id === "seedance-1-0-pro-fast-251015")).toBe(false);
+    expect(() => validateGeneration({ ...base, model: "seedance-1-0-pro-fast-251015", generateAudio: false })).toThrow("当前模型暂不可用");
+  });
 });

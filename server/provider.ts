@@ -43,6 +43,7 @@ export const validateGeneration = (input: unknown) => {
   if (parsed.editorPrompt !== undefined) assertPromptLength(parsed.editorPrompt, "editorPrompt", EDITOR_PROMPT_STORAGE_MAX_CHARS);
   const model = getModel(parsed.model);
   if (!model) throw new Error("未找到所选模型");
+  if (config.disabledVideoModels.includes(model.id)) throw new ProviderRequestError("model disabled by deployment capability policy", 400, { providerCode: "MODEL_DISABLED", stage: "submit" });
   if (!model.modes.includes(parsed.mode)) throw new Error("当前模型不支持此创作模式");
   const isSeedance25 = model.id === "dreamina-seedance-2-5-260628";
   const normalized = isSeedance25
@@ -95,9 +96,9 @@ export type ProviderStage = "submit" | "query";
 export const classifyProviderError = (message: string, status: number | "network", providerCode = "") => {
   const fingerprint = `${providerCode} ${message}`.toLowerCase();
   if (/task.?type|omni_reference_task_type|ratio.*adaptive|duration.*-1/i.test(fingerprint)) return { errorCode: "PROVIDER_INVALID_PARAMETERS" as const, publicMessage: "当前指令更像视频编辑，请切换到视频编辑模式", retryable: false };
+  if (/model.*(?:not|unavailable|permission|activate|access|disabled)|not.*activated|unauthorized model|MODEL_DISABLED/i.test(fingerprint)) return { errorCode: "PROVIDER_MODEL_UNAVAILABLE" as const, publicMessage: "当前模型暂不可用或尚未开通，请联系管理员", retryable: false };
   if (/real person|portrait|reference.*(?:reject|invalid)|asset.*(?:reject|invalid)/i.test(fingerprint)) return { errorCode: "REFERENCE_ASSET_REJECTED" as const, publicMessage: "参考素材未通过模型校验，请更换素材或完成真人资产认证", retryable: false };
   if (/content|safety|policy|moderation|risk|sensitive/i.test(fingerprint)) return { errorCode: "CONTENT_POLICY_REJECTED" as const, publicMessage: "内容未通过安全审核，请调整提示词或参考素材后重试", retryable: false };
-  if (/model.*(?:not|unavailable|permission|activate|access)|not.*activated|unauthorized model/i.test(fingerprint)) return { errorCode: "PROVIDER_MODEL_UNAVAILABLE" as const, publicMessage: "当前模型暂不可用或尚未开通，请联系管理员", retryable: false };
   if (status === 429 || /rate.?limit|too many requests/i.test(fingerprint)) return { errorCode: "PROVIDER_RATE_LIMITED" as const, publicMessage: "模型服务繁忙，请稍后重试", retryable: true };
   if (status === "network") {
     const timedOut = /timeout|timed out|超时/i.test(fingerprint);
@@ -109,6 +110,18 @@ export const classifyProviderError = (message: string, status: number | "network
   if (status >= 400 && status < 500) return { errorCode: "PROVIDER_INVALID_PARAMETERS" as const, publicMessage: "生成参数不符合当前模型要求，请检查模式和素材", retryable: false };
   return { errorCode: "PROVIDER_UNKNOWN_ERROR" as const, publicMessage: "视频生成失败，请稍后重试", retryable: false };
 };
+
+export const providerPublicMessage = (errorCode: string) => ({
+  CONTENT_POLICY_REJECTED: "内容未通过安全审核，请调整提示词或参考素材后重试",
+  PROVIDER_INVALID_PARAMETERS: "生成参数不符合当前模型要求，请检查模式和素材",
+  PROVIDER_MODEL_UNAVAILABLE: "当前模型暂不可用或尚未开通，请联系管理员",
+  PROVIDER_RATE_LIMITED: "模型服务繁忙，请稍后重试",
+  PROVIDER_UNAVAILABLE: "模型服务暂时不可用，请稍后重试",
+  PROVIDER_TIMEOUT: "模型服务响应超时，请稍后重试",
+  PROVIDER_NETWORK_ERROR: "模型服务网络暂时异常，请稍后重试",
+  REFERENCE_ASSET_REJECTED: "参考素材未通过模型校验，请更换素材或完成真人资产认证",
+  PROVIDER_UNKNOWN_ERROR: "视频生成失败，请稍后重试",
+}[errorCode] ?? "视频生成失败，请稍后重试");
 
 export class ProviderRequestError extends Error {
   readonly errorCode: ProviderErrorCode;
@@ -161,6 +174,7 @@ const providerJson = async <T>(response: Response): Promise<T> => {
 export const buildProviderPayload = (input: GenerationInput) => {
   const model = getModel(input.model);
   if (!model) throw new Error("未找到所选模型");
+  if (config.disabledVideoModels.includes(model.id)) throw new ProviderRequestError("model disabled by deployment capability policy", 400, { providerCode: "MODEL_DISABLED", stage: "submit" });
   if (containsInternalPromptMarker(input.prompt)) {
     console.error(JSON.stringify({ type: "provider_prompt_marker_blocked", at: new Date().toISOString(), model: input.model }));
     throw new Error("提示词包含未解析的内部素材引用");

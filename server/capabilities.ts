@@ -30,3 +30,7 @@ export const MODELS: ModelCapability[] = [
 ];
 
 export const getModel = (id: string) => MODELS.find((model) => model.id === id);
+export const availableModels = (disabled: readonly string[] = []) => {
+  const blocked = new Set(disabled);
+  return MODELS.filter((model) => !blocked.has(model.id));
+};

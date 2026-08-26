@@ -139,7 +139,7 @@ describe("image generation processor", () => {
     expect(state.task()).toMatchObject({
       status: "succeeded",
       items: [{ mediaId: "generated-2" }],
-      failures: ["unsupported input"],
+      failures: ["图片生成参数或参考素材不符合模型要求，请调整后重试"],
     });
   });
 
@@ -152,7 +152,7 @@ describe("image generation processor", () => {
     expect(state.task()).toMatchObject({
       status: "succeeded",
       items: [{ mediaId: "existing" }],
-      failures: ["provider unavailable"],
+      failures: ["图片生成服务暂时不可用，请稍后重试"],
     });
   });
 

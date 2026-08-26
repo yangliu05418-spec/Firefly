@@ -41,6 +41,7 @@ export const config = {
   authRequestTimeoutMs: positiveInt("AUTH_REQUEST_TIMEOUT_MS", 15000),
   generationConcurrency: positiveInt("GENERATION_CONCURRENCY", 4),
   maxActiveGenerationsPerUser: positiveInt("MAX_ACTIVE_GENERATIONS_PER_USER", 4),
+  disabledVideoModels: (process.env.DISABLED_VIDEO_MODELS ?? "").split(",").map((model) => model.trim()).filter(Boolean),
   maxActiveUploadsPerUser: boundedInt("MAX_ACTIVE_UPLOADS_PER_USER", 6, 1, 20),
   assetRegistrationConcurrency: positiveInt("ASSET_REGISTRATION_CONCURRENCY", 4),
   mediaStorageBackend: process.env.MEDIA_STORAGE_BACKEND ?? "legacy",

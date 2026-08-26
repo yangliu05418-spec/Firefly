@@ -13,6 +13,7 @@
     "canvas-worker": "node dist-server/canvas-worker.js",
     "tos:configure": "node dist-server/tos-admin.js",
     "tos:audit": "node dist-server/tos-audit.js",
+    "tos:resume-canary": "node dist-server/tos-resume-canary.js",
     "history:clear": "node dist-server/clear-history.js",
     "test": "vitest run",
     "test:e2e": "playwright test",

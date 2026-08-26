@@ -1,4 +1,14 @@
 import type { StoredTask } from "./db.js";
+import { classifyProviderError, providerPublicMessage } from "./provider.js";
+
+const publicFailure = (error: string | undefined, errorCode: string | undefined) => {
+  if (!error) return undefined;
+  if (errorCode) return providerPublicMessage(errorCode);
+  if (/Filter\.GroupType|omni_reference_task_type|task.?type|content|safety|policy|not.*activated|model.*unavailable|rate.?limit/i.test(error)) {
+    return classifyProviderError(error, 400).publicMessage;
+  }
+  return error;
+};
 
 /**
  * 任务公开投影。
@@ -9,12 +19,16 @@ import type { StoredTask } from "./db.js";
  */
 export const publicTask = (
   { ownerId: _ownerId, request: _request, sourceVideoUrl, sourceVideoExpiresAt, deletedAt: _deletedAt, ...task }: StoredTask,
-  { stableMediaReady = true, stablePreviewReady = false }: { stableMediaReady?: boolean; stablePreviewReady?: boolean } = {},
+  {
+    stableOutputReady = true,
+    stablePreviewReady = false,
+    outputIsPreview = true,
+  }: { stableOutputReady?: boolean; stablePreviewReady?: boolean; outputIsPreview?: boolean } = {},
 ) => {
   const revision = task.mediaRevision ?? 0;
-  const downloadable = task.status === "succeeded" && task.mediaStatus === "ready" && stableMediaReady;
-  const previewable = task.status === "succeeded" && (downloadable || stablePreviewReady);
-  const mediaStatus = task.status === "succeeded" && task.mediaStatus === "ready" && !stableMediaReady
+  const downloadable = task.status === "succeeded" && task.mediaStatus === "ready" && stableOutputReady;
+  const previewable = task.status === "succeeded" && (stablePreviewReady || (outputIsPreview && downloadable));
+  const mediaStatus = task.status === "succeeded" && task.mediaStatus === "ready" && !stableOutputReady
     ? "archiving" as const
     : task.mediaStatus;
   const temporary =
@@ -24,6 +38,7 @@ export const publicTask = (
     (!sourceVideoExpiresAt || sourceVideoExpiresAt > Date.now());
   return {
     ...task,
+    error: task.status === "failed" ? publicFailure(task.error, task.errorCode) : task.error,
     mediaStatus,
     caseId: task.id,
     videoUrl: previewable ? `/api/generations/${task.id}/media?rev=${revision}` : undefined,
