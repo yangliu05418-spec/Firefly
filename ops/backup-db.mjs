@@ -50,7 +50,9 @@ const main = async () => {
   logStage("sqlite_copy_verified", { size: stat.size, sha256: hash });
   let objectKey;
   let requestId;
+  let offsite = false;
   const tosConfigured = Boolean(process.env.TOS_ACCESS_KEY_ID && process.env.TOS_SECRET_ACCESS_KEY && process.env.TOS_BUCKET);
+  const allowLocalFallback = process.env.ALLOW_LOCAL_BACKUP_FALLBACK === "true";
   if (process.env.REQUIRE_TOS_BACKUP === "true" && !tosConfigured) throw new Error("TOS backup is required but credentials are not configured");
 
   const restorePath = `${target}.restore-${crypto.randomUUID()}`;
@@ -65,7 +67,10 @@ const main = async () => {
         endpoint: process.env.TOS_ENDPOINT || "tos-cn-beijing.bytepluses.com.cn",
         requestTimeout,
         connectionTimeout: 15_000,
-        maxRetryCount: 3
+        // A pre-deploy backup has an outer availability deadline. Let the
+        // scheduled strict backup retain SDK retries, but fail fast enough for
+        // deploys to use their verified local restore point.
+        maxRetryCount: allowLocalFallback ? 0 : 3
       });
       const date = new Date();
       objectKey = `backups/sqlite/${date.getUTCFullYear()}/${String(date.getUTCMonth() + 1).padStart(2, "0")}/${path.basename(target)}`;
@@ -82,16 +87,31 @@ const main = async () => {
       logStage("restore_download_started", { objectKey, size: stat.size });
       await client.getObjectToFile({ bucket: process.env.TOS_BUCKET, key: objectKey, filePath: restorePath });
       logStage("restore_download_completed", { objectKey });
+      offsite = true;
     } else {
       await fsPromises.copyFile(target, restorePath);
     }
+    verifySqlite(restorePath);
+    if (await hashFile(restorePath) !== hash) throw new Error("Restored backup SHA256 mismatch");
+  } catch (error) {
+    if (!allowLocalFallback || !tosConfigured) throw error;
+    const failure = error ?? {};
+    logStage("tos_backup_deferred", {
+      code: failure.code ?? "TOS_BACKUP_DEFERRED",
+      statusCode: failure.statusCode,
+      requestId: failure.requestId,
+    });
+    objectKey = undefined;
+    requestId = undefined;
+    await fsPromises.rm(restorePath, { force: true });
+    await fsPromises.copyFile(target, restorePath);
     verifySqlite(restorePath);
     if (await hashFile(restorePath) !== hash) throw new Error("Restored backup SHA256 mismatch");
   } finally {
     await fsPromises.rm(restorePath, { force: true });
   }
 
-  process.stdout.write(`${JSON.stringify({ type: "database_backup_completed", at: new Date().toISOString(), path: target, objectKey, size: stat.size, sha256: hash, requestId, restoreDrill: "ok" })}\n`);
+  process.stdout.write(`${JSON.stringify({ type: "database_backup_completed", at: new Date().toISOString(), path: target, objectKey, size: stat.size, sha256: hash, requestId, restoreDrill: "ok", offsite })}\n`);
 };
 
 main().catch(async (error) => {

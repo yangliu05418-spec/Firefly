@@ -23,6 +23,8 @@ printf '%s\n' "${FIREFLY_IMAGE:-}" | grep -Eq '^ghcr\.io/yangliu05418-spec/firef
 }
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
+allow_local_fallback=${FIREFLY_BACKUP_ALLOW_LOCAL_FALLBACK:-false}
+backup_request_timeout_ms=${TOS_BACKUP_REQUEST_TIMEOUT_MS:-300000}
 /usr/bin/docker image inspect "$FIREFLY_IMAGE" >/dev/null
 /usr/bin/docker run --rm \
   --name "firefly-backup-$stamp" \
@@ -35,6 +37,8 @@ stamp=$(date -u +%Y%m%dT%H%M%SZ)
   --env-file "$feishu_env" \
   --env-file "$alerts_env" \
   -e REQUIRE_TOS_BACKUP=true \
+  -e "ALLOW_LOCAL_BACKUP_FALLBACK=$allow_local_fallback" \
+  -e "TOS_BACKUP_REQUEST_TIMEOUT_MS=$backup_request_timeout_ms" \
   -e "BACKUP_PATH=/data/backups/firefly-$stamp.db" \
   -v /srv/firefly/data:/data:rw \
   "$FIREFLY_IMAGE" node /app/ops/backup-db.mjs

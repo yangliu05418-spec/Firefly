@@ -184,7 +184,10 @@ notify started
 ensure_deploy_space
 /usr/bin/docker pull "$image" >/dev/null
 /usr/bin/docker image inspect "$image" >/dev/null
-/usr/local/sbin/firefly-backup "$image"
+# The local SQLite backup, integrity check and restore drill remain mandatory.
+# A cross-region TOS outage must not leave a healthy production release blocked
+# for the SDK's multi-retry window; the scheduled backup stays strict and alerts.
+FIREFLY_BACKUP_ALLOW_LOCAL_FALLBACK=true TOS_BACKUP_REQUEST_TIMEOUT_MS=60000 /usr/local/sbin/firefly-backup "$image"
 
 /usr/bin/docker run --rm --network "$network" --env-file "$app_env" --env-file "$feishu_env" \
   -e FIREFLY_REVISION="$revision" -e FIREFLY_IMAGE_DIGEST="${image##*@}" \
