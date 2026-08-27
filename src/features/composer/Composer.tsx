@@ -17,7 +17,7 @@ import { persistPrivateMediaStorage } from "../../private-media-cache";
 import { uploadFileUntilAccepted } from "../../upload-acceptance";
 import type { ComposerRestore } from "../../composer-restore";
 import { submissionBlockReason } from "./submission-readiness";
-import { EDITOR_PROMPT_STORAGE_MAX_CHARS, IMAGE_PROVIDER_PROMPT_MAX_CHARS, promptCharacterCount, VIDEO_PROVIDER_PROMPT_MAX_CHARS } from "../../../server/prompt-policy";
+import { EDITOR_PROMPT_STORAGE_MAX_CHARS, IMAGE_PROVIDER_PROMPT_MAX_CHARS, promptCharacterCount } from "../../../server/prompt-policy";
 
 const modeLabels: Record<CreationMode, string> = { omni: "全能参考", first_frame: "首帧生成", first_last: "首尾帧", edit: "视频编辑", extend: "视频续写", text: "文本生成" };
 const modeNotes: Record<CreationMode, string> = { omni: "自由组合图片、视频和音频", first_frame: "锁定开场画面继续创作", first_last: "精确控制起点与落点", edit: "替换、增删或重绘画面", extend: "向前、向后或多段衔接", text: "只用提示词生成镜头" };
@@ -88,7 +88,7 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
   const imageReady = engine === "image" ? Boolean(prompt.trim()) && Boolean(imageSpec) : undefined;
   const providerPromptPreview = useMemo(() => materializePromptReferences(prompt, assets), [prompt, assets]);
   const providerPromptCharacters = promptCharacterCount(providerPromptPreview);
-  const providerPromptLimit = engine === "image" ? IMAGE_PROVIDER_PROMPT_MAX_CHARS : VIDEO_PROVIDER_PROMPT_MAX_CHARS;
+  const providerPromptLimit = engine === "image" ? IMAGE_PROVIDER_PROMPT_MAX_CHARS : undefined;
   const editorPromptCharacters = promptCharacterCount(prompt);
 
   useEffect(() => {
@@ -380,7 +380,7 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
   const uploadsReady = areAttachedUploadsAdmissible(assets);
   const uploadsFinalizing = assets.some((asset) => !asset.assetId && asset.progress === 100 && asset.phase === "verifying");
   const submitBlockReason = submissionBlockReason({
-    engine, mode, prompt, providerPromptCharacters, providerPromptLimit, editorPromptCharacters, editorPromptLimit: EDITOR_PROMPT_STORAGE_MAX_CHARS, assetCount: assets.length,
+    engine, mode, prompt, providerPromptCharacters, providerPromptLimit, editorPromptCharacters, editorPromptLimit: engine === "image" ? EDITOR_PROMPT_STORAGE_MAX_CHARS : undefined, assetCount: assets.length,
     hasVideoAsset: assets.some((asset) => asset.type === "video"),
     hasFirstFrame: assets.some((asset) => asset.role === "first_frame"),
     hasLastFrame: assets.some((asset) => asset.role === "last_frame"),
