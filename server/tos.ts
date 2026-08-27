@@ -391,6 +391,13 @@ export type RangedArchiveObserver = {
   checkpoint?: (state: Required<Pick<RangedArchiveCheckpoint, "sourceSize" | "contentType" | "parts">> & { uploadId: string }) => void;
   resumed?: (uploadId: string, skippedParts: number) => void;
   listPartsDegraded?: (uploadId: string, statusCode?: number, code?: string) => void;
+  partRetry?: (partNumber: number, attempt: number, delayMs: number, statusCode?: number, code?: string) => void;
+};
+
+export const isRetryableArchivePartFailure = (error: unknown) => {
+  const statusCode = Number((error as { statusCode?: number; status?: number })?.statusCode ?? (error as { status?: number })?.status ?? 0);
+  const name = String((error as { name?: string })?.name ?? "");
+  return name === "AbortError" || statusCode === 0 || statusCode === 408 || statusCode === 429 || statusCode >= 500;
 };
 
 const archiveHttpError = (message: string, statusCode: number, archiveStage: TosArchiveStage, requestId?: string) => {
@@ -499,23 +506,32 @@ export const rangedObjectFromUrl = async (
         throw withTosArchiveStage(error, "source_read");
       } finally { clearTimeout(sourceTimer); }
       const uploadBody = Uint8Array.from(body);
-      const targetController = new AbortController();
-      const targetTimer = setTimeout(() => targetController.abort(), partDeadlineMs);
-      try {
-        const target = await fetch(signUploadPart(key, uploadId, partNumber), {
-          method: "PUT", body: uploadBody, headers: { "content-length": String(uploadBody.byteLength) }, signal: targetController.signal,
-        });
-        const requestId = target.headers.get("x-tos-request-id") ?? undefined;
-        if (!target.ok) throw archiveHttpError(`TOS 分片上传失败 (${target.status})`, target.status, "tos_upload_part", requestId);
-        const eTag = (target.headers.get("etag") ?? "").replace(/^"|"$/g, "");
-        if (!eTag) throw withTosArchiveStage(new Error("TOS 分片上传缺少 ETag"), "tos_upload_part");
-        completed.set(partNumber, { partNumber, eTag });
-        transferred += body.byteLength;
-        onPart?.(partNumber, transferred);
-        observer.checkpoint?.({ uploadId, sourceSize: totalSize, contentType, parts: [...completed.values()].sort((a, b) => a.partNumber - b.partNumber) });
-      } catch (error) {
-        throw withTosArchiveStage(error, "tos_upload_part");
-      } finally { clearTimeout(targetTimer); }
+      let eTag = "";
+      for (let uploadAttempt = 1; uploadAttempt <= 3; uploadAttempt += 1) {
+        const targetController = new AbortController();
+        const targetTimer = setTimeout(() => targetController.abort(), partDeadlineMs);
+        try {
+          const target = await fetch(signUploadPart(key, uploadId, partNumber), {
+            method: "PUT", body: uploadBody, headers: { "content-length": String(uploadBody.byteLength) }, signal: targetController.signal,
+          });
+          const requestId = target.headers.get("x-tos-request-id") ?? undefined;
+          if (!target.ok) throw archiveHttpError(`TOS 分片上传失败 (${target.status})`, target.status, "tos_upload_part", requestId);
+          eTag = (target.headers.get("etag") ?? "").replace(/^"|"$/g, "");
+          if (!eTag) throw withTosArchiveStage(new Error("TOS 分片上传缺少 ETag"), "tos_upload_part");
+          break;
+        } catch (error) {
+          if (uploadAttempt >= 3 || !isRetryableArchivePartFailure(error)) throw withTosArchiveStage(error, "tos_upload_part");
+          const delayMs = 1_000 * 2 ** (uploadAttempt - 1);
+          const statusCode = Number((error as { statusCode?: number; status?: number }).statusCode ?? (error as { status?: number }).status ?? 0) || undefined;
+          const code = String((error as { code?: string; name?: string }).code ?? (error as { name?: string }).name ?? "") || undefined;
+          observer.partRetry?.(partNumber, uploadAttempt + 1, delayMs, statusCode, code);
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        } finally { clearTimeout(targetTimer); }
+      }
+      completed.set(partNumber, { partNumber, eTag });
+      transferred += body.byteLength;
+      onPart?.(partNumber, transferred);
+      observer.checkpoint?.({ uploadId, sourceSize: totalSize, contentType, parts: [...completed.values()].sort((a, b) => a.partNumber - b.partNumber) });
       await transferNext();
     };
     const transfers = await Promise.allSettled(Array.from({ length: workerCount }, () => transferNext()));

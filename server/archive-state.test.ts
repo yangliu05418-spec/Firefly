@@ -27,4 +27,9 @@ describe("generation archive transfer strategy", () => {
     expect(archiveTransferStrategy(null, true)).toBe("existing_object");
     expect(archiveTransferStrategy({ strategy: "stream_multipart" }, true)).toBe("existing_object");
   });
+
+  it("starts resumable multipart immediately when URL Fetch is disabled", () => {
+    expect(archiveTransferStrategy(null, false, Date.now(), 300_000, false)).toBe("stream_multipart");
+    expect(archiveTransferStrategy({ strategy: "url_fetch", fetchStartedAt: Date.now() }, false, Date.now(), 300_000, false)).toBe("stream_multipart");
+  });
 });
