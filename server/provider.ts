@@ -2,7 +2,6 @@ import { z } from "zod";
 import { config } from "./config.js";
 import { getModel } from "./capabilities.js";
 import { containsInternalPromptMarker } from "./creation-snapshots.js";
-import { assertPromptLength, EDITOR_PROMPT_STORAGE_MAX_CHARS, VIDEO_PROVIDER_PROMPT_MAX_CHARS } from "./prompt-policy.js";
 
 export const GenerationSchema = z.object({
   prompt: z.string().trim().default(""),
@@ -39,8 +38,6 @@ export type GenerationInput = z.infer<typeof GenerationSchema>;
 
 export const validateGeneration = (input: unknown) => {
   const parsed = GenerationSchema.parse(input);
-  assertPromptLength(parsed.prompt, "prompt", VIDEO_PROVIDER_PROMPT_MAX_CHARS);
-  if (parsed.editorPrompt !== undefined) assertPromptLength(parsed.editorPrompt, "editorPrompt", EDITOR_PROMPT_STORAGE_MAX_CHARS);
   const model = getModel(parsed.model);
   if (!model) throw new Error("未找到所选模型");
   if (config.disabledVideoModels.includes(model.id)) throw new ProviderRequestError("model disabled by deployment capability policy", 400, { providerCode: "MODEL_DISABLED", stage: "submit" });

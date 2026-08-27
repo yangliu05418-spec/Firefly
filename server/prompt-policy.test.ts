@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertPromptLength, promptCharacterCount, PromptTooLongError } from "./prompt-policy.js";
+import { assertPromptLength, IMAGE_PROVIDER_PROMPT_MAX_CHARS, promptCharacterCount, PromptTooLongError } from "./prompt-policy.js";
 
 describe("prompt policy", () => {
   it("counts Unicode code points consistently", () => {
@@ -7,13 +7,13 @@ describe("prompt policy", () => {
   });
 
   it("accepts the boundary and reports structured overflow details", () => {
-    expect(() => assertPromptLength("🎬".repeat(5_000), "prompt", 5_000)).not.toThrow();
+    expect(() => assertPromptLength("🎬".repeat(IMAGE_PROVIDER_PROMPT_MAX_CHARS), "prompt", IMAGE_PROVIDER_PROMPT_MAX_CHARS)).not.toThrow();
     try {
-      assertPromptLength("🎬".repeat(5_001), "prompt", 5_000);
+      assertPromptLength("🎬".repeat(IMAGE_PROVIDER_PROMPT_MAX_CHARS + 1), "prompt", IMAGE_PROVIDER_PROMPT_MAX_CHARS);
       throw new Error("expected overflow");
     } catch (error) {
       expect(error).toBeInstanceOf(PromptTooLongError);
-      expect(error).toMatchObject({ code: "PROMPT_TOO_LONG", field: "prompt", actual: 5_001, limit: 5_000 });
+      expect(error).toMatchObject({ code: "PROMPT_TOO_LONG", field: "prompt", actual: 2_001, limit: 2_000 });
     }
   });
 });

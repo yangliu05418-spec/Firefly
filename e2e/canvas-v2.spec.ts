@@ -378,7 +378,7 @@ test("composer keeps uploaded assets available through the inline mention picker
   await expect(editor).toContainText("video-placeholder.webp");
 });
 
-test("an active library asset selected with @ enables omni generation", async ({ page }) => {
+test("full-reference accepts prompts beyond the former Firefly character ceiling", async ({ page }) => {
   await mockAuthenticatedApi(page, {
     libraryAssets: [{
       Id: "asset-active-reference",
@@ -395,12 +395,17 @@ test("an active library asset selected with @ enables omni generation", async ({
   const send = page.getByRole("button", { name: "生成视频" });
   await expect(send).toBeDisabled();
   const editor = page.getByRole("textbox", { name: "创作提示词" });
-  await editor.fill("角色在雨中缓慢回头 @");
+  const longPrompt = "角色在雨中缓慢回头。".repeat(600);
+  await editor.fill("@");
   const picker = page.getByRole("listbox", { name: "选择参考资产" });
   await expect(picker).toBeVisible();
   await picker.getByRole("option", { name: /角色正面参考/ }).click();
+  await editor.press("End");
+  await page.keyboard.insertText(longPrompt);
 
   await expect(editor.locator("[data-asset-id]")).toContainText("角色正面参考");
+  await expect(editor).toContainText(longPrompt);
+  await expect(page.locator(".prompt-character-count")).toHaveCount(0);
   await expect(send).toBeEnabled();
 });
 

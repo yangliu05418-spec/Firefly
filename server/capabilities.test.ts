@@ -25,6 +25,12 @@ describe("Seedance capability registry", () => {
     const input = validateGeneration({ ...base, mode: "omni", ratio: "16:9", duration: 15, assets: [{ id: "v", name: "source.mp4", type: "video", role: "reference_video", url: "https://example.com/source.mp4" }] });
     expect(buildProviderPayload(input)).toMatchObject({ ratio: "16:9", duration: 15, omni_reference_task_type: "reference" });
   });
+  it("does not impose a Firefly character ceiling on Seedance full-reference prompts", () => {
+    const prompt = "长镜头叙事".repeat(10_000);
+    const input = validateGeneration({ ...base, prompt, editorPrompt: prompt, mode: "omni", assets: [{ id: "i", name: "reference.png", type: "image", role: "reference_image", url: "https://example.com/reference.png" }] });
+    expect(input.prompt).toBe(prompt);
+    expect(input.editorPrompt).toBe(prompt);
+  });
   it("normalizes cached Seedance 2.5 edit parameters", () => {
     const input = validateGeneration({ ...base, mode: "edit", ratio: "16:9", duration: 15, assets: [{ id: "v", name: "source.mp4", type: "video", role: "reference_video", url: "https://example.com/source.mp4" }] });
     expect(buildProviderPayload(input)).toMatchObject({ ratio: "adaptive", duration: -1, omni_reference_task_type: "edit" });

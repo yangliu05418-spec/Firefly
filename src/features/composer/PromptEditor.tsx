@@ -19,7 +19,7 @@ type PromptEditorProps = {
   change: (value: string) => void;
   focusSignal?: number;
   characterCount: number;
-  characterLimit: number;
+  characterLimit?: number;
 };
 
 export function PromptEditor({ value, placeholder, assets, disabled, attach, change, focusSignal, characterCount, characterLimit }: PromptEditorProps) {
@@ -134,6 +134,6 @@ export function PromptEditor({ value, placeholder, assets, disabled, attach, cha
     <footer>↑↓ 选择　Enter 插入　Esc 关闭</footer>
   </div>, document.body);
 
-  const countState = characterCount > characterLimit ? "error" : characterCount >= characterLimit * .9 ? "warning" : "normal";
-  return <div className="prompt-editor-wrap"><div ref={editor} className="prompt-editor" contentEditable role="textbox" aria-multiline="true" aria-label="创作提示词" aria-invalid={countState === "error" || undefined} data-placeholder={placeholder} suppressContentEditableWarning onFocus={(event) => { if (!Array.from(event.currentTarget.childNodes).map(promptNodeText).join("")) focusPromptEditorAtEnd(event.currentTarget); }} onInput={() => { sync(); detectMention(); }} onKeyUp={(event) => !["ArrowDown", "ArrowUp", "Enter", "Escape"].includes(event.key) && detectMention()} onKeyDown={keyDown} onBlur={(event) => { if (!Array.from(event.currentTarget.childNodes).map(promptNodeText).join("")) event.currentTarget.replaceChildren(); clearEditorSelection(event.currentTarget); window.setTimeout(() => setOpen(false), 120); }} onPaste={(event) => { event.preventDefault(); document.execCommand("insertText", false, event.clipboardData.getData("text/plain")); }} /><output className={`prompt-character-count prompt-character-count--${countState}`} aria-live="polite">{characterCount.toLocaleString()} / {characterLimit.toLocaleString()}</output>{popup}</div>;
+  const countState = characterLimit === undefined ? "normal" : characterCount > characterLimit ? "error" : characterCount >= characterLimit * .9 ? "warning" : "normal";
+  return <div className="prompt-editor-wrap"><div ref={editor} className="prompt-editor" contentEditable role="textbox" aria-multiline="true" aria-label="创作提示词" aria-invalid={countState === "error" || undefined} data-placeholder={placeholder} suppressContentEditableWarning onFocus={(event) => { if (!Array.from(event.currentTarget.childNodes).map(promptNodeText).join("")) focusPromptEditorAtEnd(event.currentTarget); }} onInput={() => { sync(); detectMention(); }} onKeyUp={(event) => !["ArrowDown", "ArrowUp", "Enter", "Escape"].includes(event.key) && detectMention()} onKeyDown={keyDown} onBlur={(event) => { if (!Array.from(event.currentTarget.childNodes).map(promptNodeText).join("")) event.currentTarget.replaceChildren(); clearEditorSelection(event.currentTarget); window.setTimeout(() => setOpen(false), 120); }} onPaste={(event) => { event.preventDefault(); document.execCommand("insertText", false, event.clipboardData.getData("text/plain")); }} />{characterLimit !== undefined && <output className={`prompt-character-count prompt-character-count--${countState}`} aria-live="polite">{characterCount.toLocaleString()} / {characterLimit.toLocaleString()}</output>}{popup}</div>;
 }

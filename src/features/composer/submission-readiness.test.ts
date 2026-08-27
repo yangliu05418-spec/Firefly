@@ -6,9 +6,7 @@ const ready = {
   mode: "omni" as const,
   prompt: "让角色向前走",
   providerPromptCharacters: 7,
-  providerPromptLimit: 5_000,
   editorPromptCharacters: 7,
-  editorPromptLimit: 20_000,
   assetCount: 1,
   hasVideoAsset: false,
   hasFirstFrame: false,
@@ -37,7 +35,11 @@ describe("composer submission readiness", () => {
     expect(submissionBlockReason({ ...ready, confirmationPending: true })).toBe("正在确认上一项是否已进入队列");
   });
 
-  it("blocks a provider prompt only after materialized references exceed the engine limit", () => {
-    expect(submissionBlockReason({ ...ready, providerPromptCharacters: 5_001 })).toContain("5000");
+  it("does not impose a Firefly character ceiling on video prompts", () => {
+    expect(submissionBlockReason({ ...ready, providerPromptCharacters: 50_001, editorPromptCharacters: 50_001 })).toBe("");
+  });
+
+  it("preserves the separate image provider contract", () => {
+    expect(submissionBlockReason({ ...ready, engine: "image", imageReady: true, providerPromptCharacters: 2_001, providerPromptLimit: 2_000 })).toContain("2000");
   });
 });
