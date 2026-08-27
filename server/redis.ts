@@ -14,6 +14,7 @@ redis.on("error", () => undefined);
 queueConnection.on("error", () => undefined);
 export const generationQueue = new Queue("generation", { connection: queueConnection });
 export const mediaQueue = new Queue("media", { connection: queueConnection });
+export const archiveQueue = new Queue("archive", { connection: queueConnection });
 export const previewQueue = new Queue("preview", { connection: queueConnection });
 export const assetQueue = new Queue("asset-ingest", { connection: queueConnection });
 export const canvasQueue = new Queue("canvas-jobs", { connection: queueConnection });

@@ -13,9 +13,11 @@ export const archiveTransferStrategy = (
   existingObjectOnly = false,
   now = Date.now(),
   fetchMaxWaitMs = 300_000,
+  urlFetchEnabled = true,
 ): ArchiveTransferStrategy => {
   if (existingObjectOnly) return "existing_object";
   if (checkpoint?.strategy === "stream_multipart") return "stream_multipart";
+  if (!urlFetchEnabled) return "stream_multipart";
   if (checkpoint?.fetchStartedAt && now - checkpoint.fetchStartedAt >= fetchMaxWaitMs) return "stream_multipart";
   return "url_fetch";
 };

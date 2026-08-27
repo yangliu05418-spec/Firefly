@@ -1,9 +1,9 @@
 import crypto from "node:crypto";
-import { Worker } from "bullmq";
+import { Worker, type Job } from "bullmq";
 import { Redis } from "ioredis";
 import { config } from "./config.js";
 import { users } from "./store.js";
-import { assetQueue, mediaQueue, previewQueue, readTask, saveTask, uploadFinalizationQueue } from "./redis.js";
+import { archiveQueue, assetQueue, mediaQueue, previewQueue, readTask, saveTask, uploadFinalizationQueue } from "./redis.js";
 import { abortMultipartUpload, createPoster, deleteObject, fetchObjectFromUrl, optimizePlaybackObject, outputObjectKey, posterObjectKey, previewObjectKey, rangedObjectFromUrl, TosFetchPendingError, verifyProgressiveMp4, verifyStoredObject } from "./tos.js";
 import { MAX_MEDIA_RECOVERY_ATTEMPTS } from "./db.js";
 import { transcodePreview, transcodePreviewFromUrl } from "./preview-transcode.js";
@@ -132,8 +132,9 @@ const createTaskPoster = async (taskId: string) => {
 const enqueueArchiveRecovery = async (task: { id: string; sourceVideoUrl?: string; sourceVideoExpiresAt?: number; request?: unknown }, delay = 0, existingObjectOnly = false) => {
   if (!existingObjectOnly && (!task.sourceVideoUrl || !task.sourceVideoExpiresAt || task.sourceVideoExpiresAt <= Date.now() + delay + 5 * 60 * 1000)) return false;
   const bucket = Math.floor((Date.now() + delay) / recoveryBucketMs);
-  await mediaQueue.add("archive-output", { taskId: task.id, sourceUrl: existingObjectOnly ? undefined : task.sourceVideoUrl, outputFormat: outputFormatFor(task), existingObjectOnly }, {
+  await archiveQueue.add("archive-output", { taskId: task.id, sourceUrl: existingObjectOnly ? undefined : task.sourceVideoUrl, outputFormat: outputFormatFor(task), existingObjectOnly }, {
     jobId: `${existingObjectOnly ? "archive-stored-recovery" : "archive-recovery"}-${task.id}-${bucket}`, delay, attempts: existingObjectOnly ? 2 : 4, backoff: { type: "exponential", delay: 5000, jitter: .5 },
+    priority: 10,
     removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 24 * 3600 }
   });
   console.info(JSON.stringify({ type: "tos_recovery_queued", at: new Date().toISOString(), taskId: task.id, delay, strategy: existingObjectOnly ? "existing_object" : "provider_source" }));
@@ -143,9 +144,10 @@ const enqueueArchiveRecovery = async (task: { id: string; sourceVideoUrl?: strin
 const enqueueArchivePoll = async (task: { id: string; sourceVideoUrl?: string; sourceVideoExpiresAt?: number; request?: unknown }, delay = 5_000) => {
   if (!task.sourceVideoUrl || !task.sourceVideoExpiresAt || task.sourceVideoExpiresAt <= Date.now() + delay + 60_000) return false;
   const bucket = Math.floor((Date.now() + delay) / archivePollBucketMs);
-  await mediaQueue.add("archive-output", { taskId: task.id, sourceUrl: task.sourceVideoUrl, outputFormat: outputFormatFor(task) }, {
+  await archiveQueue.add("archive-output", { taskId: task.id, sourceUrl: task.sourceVideoUrl, outputFormat: outputFormatFor(task) }, {
     jobId: `archive-poll-${task.id}-${bucket}`,
     delay,
+    priority: 5,
     attempts: 1,
     removeOnComplete: { age: 24 * 3600 },
     removeOnFail: { age: 24 * 3600 },
@@ -166,14 +168,19 @@ const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputF
     users.deleteMediaArchiveCheckpoint(task.id);
     checkpoint = null;
   }
-  const strategy = archiveTransferStrategy(checkpoint, data.existingObjectOnly, now, config.tosFetchMaxWaitMs);
+  const strategy = archiveTransferStrategy(checkpoint, data.existingObjectOnly, now, config.tosFetchMaxWaitMs, config.tosUrlFetchEnabled);
+  // Keep an existing multipart session on its original geometry. New archives
+  // use the configured larger part size, reducing cross-region round trips.
+  const archivePartSize = checkpoint?.strategy === "stream_multipart"
+    ? checkpoint.partSize
+    : config.tosUploadPartSize;
   const saveCheckpoint = (patch: Partial<NonNullable<typeof checkpoint>> & { strategy: "url_fetch" | "stream_multipart" }) => {
     const current = users.readMediaArchiveCheckpoint(task.id);
     const timestamp = Date.now();
     checkpoint = users.saveMediaArchiveCheckpoint({
       ...current,
       ...patch,
-      taskId: task.id, objectKey, partSize: 5 * 1024 * 1024, parts: [], attemptCount: attempt,
+      taskId: task.id, objectKey, partSize: archivePartSize, parts: [], attemptCount: attempt,
       createdAt: current?.createdAt ?? timestamp, updatedAt: timestamp,
       expiresAt: timestamp + config.tosArchiveCheckpointTtlSeconds * 1000,
       ...(patch.parts ? { parts: patch.parts } : current?.parts ? { parts: current.parts } : {}),
@@ -191,11 +198,12 @@ const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputF
       await rangedObjectFromUrl(
         objectKey, data.sourceUrl, `result.${data.outputFormat}`, data.outputFormat === "mov" ? "video/quicktime" : "video/mp4",
         (partNumber, bytes) => console.info(JSON.stringify({ type: "tos_range_part_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, partNumber, bytes })),
-        5 * 1024 * 1024, config.tosUploadConcurrency,
+        archivePartSize, config.tosUploadConcurrency,
         { uploadId: checkpoint.tosUploadId, sourceSize: checkpoint.sourceSize, contentType: checkpoint.contentType, parts: checkpoint.parts },
         {
           resumed: (uploadId, skippedParts) => console.info(JSON.stringify({ type: "tos_archive_checkpoint_resumed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, uploadId, skippedParts })),
           listPartsDegraded: (uploadId, statusCode, code) => console.warn(JSON.stringify({ type: "tos_archive_list_parts_degraded", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, uploadId, statusCode, providerCode: code, fallback: "durable_checkpoint" })),
+          partRetry: (partNumber, attemptNumber, delayMs, statusCode, code) => console.warn(JSON.stringify({ type: "tos_range_part_retry", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, partNumber, attemptNumber, delayMs, statusCode, code })),
           checkpoint: (state) => { saveCheckpoint({ strategy: "stream_multipart", tosUploadId: state.uploadId, sourceSize: state.sourceSize, contentType: state.contentType, parts: state.parts }); },
         },
       );
@@ -334,6 +342,11 @@ const worker = new Worker("media", async (job) => {
   throw new Error(`Unknown media job: ${job.name}`);
 }, { connection, concurrency: 2, lockDuration: 120000 });
 
+const archiveWorker = new Worker("archive", async (job) => {
+  if (job.name !== "archive-output") throw new Error(`Unknown archive job: ${job.name}`);
+  return archiveOutput(job.data, job.attemptsMade + 1);
+}, { connection, concurrency: config.tosArchiveConcurrency, lockDuration: Math.max(120_000, config.tosUploadRequestTimeoutMs + 60_000) });
+
 const uploadFinalizationWorker = new Worker("upload-finalization", async (job) => {
   if (job.name !== "finalize-upload") throw new Error(`Unknown upload finalization job: ${job.name}`);
   return coordinateUploadFinalization(job.data.uploadId, {
@@ -358,7 +371,7 @@ const assetWorker = new Worker("asset-ingest", async (job) => {
   throw new Error(`Unknown asset job: ${job.name}`);
 }, { connection, concurrency: 2, lockDuration: 240_000 });
 
-await Promise.all([worker.waitUntilReady(), previewWorker.waitUntilReady(), assetWorker.waitUntilReady(), uploadFinalizationWorker.waitUntilReady()]);
+await Promise.all([worker.waitUntilReady(), archiveWorker.waitUntilReady(), previewWorker.waitUntilReady(), assetWorker.waitUntilReady(), uploadFinalizationWorker.waitUntilReady()]);
 const heartbeat = await startWorkerHeartbeat(connection, "media");
 
 previewWorker.on("failed", (job, error) => {
@@ -389,6 +402,27 @@ uploadFinalizationWorker.on("failed", (job, error) => {
   console.warn(JSON.stringify({ type: "tos_upload_finalize_exhausted", at: new Date().toISOString(), uploadId: job.data.uploadId, userId: expired.ownerId, elapsedMs: Date.now() - expired.createdAt }));
 });
 
+const handleArchiveFailure = async (job: Job | undefined, error: Error) => {
+  if (!job || job.name !== "archive-output" || job.attemptsMade < (job.opts.attempts ?? 1)) return;
+  const task = await readTask(job.data.taskId, true);
+  if (!task || task.deletedAt) return;
+  const mediaAttempts = job.data.existingObjectOnly ? (task.mediaAttempts ?? 0) : (task.mediaAttempts ?? 0) + 1;
+  await saveTask({
+    ...task,
+    mediaStatus: "failed",
+    mediaAttempts,
+    mediaLastError: job.failedReason ? JSON.stringify({ phase: "archive_output", message: job.failedReason.slice(0, 500) }) : undefined,
+    updatedAt: Date.now()
+  });
+  if (!job.data.existingObjectOnly && mediaAttempts < MAX_MEDIA_RECOVERY_ATTEMPTS) {
+    await enqueueArchiveRecovery(task, 60_000).catch((queueError) => console.warn(JSON.stringify({ type: "tos_recovery_queue_failed", at: new Date().toISOString(), taskId: task.id, code: (queueError as { code?: string }).code ?? "unknown" })));
+  } else {
+    console.warn(JSON.stringify({ type: "tos_recovery_exhausted", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempts: mediaAttempts, maxAttempts: MAX_MEDIA_RECOVERY_ATTEMPTS }));
+  }
+};
+
+archiveWorker.on("failed", (job, error) => void handleArchiveFailure(job, error));
+
 worker.on("failed", async (job, error) => {
   if (job?.name === "promote-creation-reference") {
     if (job.attemptsMade < (job.opts.attempts ?? 1)) return;
@@ -416,24 +450,7 @@ worker.on("failed", async (job, error) => {
     }
     return;
   }
-  if (!job || job.name !== "archive-output" || job.attemptsMade < (job.opts.attempts ?? 1)) return;
-  const task = await readTask(job.data.taskId, true);
-  if (!task || task.deletedAt) return;
-  const mediaAttempts = job.data.existingObjectOnly ? (task.mediaAttempts ?? 0) : (task.mediaAttempts ?? 0) + 1;
-  // 分层保护：任务保持 succeeded（生成本身成功），归档失败进入可恢复态；
-  // 临时源只作为前端显式选择的降级预览，默认播放与下载仍等待 TOS 验证完成。
-  await saveTask({
-    ...task,
-    mediaStatus: "failed",
-    mediaAttempts,
-    mediaLastError: job.failedReason ? JSON.stringify({ phase: "archive_output", message: job.failedReason.slice(0, 500) }) : undefined,
-    updatedAt: Date.now()
-  });
-  if (!job.data.existingObjectOnly && mediaAttempts < MAX_MEDIA_RECOVERY_ATTEMPTS) {
-    await enqueueArchiveRecovery(task, 60_000).catch((error) => console.warn(JSON.stringify({ type: "tos_recovery_queue_failed", at: new Date().toISOString(), taskId: task.id, code: (error as { code?: string }).code ?? "unknown" })));
-  } else {
-    console.warn(JSON.stringify({ type: "tos_recovery_exhausted", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempts: mediaAttempts, maxAttempts: MAX_MEDIA_RECOVERY_ATTEMPTS }));
-  }
+  await handleArchiveFailure(job, error);
 });
 
 // SQLite tombstones are the deletion source of truth. Scan directly so cleanup
@@ -530,7 +547,7 @@ const shutdown = async () => {
   shuttingDown = true;
   await heartbeat.stop();
   clearInterval(reconcile); clearInterval(archiveReconcile); clearInterval(posterReconcile); clearInterval(previewReconcile); clearInterval(assetReconcile); clearInterval(uploadFinalizeReconcile); clearInterval(canvasCopyReconcile); clearInterval(creationReferenceReconcile);
-  const graceful = await closeWorkersWithin([worker, previewWorker, assetWorker, uploadFinalizationWorker], config.shutdownGraceMs);
+  const graceful = await closeWorkersWithin([worker, archiveWorker, previewWorker, assetWorker, uploadFinalizationWorker], config.shutdownGraceMs);
   console.info(JSON.stringify({ type: "worker_shutdown", at: new Date().toISOString(), worker: "media", graceful }));
   await connection.quit(); users.close(); process.exit(0);
 };

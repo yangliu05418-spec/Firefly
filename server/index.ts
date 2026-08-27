@@ -14,7 +14,7 @@ import { canvasDocumentSchema, DEFAULT_CANVAS_DOCUMENT, DEFAULT_CANVAS_DOCUMENT_
 import { resolveCanvasContext } from "./canvas-context.js";
 import { publicCanvasProject, publicCanvasProjectDetail } from "./canvas-public.js";
 import { consumeFeishuAuthorization, createFeishuAuthorization, exchangeFeishuCode } from "./feishu.js";
-import { assetQueue, canvasQueue, generationQueue, imageGenerationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, previewQueue, queueConnection, readTask, redis, type StoredTask, uploadFinalizationQueue } from "./redis.js";
+import { archiveQueue, assetQueue, canvasQueue, generationQueue, imageGenerationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, previewQueue, queueConnection, readTask, redis, type StoredTask, uploadFinalizationQueue } from "./redis.js";
 import { canAccessTask } from "./task-access.js";
 import { publicTask } from "./task-public.js";
 import { validateGeneration } from "./provider.js";
@@ -823,10 +823,16 @@ app.get("/api/generations/:id/download", requireAuth, async (req, res) => {
     const task = await accessibleTask(req, res);
     if (!task || task.status !== "succeeded") return res.status(404).json({ error: "成片不存在或尚未就绪" });
     const media = task.mediaStatus === "ready" ? users.readTaskMedia(task.id, "output") : null;
-    if (!media) return res.status(425).json({ error: "成片正在归档到TOS，请稍后重试" });
-    const target = signedObjectUrl(media.objectKey, { download: true, fileName: media.fileName }); const source = "tos" as const;
+    const temporaryOriginalAvailable = Boolean(task.sourceVideoUrl)
+      && (!task.sourceVideoExpiresAt || task.sourceVideoExpiresAt > Date.now());
+    if (!media && !temporaryOriginalAvailable) return res.status(425).json({ error: "原片临时地址已过期，正在等待TOS归档恢复" });
+    const target = media
+      ? signedObjectUrl(media.objectKey, { download: true, fileName: media.fileName })
+      : task.sourceVideoUrl!;
+    const source = media ? "tos" as const : "provider" as const;
     res.setHeader("Cache-Control", "no-store");
-    console.info(JSON.stringify({ type: "tos_media_redirect", at: new Date().toISOString(), taskId: task.id, userId: (res.locals.user as SessionUser).id, source, kind: "download" }));
+    res.setHeader("Vary", "Cookie");
+    console.info(JSON.stringify({ type: "tos_media_redirect", at: new Date().toISOString(), taskId: task.id, userId: (res.locals.user as SessionUser).id, source, kind: "original_download", archivePending: !media }));
     res.redirect(302, target);
   } catch (error) { respondError(res, error, 502); }
 });
@@ -1873,7 +1879,7 @@ app.get("/api/health/ready", async (_req, res) => {
     dependency = "reedit";
     checkReeditIntegrity();
     dependency = "queues";
-    await Promise.all([generationQueue.getJobCounts("wait", "active"), imageGenerationQueue.getJobCounts("wait", "active"), mediaQueue.getJobCounts("wait", "active"), previewQueue.getJobCounts("wait", "active"), assetQueue.getJobCounts("wait", "active"), canvasQueue.getJobCounts("wait", "active"), uploadFinalizationQueue.getJobCounts("wait", "active")]);
+    await Promise.all([generationQueue.getJobCounts("wait", "active"), imageGenerationQueue.getJobCounts("wait", "active"), archiveQueue.getJobCounts("wait", "active"), mediaQueue.getJobCounts("wait", "active"), previewQueue.getJobCounts("wait", "active"), assetQueue.getJobCounts("wait", "active"), canvasQueue.getJobCounts("wait", "active"), uploadFinalizationQueue.getJobCounts("wait", "active")]);
     dependency = "workers";
     workerHealth = await readWorkerHealth(redis);
     if (!workerHealth.ready && Date.now() >= workerReadinessRequiredAt) throw new Error(`workers unavailable: ${workerHealth.missing.join(",")}`);
@@ -1945,7 +1951,7 @@ const shutdown = async () => {
   // then close remaining streams so a blue/green retirement cannot hang indefinitely.
   const forceClose = setTimeout(() => server.closeAllConnections(), Math.min(config.shutdownGraceMs, 10_000));
   await Promise.all([httpClosed, outboxStopped]); clearTimeout(forceClose);
-  await Promise.all([generationQueue.close(), imageGenerationQueue.close(), mediaQueue.close(), previewQueue.close(), assetQueue.close(), canvasQueue.close(), uploadFinalizationQueue.close()]);
+  await Promise.all([generationQueue.close(), imageGenerationQueue.close(), archiveQueue.close(), mediaQueue.close(), previewQueue.close(), assetQueue.close(), canvasQueue.close(), uploadFinalizationQueue.close()]);
   await Promise.allSettled([redis.quit(), queueConnection.quit()]); users.close(); process.exit(0);
 };
 process.on("SIGTERM", shutdown);

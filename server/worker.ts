@@ -4,7 +4,7 @@ import { config } from "./config.js";
 import { shouldRecoverArchiveHandoff } from "./archive-state.js";
 import type { StoredTask } from "./db.js";
 import { classifyProviderError, ProviderRequestError, validateGeneration, type GenerationInput } from "./provider.js";
-import { mediaQueue, previewQueue, readTask, saveTask } from "./redis.js";
+import { archiveQueue, previewQueue, readTask, saveTask } from "./redis.js";
 import { AssetRegistrationRejected, isRetryableAssetRejection, prepareProviderAssets } from "./asset-registration.js";
 import { users } from "./store.js";
 import { closeWorkersWithin } from "./shutdown.js";
@@ -26,9 +26,9 @@ const enqueueArchiveHandoff = async (task: StoredTask) => {
   if (!shouldRecoverArchiveHandoff(task, config.mediaStorageBackend)) return false;
   const archiving = { ...task, status: "succeeded" as const, mediaStatus: "archiving" as const, error: undefined, errorCode: undefined, updatedAt: Date.now() };
   await saveTask(archiving);
-  await mediaQueue.add("archive-output", { taskId: task.id, sourceUrl: task.sourceVideoUrl, outputFormat: outputFormatFor(task) }, {
+  await archiveQueue.add("archive-output", { taskId: task.id, sourceUrl: task.sourceVideoUrl, outputFormat: outputFormatFor(task) }, {
     jobId: `archive-handoff-${task.id}-${Math.floor(Date.now() / archiveRecoveryBucketMs)}`,
-    attempts: 4, backoff: { type: "exponential", delay: 5000, jitter: .5 }, removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 24 * 3600 }
+    priority: 1, attempts: 4, backoff: { type: "exponential", delay: 5000, jitter: .5 }, removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 24 * 3600 }
   });
   return true;
 };
@@ -120,7 +120,7 @@ const processGenerationJob = async (job: Job<{ input: unknown }>) => {
     console.info(JSON.stringify({ type: "generation_succeeded", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, providerId: task.providerId }));
     if (config.mediaStorageBackend === "tos") {
       await Promise.all([
-        mediaQueue.add("archive-output", { taskId: task.id, sourceUrl: sourceVideoUrl, outputFormat: input.outputFormat }, { jobId: `archive-${task.id}`, attempts: 4, backoff: { type: "exponential", delay: 5000, jitter: .5 }, removeOnComplete: { age: 7 * 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } }),
+        archiveQueue.add("archive-output", { taskId: task.id, sourceUrl: sourceVideoUrl, outputFormat: input.outputFormat }, { jobId: `archive-${task.id}`, priority: 1, attempts: 4, backoff: { type: "exponential", delay: 5000, jitter: .5 }, removeOnComplete: { age: 7 * 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } }),
         config.tosPreviewTranscodeEnabled
           ? previewQueue.add("create-preview", { taskId: task.id, sourceUrl: sourceVideoUrl }, { jobId: `preview-source-${task.id}`, attempts: 3, backoff: { type: "exponential", delay: 15_000, jitter: .5 }, priority: 1, removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } })
           : Promise.resolve(),
