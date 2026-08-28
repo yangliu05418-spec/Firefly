@@ -109,7 +109,7 @@ sync_atlas_assets() (
       exit 1
     }
   done
-  for required_pattern in 'App-*.js' 'projectLifecycle-*.js' 'timelineClipCanvas.worker-*.js' 'ExportPanel-*.js'; do
+  for required_pattern in 'FireflyEmbeddedEditor-*.js' 'projectLifecycle-*.js' 'timelineClipCanvas.worker-*.js' 'ExportPanel-*.js'; do
     required_asset_found=0
     for required_asset in "$atlas_bundle_dir/assets"/$required_pattern; do
       if [ -s "$required_asset" ]; then required_asset_found=1; break; fi
