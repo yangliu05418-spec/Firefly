@@ -3,6 +3,7 @@ import type { ToolbarMenuController } from './menuTypes';
 
 interface InfoMenuProps extends ToolbarMenuController {
   closeMenu: () => void;
+  fireflyEmbedded?: boolean;
   onOpenChangelog?: () => void;
   onOpenSplash?: () => void;
   setShowLegalDialog: (page: LegalPage) => void;
@@ -10,6 +11,7 @@ interface InfoMenuProps extends ToolbarMenuController {
 
 export function InfoMenu({
   closeMenu,
+  fireflyEmbedded = false,
   onMenuClick,
   onMenuHover,
   onOpenChangelog,
@@ -45,24 +47,28 @@ export function InfoMenu({
           <button className="menu-option" onClick={() => dispatchAndClose('start-tutorial')}>
             <span>Workspace Tour</span>
           </button>
-          <div className="menu-separator" />
-          <button className="menu-option" onClick={() => { onOpenChangelog?.(); closeMenu(); }}>
-            <span>Changelog</span>
-          </button>
-          <div className="menu-separator" />
-          <button className="menu-option" onClick={() => { onOpenSplash?.(); closeMenu(); }}>
-            <span>About</span>
-          </button>
-          <div className="menu-separator" />
-          <a className="menu-option" href="/impressum" rel="noopener noreferrer" target="_blank">
-            <span>Imprint</span>
-          </a>
-          <a className="menu-option" href="/datenschutz" rel="noopener noreferrer" target="_blank">
-            <span>Privacy Policy</span>
-          </a>
-          <button className="menu-option" onClick={() => openLegalDialog('contact')}>
-            <span>Contact</span>
-          </button>
+          {!fireflyEmbedded && (
+            <>
+              <div className="menu-separator" />
+              <button className="menu-option" onClick={() => { onOpenChangelog?.(); closeMenu(); }}>
+                <span>Changelog</span>
+              </button>
+              <div className="menu-separator" />
+              <button className="menu-option" onClick={() => { onOpenSplash?.(); closeMenu(); }}>
+                <span>About</span>
+              </button>
+              <div className="menu-separator" />
+              <a className="menu-option" href="/impressum" rel="noopener noreferrer" target="_blank">
+                <span>Imprint</span>
+              </a>
+              <a className="menu-option" href="/datenschutz" rel="noopener noreferrer" target="_blank">
+                <span>Privacy Policy</span>
+              </a>
+              <button className="menu-option" onClick={() => openLegalDialog('contact')}>
+                <span>Contact</span>
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>

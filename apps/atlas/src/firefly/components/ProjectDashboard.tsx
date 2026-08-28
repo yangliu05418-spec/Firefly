@@ -1,5 +1,8 @@
 import { useMemo, useRef, useState } from 'react';
-import type { AtlasBootstrap, AtlasProjectSummary } from '../model';
+import type {
+  FireflyAtlasBootstrap,
+  FireflyAtlasProject,
+} from '../projectApi';
 import { useI18n } from '../i18n';
 import { detectBrowserSupport } from '../capabilities';
 import { AtlasBrand } from './Brand';
@@ -17,19 +20,19 @@ export function ProjectDashboard({
   onRename,
   onDelete,
 }: {
-  bootstrap: AtlasBootstrap;
-  projects: AtlasProjectSummary[];
+  bootstrap: FireflyAtlasBootstrap;
+  projects: FireflyAtlasProject[];
   loading: boolean;
   error?: string;
   onRefresh: () => void;
   onCreate: (title: string) => Promise<void>;
-  onOpen: (project: AtlasProjectSummary, restoreCloud?: boolean) => void;
-  onRename: (project: AtlasProjectSummary, title: string) => Promise<void>;
-  onDelete: (project: AtlasProjectSummary) => Promise<void>;
+  onOpen: (project: FireflyAtlasProject, restoreCloud?: boolean) => void;
+  onRename: (project: FireflyAtlasProject, title: string) => Promise<void>;
+  onDelete: (project: FireflyAtlasProject) => Promise<void>;
 }) {
   const { t, locale } = useI18n();
   const [dialog, setDialog] = useState<'create' | 'rename' | 'delete' | null>(null);
-  const [target, setTarget] = useState<AtlasProjectSummary | null>(null);
+  const [target, setTarget] = useState<FireflyAtlasProject | null>(null);
   const [title, setTitle] = useState('');
   const [pending, setPending] = useState(false);
   const pendingRef = useRef(false);
@@ -43,13 +46,13 @@ export function ProjectDashboard({
     setTarget(null);
     setDialog('create');
   };
-  const openRename = (project: AtlasProjectSummary) => {
+  const openRename = (project: FireflyAtlasProject) => {
     setOperationError(null);
     setTitle(project.title);
     setTarget(project);
     setDialog('rename');
   };
-  const openDelete = (project: AtlasProjectSummary) => {
+  const openDelete = (project: FireflyAtlasProject) => {
     setOperationError(null);
     setTarget(project);
     setDialog('delete');
@@ -128,7 +131,7 @@ export function ProjectDashboard({
                     <p>{t('projects.updated')} · {new Intl.DateTimeFormat(locale, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(project.updatedAt))}</p>
                   </div>
                   <div className="atlas-project-card__status">
-                    <span><Icon name={project.localOnly ? 'device' : 'cloud'} />{project.localOnly ? t('projects.localDraft') : t('projects.cloudReady')}</span>
+                    <span><Icon name="cloud" />{t('projects.cloudReady')}</span>
                   </div>
                   <div className="atlas-project-card__actions">
                     <button className="atlas-button atlas-button--quiet" type="button" onClick={() => onOpen(project)}>{t('projects.open')}</button>

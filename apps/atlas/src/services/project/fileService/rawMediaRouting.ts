@@ -1,7 +1,7 @@
 import { Logger } from '../../logger';
 import { NativeHelperClient } from '../../nativeHelper/NativeHelperClient';
 import type { NativeProjectCoreService } from '../core/NativeProjectCoreService';
-import type { ProjectCoreService } from '../core/ProjectCoreService';
+import type { ProjectHandlePort } from '../core/ProjectCorePort';
 import { PROJECT_FOLDERS } from '../core/constants';
 import type { RawMediaService } from '../domains/RawMediaService';
 import {
@@ -18,7 +18,7 @@ import {
 
 const log = Logger.create('ProjectFileService');
 
-type ProjectFileStorageBackend = 'fsa' | 'native';
+type ProjectFileStorageBackend = 'fsa' | 'native' | 'firefly';
 type ImportedMediaFile = NonNullable<Awaited<ReturnType<RawMediaService['importMediaFile']>>>;
 
 interface RawMediaProjectData {
@@ -27,7 +27,7 @@ interface RawMediaProjectData {
 
 export interface RawMediaRoutingContext {
   activeBackend: ProjectFileStorageBackend;
-  coreService: ProjectCoreService;
+  coreService: ProjectHandlePort;
   nativeCoreService: NativeProjectCoreService | null;
   rawMediaService: RawMediaService;
   getProjectData: () => RawMediaProjectData | null;

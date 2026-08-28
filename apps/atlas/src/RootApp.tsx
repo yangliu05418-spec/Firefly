@@ -1,5 +1,6 @@
 import { lazy, Suspense, type CSSProperties } from 'react';
 import { LegalDialog } from './components/common/LegalDialog';
+import type { FireflyEmbeddedToolbarContext } from './components/common/Toolbar';
 import type { EntryExperience } from './routing/entryExperience';
 
 const EditorApp = lazy(() => import('./App'));
@@ -10,8 +11,9 @@ const CreditClaimPage = lazy(() =>
   import('./creditClaims/CreditClaimPage').then((module) => ({ default: module.CreditClaimPage }))
 );
 
-interface RootAppProps {
+export interface RootAppProps {
   initialExperience: EntryExperience;
+  fireflyEmbedded?: FireflyEmbeddedToolbarContext;
 }
 
 const loadingShellStyle: CSSProperties = {
@@ -26,7 +28,18 @@ const loadingShellStyle: CSSProperties = {
   width: '100%',
 };
 
-export function RootApp({ initialExperience }: RootAppProps) {
+export function RootApp({ initialExperience, fireflyEmbedded }: RootAppProps) {
+  // Firefly owns authentication, project routing, and commercial concerns. An
+  // embedded editor must therefore always enter the proven editor runtime
+  // directly, regardless of any legacy MasterSelects route encoded in the URL.
+  if (fireflyEmbedded) {
+    return (
+      <Suspense fallback={<div style={loadingShellStyle}>正在打开 Atlas…</div>}>
+        <EditorApp fireflyEmbedded={fireflyEmbedded} />
+      </Suspense>
+    );
+  }
+
   if (initialExperience === 'admin') {
     return (
       <Suspense fallback={<div style={loadingShellStyle}>Opening secure operations...</div>}>

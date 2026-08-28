@@ -3,8 +3,9 @@ WORKDIR /atlas
 COPY apps/atlas/package.json apps/atlas/package-lock.json ./
 RUN npm ci
 COPY apps/atlas/index.html apps/atlas/tsconfig.json apps/atlas/tsconfig.app.json apps/atlas/tsconfig.node.json apps/atlas/vite.config.ts ./
-COPY apps/atlas/src/main.tsx apps/atlas/src/vite-env.d.ts ./src/
-COPY apps/atlas/src/firefly ./src/firefly
+# Atlas is the proven upstream editor runtime. Copy the complete source tree;
+# Firefly only replaces its outer control-plane boundary.
+COPY apps/atlas/src ./src
 RUN npm run build
 
 FROM node:22-bookworm-slim AS build

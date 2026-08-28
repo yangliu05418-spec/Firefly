@@ -61,8 +61,16 @@ const verifyAtlasStaticBundle = async () => {
   if (!referencedAssets.length) throw new Error("Atlas index has no immutable assets");
   await Promise.all(referencedAssets.map((asset) => fs.access(path.join(atlasDir, "assets", asset))));
   const assets = await fs.readdir(path.join(atlasDir, "assets"));
-  if (!assets.some((asset) => /^export\.worker-[A-Za-z0-9._-]+\.js$/.test(asset))) {
-    throw new Error("Atlas export worker is unavailable");
+  const requiredRuntimeAssets = [
+    ["editor", /^App-[A-Za-z0-9._-]+\.js$/],
+    ["project lifecycle", /^projectLifecycle-[A-Za-z0-9._-]+\.js$/],
+    ["timeline worker", /^timelineClipCanvas\.worker-[A-Za-z0-9._-]+\.js$/],
+    ["export panel", /^ExportPanel-[A-Za-z0-9._-]+\.js$/],
+  ] as const;
+  for (const [name, pattern] of requiredRuntimeAssets) {
+    if (!assets.some((asset) => pattern.test(asset))) {
+      throw new Error(`Atlas ${name} is unavailable`);
+    }
   }
 };
 app.set("trust proxy", 1);

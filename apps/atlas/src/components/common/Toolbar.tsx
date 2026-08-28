@@ -57,11 +57,21 @@ import { runToolbarProjectBootRestore } from './toolbar/toolbarProjectStartup';
 const log = Logger.create('Toolbar');
 
 interface ToolbarProps {
+  fireflyEmbedded?: FireflyEmbeddedToolbarContext;
   onOpenChangelog?: () => void;
   onOpenSplash?: () => void;
 }
 
-export function Toolbar({ onOpenChangelog, onOpenSplash }: ToolbarProps) {
+export interface FireflyEmbeddedToolbarContext {
+  user: {
+    name: string;
+    email: string;
+    avatarUrl?: string;
+  };
+  onBackToProjects: () => void | Promise<void>;
+}
+
+export function Toolbar({ fireflyEmbedded, onOpenChangelog, onOpenSplash }: ToolbarProps) {
   const { isEngineReady, createOutputWindow } = useEngine();
   const targets = useRenderTargetStore((s) => s.targets);
   const outputTargets = useMemo(() => {
@@ -141,6 +151,7 @@ export function Toolbar({ onOpenChangelog, onOpenSplash }: ToolbarProps) {
   >(null);
   const [recentProjects, setRecentProjects] = useState<RecentProjectEntry[]>([]);
   const [capturePhase, setCapturePhase] = useState(() => screenCaptureService.getSnapshot().phase);
+  const [isReturningToProjects, setIsReturningToProjects] = useState(false);
   const menuBarRef = useRef<HTMLDivElement>(null);
   const autosaveTimerRef = useRef<NodeJS.Timeout | null>(null);
   const isRenamingRef = useRef(false);
@@ -148,7 +159,7 @@ export function Toolbar({ onOpenChangelog, onOpenSplash }: ToolbarProps) {
     markMessagesSeen: markDevChatMessagesSeen,
     unreadCount: devChatUnreadCount,
   } = useDevChatNotification({
-    paused: showDevChatDialog,
+    paused: fireflyEmbedded !== undefined || showDevChatDialog,
   });
 
   const openDevChat = useCallback(() => {
@@ -178,6 +189,10 @@ export function Toolbar({ onOpenChangelog, onOpenSplash }: ToolbarProps) {
   }, []);
 
   useEffect(() => {
+    if (fireflyEmbedded) {
+      setRecentProjects([]);
+      return;
+    }
     const refreshRecentProjects = () => {
       setRecentProjects(projectFileService.getRecentProjects());
     };
@@ -189,7 +204,7 @@ export function Toolbar({ onOpenChangelog, onOpenSplash }: ToolbarProps) {
       window.removeEventListener(RECENT_PROJECTS_CHANGED_EVENT, refreshRecentProjects);
       window.removeEventListener('storage', refreshRecentProjects);
     };
-  }, []);
+  }, [fireflyEmbedded]);
 
   useEffect(() => {
     const restoreProject = async () => {
@@ -202,9 +217,21 @@ export function Toolbar({ onOpenChangelog, onOpenSplash }: ToolbarProps) {
       });
       const restoreResult = await runToolbarProjectBootRestore({
         url: window.location.href,
+        projectAlreadyOpen: fireflyEmbedded !== undefined,
         restoreLastProject: () => projectFileService.restoreLastProject(),
         loadProjectToStores,
       });
+      if (restoreResult === 'already-open') {
+        const data = projectFileService.getProjectData();
+        if (data) {
+          setProjectName(data.name);
+          setIsProjectOpen(true);
+        }
+        setProjectLoadProgress(null);
+        setIsLoading(false);
+        setupAutoSync();
+        return;
+      }
       if (restoreResult === 'evidence-isolated') {
         log.info('Skipping automatic project restore for isolated Motion Design evidence session');
         setProjectLoadProgress(null);
@@ -228,7 +255,7 @@ export function Toolbar({ onOpenChangelog, onOpenSplash }: ToolbarProps) {
       setupAutoSync();
     };
     restoreProject();
-  }, []);
+  }, [fireflyEmbedded]);
 
   useEffect(() => {
     if (!openMenu) return;
@@ -313,11 +340,29 @@ export function Toolbar({ onOpenChangelog, onOpenSplash }: ToolbarProps) {
     setShowSavedToast,
   });
 
+  const returnToFireflyProjects = useCallback(async () => {
+    if (!fireflyEmbedded || isReturningToProjects) return;
+    closeMenu();
+    setIsReturningToProjects(true);
+    try {
+      await fireflyEmbedded.onBackToProjects();
+    } finally {
+      setIsReturningToProjects(false);
+    }
+  }, [closeMenu, fireflyEmbedded, isReturningToProjects]);
+
+  const handleNewProject = fireflyEmbedded
+    ? returnToFireflyProjects
+    : projectActions.handleNew;
+  const handleOpenProject = fireflyEmbedded
+    ? returnToFireflyProjects
+    : projectActions.handleOpen;
+
   useToolbarProjectShortcuts({
-    handleNew: projectActions.handleNew,
-    handleOpen: projectActions.handleOpen,
+    handleNew: handleNewProject,
+    handleOpen: handleOpenProject,
     handleSave: projectActions.handleSave,
-    handleSaveAs: projectActions.handleSaveAs,
+    handleSaveAs: fireflyEmbedded ? projectActions.handleSave : projectActions.handleSaveAs,
   });
 
   const editActions = useToolbarEditActions(openSettings, closeMenu);
@@ -356,6 +401,18 @@ export function Toolbar({ onOpenChangelog, onOpenSplash }: ToolbarProps) {
   return (
     <div className="toolbar">
       <div className="toolbar-project">
+        {fireflyEmbedded && (
+          <button
+            aria-label="返回 Atlas 项目"
+            className="menu-trigger"
+            disabled={isReturningToProjects}
+            onClick={() => void returnToFireflyProjects()}
+            title="返回 Atlas 项目"
+            type="button"
+          >
+            ← 项目
+          </button>
+        )}
         {needsPermission ? (
           <button
             className="restore-permission-btn"
@@ -399,14 +456,15 @@ export function Toolbar({ onOpenChangelog, onOpenSplash }: ToolbarProps) {
         <FileMenu
           autosaveEnabled={autosaveEnabled}
           autosaveInterval={autosaveInterval}
+          fireflyEmbedded={fireflyEmbedded !== undefined}
           hasUnsavedChanges={projectFileService.hasUnsavedChanges.bind(projectFileService)}
           isLoading={isLoading}
           isProjectOpen={isProjectOpen}
           onClearRecentProjects={projectActions.handleClearRecentProjects}
           onMenuClick={handleMenuClick}
           onMenuHover={handleMenuHover}
-          onNew={projectActions.handleNew}
-          onOpen={projectActions.handleOpen}
+          onNew={handleNewProject}
+          onOpen={handleOpenProject}
           onOpenRecent={projectActions.handleOpenRecent}
           onSave={projectActions.handleSave}
           onSaveAs={projectActions.handleSaveAs}
@@ -460,6 +518,7 @@ export function Toolbar({ onOpenChangelog, onOpenSplash }: ToolbarProps) {
 
         <InfoMenu
           closeMenu={closeMenu}
+          fireflyEmbedded={fireflyEmbedded !== undefined}
           onMenuClick={handleMenuClick}
           onMenuHover={handleMenuHover}
           onOpenChangelog={onOpenChangelog}
@@ -468,15 +527,17 @@ export function Toolbar({ onOpenChangelog, onOpenSplash }: ToolbarProps) {
           setShowLegalDialog={setShowLegalDialog}
         />
 
-        <HelpMenu
-          closeMenu={closeMenu}
-          devChatUnreadCount={devChatUnreadCount}
-          onMenuClick={handleMenuClick}
-          onMenuHover={handleMenuHover}
-          onOpenDevChat={openDevChat}
-          onOpenLeaveNote={() => setShowLeaveNoteDialog(true)}
-          openMenu={openMenu}
-        />
+        {!fireflyEmbedded && (
+            <HelpMenu
+              closeMenu={closeMenu}
+              devChatUnreadCount={devChatUnreadCount}
+              onMenuClick={handleMenuClick}
+              onMenuHover={handleMenuHover}
+              onOpenDevChat={openDevChat}
+              onOpenLeaveNote={() => setShowLeaveNoteDialog(true)}
+              openMenu={openMenu}
+            />
+        )}
       </div>
 
       <div className="toolbar-spacer" />
@@ -512,17 +573,25 @@ export function Toolbar({ onOpenChangelog, onOpenSplash }: ToolbarProps) {
             <span aria-hidden="true" /> REC
           </button>
         )}
-        {accountSession?.authenticated && (
+        {!fireflyEmbedded && accountSession?.authenticated && (
           <CreditBurnMeter />
         )}
-        <button
-          className="menu-trigger"
-          onClick={() => (accountSession?.authenticated ? openAccountDialog() : openAuthDialog())}
-          type="button"
-        >
-          {accountSession?.authenticated ? (accountUser?.email?.split('@')[0] || 'Account') : 'Sign in'}
-        </button>
-        <NativeHelperStatus />
+        {fireflyEmbedded ? (
+          <span className="status" title={fireflyEmbedded.user.email}>
+            {fireflyEmbedded.user.name || fireflyEmbedded.user.email}
+          </span>
+        ) : (
+          <>
+            <button
+              className="menu-trigger"
+              onClick={() => (accountSession?.authenticated ? openAccountDialog() : openAuthDialog())}
+              type="button"
+            >
+              {accountSession?.authenticated ? (accountUser?.email?.split('@')[0] || 'Account') : 'Sign in'}
+            </button>
+            <NativeHelperStatus />
+          </>
+        )}
 
         {!isEngineReady && (
           <span className="status loading">{'\u25cb Loading...'}</span>

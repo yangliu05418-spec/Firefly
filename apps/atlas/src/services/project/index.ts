@@ -24,6 +24,12 @@ export type {
 // Core services (for advanced usage)
 export { FileStorageService, fileStorageService } from './core/FileStorageService';
 export { ProjectCoreService } from './core/ProjectCoreService';
+export { FireflyProjectCoreService } from './core/FireflyProjectCoreService';
+export type { ProjectCorePort } from './core/ProjectCorePort';
+export type {
+  FireflyCloudSaveState,
+  OpenFireflyProjectOptions,
+} from './firefly/FireflyProjectRepository';
 export { PROJECT_FOLDERS, MAX_BACKUPS, PROJECT_FOLDER_PATHS } from './core/constants';
 export type { ProjectFolderKey } from './core/constants';
 export { RECENT_PROJECTS_CHANGED_EVENT } from './recentProjects';

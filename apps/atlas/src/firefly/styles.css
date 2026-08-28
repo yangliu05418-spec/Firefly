@@ -1,4 +1,4 @@
-:root {
+.firefly-atlas-shell {
   color-scheme: dark;
   font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "Microsoft YaHei", sans-serif;
   font-synthesis: none;
@@ -22,16 +22,35 @@
   --atlas-shadow: 0 20px 70px rgba(0, 0, 0, 0.42);
 }
 
-* { box-sizing: border-box; }
-html, body, #root { width: 100%; min-width: 0; height: 100%; margin: 0; }
-body { overflow: hidden; background: var(--atlas-ink); color: var(--atlas-text); }
-button, input, select, textarea { font: inherit; }
-button, a { -webkit-tap-highlight-color: transparent; }
-button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--atlas-amber); outline-offset: 2px; }
-button:disabled { cursor: not-allowed; opacity: 0.42; }
-button:not(:disabled) { cursor: pointer; }
-img, video { display: block; max-width: 100%; }
-.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.firefly-atlas-shell,
+.firefly-atlas-shell * { box-sizing: border-box; }
+.firefly-atlas-shell { width: 100%; min-width: 0; height: 100%; margin: 0; overflow: hidden; background: var(--atlas-ink); color: var(--atlas-text); }
+.firefly-atlas-shell button,
+.firefly-atlas-shell input,
+.firefly-atlas-shell select,
+.firefly-atlas-shell textarea { font: inherit; }
+.firefly-atlas-shell button,
+.firefly-atlas-shell a { -webkit-tap-highlight-color: transparent; }
+.firefly-atlas-shell button:focus-visible,
+.firefly-atlas-shell a:focus-visible,
+.firefly-atlas-shell input:focus-visible,
+.firefly-atlas-shell select:focus-visible,
+.firefly-atlas-shell textarea:focus-visible { outline: 2px solid var(--atlas-amber); outline-offset: 2px; }
+.firefly-atlas-shell button:disabled { cursor: not-allowed; opacity: 0.42; }
+.firefly-atlas-shell button:not(:disabled) { cursor: pointer; }
+.firefly-atlas-shell img,
+.firefly-atlas-shell video { display: block; max-width: 100%; }
+.firefly-atlas-shell .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+.firefly-atlas-editor-overlay-host {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  pointer-events: none;
+  background: transparent;
+}
+.firefly-atlas-editor-overlay-host .atlas-modal-backdrop,
+.firefly-atlas-editor-overlay-host .atlas-workspace-notice { pointer-events: auto; }
 
 .atlas-button,
 .atlas-icon-button {
@@ -375,10 +394,10 @@ img, video { display: block; max-width: 100%; }
 @keyframes atlas-fade-in { from { opacity: 0; } }
 @keyframes atlas-modal-in { from { opacity: 0; transform: translateY(8px) scale(.985); } }
 
-* { scrollbar-width: thin; scrollbar-color: #38413f transparent; }
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 8px; background: #38413f; background-clip: padding-box; }
+.firefly-atlas-shell * { scrollbar-width: thin; scrollbar-color: #38413f transparent; }
+.firefly-atlas-shell ::-webkit-scrollbar { width: 8px; height: 8px; }
+.firefly-atlas-shell ::-webkit-scrollbar-track { background: transparent; }
+.firefly-atlas-shell ::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 8px; background: #38413f; background-clip: padding-box; }
 
 @media (max-width: 1240px) {
   .atlas-workspace__main { grid-template-columns: 224px minmax(520px, 1fr) 240px; }
@@ -398,5 +417,7 @@ img, video { display: block; max-width: 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  .firefly-atlas-shell *,
+  .firefly-atlas-shell *::before,
+  .firefly-atlas-shell *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }

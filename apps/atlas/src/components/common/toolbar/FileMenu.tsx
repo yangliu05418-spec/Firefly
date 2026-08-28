@@ -24,6 +24,7 @@ function formatRecentProjectDate(timestamp: number): string {
 }
 
 interface FileMenuProps extends ToolbarMenuController {
+  fireflyEmbedded?: boolean;
   autosaveEnabled: boolean;
   autosaveInterval: AutosaveInterval;
   isLoading: boolean;
@@ -44,6 +45,7 @@ interface FileMenuProps extends ToolbarMenuController {
 export function FileMenu({
   autosaveEnabled,
   autosaveInterval,
+  fireflyEmbedded = false,
   hasUnsavedChanges,
   isLoading,
   isProjectOpen,
@@ -80,53 +82,57 @@ export function FileMenu({
             <span>Open Project...</span>
             <span className="shortcut">{shortcutLabels.open}</span>
           </button>
-          <div className="menu-item-with-submenu">
-            <button className="menu-option" disabled={isLoading}>
-              <span>Open Recent</span>
-            </button>
-            <div className="menu-nested-submenu menu-nested-submenu-recent">
-              {recentProjects.length === 0 ? (
-                <span className="menu-empty">No recent projects</span>
-              ) : (
-                <>
-                  {recentProjects.map((project) => {
-                    const meta = formatRecentProjectDate(project.lastOpenedAt);
-                    const title = project.path || project.name;
-                    return (
-                      <button
-                        key={project.id}
-                        className="menu-option menu-option-recent"
-                        onClick={() => onOpenRecent(project.id)}
-                        disabled={isLoading}
-                        title={title}
-                      >
-                        <span className="menu-recent-text">
-                          <span className="menu-recent-name">{project.name}</span>
-                          <span className="menu-recent-meta">{meta}</span>
-                        </span>
-                        <span className="menu-recent-kind">
-                          {project.backend === 'native' ? 'Native' : 'Browser'}
-                        </span>
-                      </button>
-                    );
-                  })}
-                  <div className="menu-separator" />
-                  <button className="menu-option" onClick={onClearRecentProjects}>
-                    <span>Clear Recent Projects</span>
-                  </button>
-                </>
-              )}
+          {!fireflyEmbedded && (
+            <div className="menu-item-with-submenu">
+              <button className="menu-option" disabled={isLoading}>
+                <span>Open Recent</span>
+              </button>
+              <div className="menu-nested-submenu menu-nested-submenu-recent">
+                {recentProjects.length === 0 ? (
+                  <span className="menu-empty">No recent projects</span>
+                ) : (
+                  <>
+                    {recentProjects.map((project) => {
+                      const meta = formatRecentProjectDate(project.lastOpenedAt);
+                      const title = project.path || project.name;
+                      return (
+                        <button
+                          key={project.id}
+                          className="menu-option menu-option-recent"
+                          onClick={() => onOpenRecent(project.id)}
+                          disabled={isLoading}
+                          title={title}
+                        >
+                          <span className="menu-recent-text">
+                            <span className="menu-recent-name">{project.name}</span>
+                            <span className="menu-recent-meta">{meta}</span>
+                          </span>
+                          <span className="menu-recent-kind">
+                            {project.backend === 'native' ? 'Native' : 'Browser'}
+                          </span>
+                        </button>
+                      );
+                    })}
+                    <div className="menu-separator" />
+                    <button className="menu-option" onClick={onClearRecentProjects}>
+                      <span>Clear Recent Projects</span>
+                    </button>
+                  </>
+                )}
+              </div>
             </div>
-          </div>
+          )}
           <div className="menu-separator" />
           <button className="menu-option" onClick={() => onSave()} disabled={isLoading || !isProjectOpen}>
             <span>Save</span>
             <span className="shortcut">{shortcutLabels.save}</span>
           </button>
-          <button className="menu-option" onClick={onSaveAs} disabled={isLoading}>
-            <span>Save As...</span>
-            <span className="shortcut">{shortcutLabels.saveAs}</span>
-          </button>
+          {!fireflyEmbedded && (
+            <button className="menu-option" onClick={onSaveAs} disabled={isLoading}>
+              <span>Save As...</span>
+              <span className="shortcut">{shortcutLabels.saveAs}</span>
+            </button>
+          )}
           {isProjectOpen && (
             <>
               <div className="menu-separator" />
@@ -164,10 +170,14 @@ export function FileMenu({
               ))}
             </div>
           </div>
-          <div className="menu-separator" />
-          <button className="menu-option" onClick={clearAllCacheAndReload}>
-            <span>Clear All Cache & Reload</span>
-          </button>
+          {!fireflyEmbedded && (
+            <>
+              <div className="menu-separator" />
+              <button className="menu-option" onClick={clearAllCacheAndReload}>
+                <span>Clear All Cache & Reload</span>
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>

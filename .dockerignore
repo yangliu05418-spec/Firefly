@@ -16,11 +16,6 @@ output
 data
 uploads
 *.log
-apps/atlas/src/**
-!apps/atlas/src/main.tsx
-!apps/atlas/src/vite-env.d.ts
-!apps/atlas/src/firefly
-!apps/atlas/src/firefly/**
 apps/atlas/tests
 apps/atlas/public
 apps/atlas/functions

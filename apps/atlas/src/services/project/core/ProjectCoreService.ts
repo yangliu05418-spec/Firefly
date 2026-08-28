@@ -5,7 +5,8 @@ import { Logger } from '../../logger';
 import { projectDB } from '../../projectDB';
 import { shouldSkipEmptyProjectSave } from './autosaveRecovery';
 import { addRecentFsaProject, removeRecentFsaProject } from '../recentProjects';
-import { createDefaultRulerLaneState } from '../../../timeline/tempo/rulerDefaults';
+import { createInitialProjectFile } from './createInitialProjectFile';
+import type { ProjectCorePort } from './ProjectCorePort';
 
 const log = Logger.create('ProjectCore');
 import { FileStorageService } from './FileStorageService';
@@ -39,7 +40,7 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
 }
 
-export class ProjectCoreService {
+export class ProjectCoreService implements ProjectCorePort {
   private projectHandle: FileSystemDirectoryHandle | null = null;
   private projectData: ProjectFile | null = null;
   private isDirty = false;
@@ -48,9 +49,14 @@ export class ProjectCoreService {
   private pendingHandle: FileSystemDirectoryHandle | null = null;
   private permissionNeeded = false;
   private fileStorage: FileStorageService;
+  private readonly persistBrowserHandles: boolean;
 
-  constructor(fileStorage: FileStorageService) {
+  constructor(
+    fileStorage: FileStorageService,
+    options: { persistBrowserHandles?: boolean } = {},
+  ) {
     this.fileStorage = fileStorage;
+    this.persistBrowserHandles = options.persistBrowserHandles ?? true;
   }
 
   // ============================================
@@ -159,43 +165,7 @@ export class ProjectCoreService {
     try {
       await this.fileStorage.createProjectFolders(projectFolder);
 
-      const mainCompId = `comp-${Date.now()}`;
-
-      const initialProject: ProjectFile = {
-        version: 1,
-        name,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        settings: {
-          width: 1920,
-          height: 1080,
-          frameRate: 30,
-          sampleRate: 48000,
-        },
-        media: [],
-        compositions: [{
-          id: mainCompId,
-          name: 'Main Comp',
-          width: 1920,
-          height: 1080,
-          frameRate: 30,
-          duration: 60,
-          backgroundColor: '#000000',
-          folderId: null,
-          tracks: [
-            { id: 'track-v1', name: 'Video 1', type: 'video', height: 60, locked: false, visible: true, muted: false, solo: false },
-            { id: 'track-a1', name: 'Audio 1', type: 'audio', height: 40, locked: false, visible: true, muted: false, solo: false },
-          ],
-          clips: [],
-          markers: [],
-          // Multi-ruler infrastructure (issue #257) — default single Time lane.
-          ...createDefaultRulerLaneState(),
-        }],
-        folders: [],
-        activeCompositionId: mainCompId,
-        openCompositionIds: [mainCompId],
-        expandedFolderIds: [],
-      };
+      const initialProject = createInitialProjectFile(name);
 
       await writeFsaProjectFile(projectFolder, PROJECT_FILE_NAME, initialProject);
 
@@ -203,8 +173,10 @@ export class ProjectCoreService {
       this.projectData = initialProject;
       this.isDirty = false;
 
-      await this.storeLastProject(projectFolder);
-      await addRecentFsaProject(projectFolder, initialProject);
+      if (this.persistBrowserHandles) {
+        await this.storeLastProject(projectFolder);
+        await addRecentFsaProject(projectFolder, initialProject);
+      }
 
       log.info(`Created project: ${name}`);
       return true;
@@ -249,8 +221,10 @@ export class ProjectCoreService {
       this.projectData = projectData;
       this.isDirty = false;
 
-      await this.storeLastProject(handle);
-      await addRecentFsaProject(handle, projectData);
+      if (this.persistBrowserHandles) {
+        await this.storeLastProject(handle);
+        await addRecentFsaProject(handle, projectData);
+      }
 
       // Try to restore API keys from file if IndexedDB keys are empty
       log.info(`Opened project: ${projectData.name}`);

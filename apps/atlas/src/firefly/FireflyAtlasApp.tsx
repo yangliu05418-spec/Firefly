@@ -1,63 +1,235 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { ApiError, atlasApi, redirectToFeishu } from './api';
-import { createEmptyDocument, stripRuntimeUrls, type AtlasBootstrap, type AtlasDocument, type AtlasProjectSummary } from './model';
-import { deleteLocalProject, listLocalProjects, loadLocalProject, saveLocalProject } from './storage';
-import { useI18n } from './i18n';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
+import { RootApp } from '../RootApp';
 import { AtlasBrand } from './components/Brand';
 import { Icon } from './components/Icon';
-import { ProjectDashboard } from './components/ProjectDashboard';
-import { Workspace } from './components/Workspace';
 import { Modal } from './components/Modal';
-import { reconcileProjectAssets } from './asset-reconciliation';
+import { ProjectDashboard } from './components/ProjectDashboard';
+import { useI18n } from './i18n';
+import {
+  FireflyProjectApiError,
+  fireflyProjectApi,
+  type FireflyAtlasBootstrap,
+  type FireflyAtlasProject,
+  type FireflyProjectLease,
+} from './projectApi';
+import {
+  FireflyProjectLeaseController,
+  type FireflyProjectLeaseSnapshot,
+} from './useFireflyProjectLease';
 
 type AppPhase = 'booting' | 'dashboard' | 'opening' | 'workspace' | 'failed';
+type RecoveryPreference = 'fail-on-conflict' | 'prefer-local' | 'prefer-cloud';
+
+interface OpenIssue {
+  kind: 'lease-locked' | 'local-cloud-conflict';
+  project: FireflyAtlasProject;
+}
+
+type FireflyEditorAdapter = typeof import('./FireflyEditorAdapter');
+
+const createDeviceId = (): string => {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(18));
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+};
+
+const deviceStorageKey = (userId: string) => `firefly:atlas:${userId}:device-id`;
+const leaseStorageKey = (userId: string, projectId: string) =>
+  `firefly:atlas:${userId}:projects:${projectId}:lease-token`;
+
+const getDeviceId = (userId: string): string => {
+  const key = deviceStorageKey(userId);
+  try {
+    const existing = window.localStorage.getItem(key);
+    if (existing && existing.length >= 8) return existing;
+    const created = createDeviceId();
+    window.localStorage.setItem(key, created);
+    return created;
+  } catch {
+    return createDeviceId();
+  }
+};
+
+const readLeaseToken = (userId: string, projectId: string): string | null => {
+  try {
+    return window.sessionStorage.getItem(leaseStorageKey(userId, projectId));
+  } catch {
+    return null;
+  }
+};
+
+const writeLeaseToken = (userId: string, projectId: string, token: string | null): void => {
+  try {
+    const key = leaseStorageKey(userId, projectId);
+    if (token) window.sessionStorage.setItem(key, token);
+    else window.sessionStorage.removeItem(key);
+  } catch {
+    // A blocked Storage API must not prevent local editing.
+  }
+};
+
+const redirectToFeishu = (): void => {
+  const returnTo = `${window.location.pathname}${window.location.search}`;
+  window.location.assign(`/api/auth/feishu/start?returnTo=${encodeURIComponent(returnTo)}`);
+};
+
+const displayError = (error: unknown, fallback: string): string =>
+  error instanceof Error && error.message ? error.message : fallback;
+
+const structuredErrorCode = (error: unknown): string | undefined =>
+  error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+    ? error.code
+    : undefined;
 
 export function FireflyAtlasApp() {
   const { t } = useI18n();
   const [phase, setPhase] = useState<AppPhase>('booting');
-  const [bootstrap, setBootstrap] = useState<AtlasBootstrap | null>(null);
-  const [projects, setProjects] = useState<AtlasProjectSummary[]>([]);
+  const [bootstrap, setBootstrap] = useState<FireflyAtlasBootstrap | null>(null);
+  const [projects, setProjects] = useState<FireflyAtlasProject[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
   const [projectsError, setProjectsError] = useState<string>();
-  const [activeDocument, setActiveDocument] = useState<AtlasDocument | null>(null);
-  const [openConflict, setOpenConflict] = useState<{ project: AtlasProjectSummary; local: AtlasDocument } | null>(null);
-  const [openConflictPending, setOpenConflictPending] = useState(false);
-  const [openConflictError, setOpenConflictError] = useState<string | null>(null);
+  const [activeProject, setActiveProject] = useState<FireflyAtlasProject | null>(null);
+  const [openIssue, setOpenIssue] = useState<OpenIssue | null>(null);
+  const [openIssuePending, setOpenIssuePending] = useState(false);
+  const [openIssueError, setOpenIssueError] = useState<string>();
+  const [leaseSnapshot, setLeaseSnapshot] = useState<FireflyProjectLeaseSnapshot | null>(null);
+  const [workspaceError, setWorkspaceError] = useState<string>();
   const openRequestRef = useRef(0);
-  const openConflictActionRef = useRef(false);
+  const autoOpenAttemptedRef = useRef(false);
+  const leaseControllerRef = useRef<FireflyProjectLeaseController | null>(null);
+  const leaseUnsubscribeRef = useRef<(() => void) | null>(null);
+  const editorAdapterRef = useRef<FireflyEditorAdapter | null>(null);
 
-  const loadProjects = useCallback(async (session: AtlasBootstrap) => {
+  const loadProjects = useCallback(async () => {
     setProjectsLoading(true);
     setProjectsError(undefined);
-    const local = await listLocalProjects(session.user.id).catch(() => []);
     try {
-      const cloud = await atlasApi.listProjects();
-      setProjects(mergeCloudAuthoritativeProjects(cloud, local));
-    } catch {
-      setProjects(local);
-      setProjectsError(navigator.onLine ? t('bootstrap.failedBody') : t('app.offline'));
+      setProjects(await fireflyProjectApi.listProjects({ limit: 100 }));
+    } catch (error) {
+      setProjectsError(displayError(error, t('bootstrap.failedBody')));
     } finally {
       setProjectsLoading(false);
     }
   }, [t]);
 
+  const detachLeaseController = useCallback(async (release: boolean) => {
+    const controller = leaseControllerRef.current;
+    leaseControllerRef.current = null;
+    leaseUnsubscribeRef.current?.();
+    leaseUnsubscribeRef.current = null;
+    setLeaseSnapshot(null);
+    if (!controller) return;
+    if (release) await controller.release();
+    else controller.stop();
+  }, []);
+
+  const attachLeaseController = useCallback((controller: FireflyProjectLeaseController) => {
+    leaseControllerRef.current = controller;
+    leaseUnsubscribeRef.current?.();
+    setLeaseSnapshot(controller.getSnapshot());
+    leaseUnsubscribeRef.current = controller.subscribe(() => {
+      setLeaseSnapshot(controller.getSnapshot());
+    });
+  }, []);
+
+  const openProject = useCallback(async (
+    session: FireflyAtlasBootstrap,
+    project: FireflyAtlasProject,
+    options: { takeover?: boolean; recoveryPreference?: RecoveryPreference } = {},
+  ) => {
+    const requestId = ++openRequestRef.current;
+    setPhase('opening');
+    setProjectsError(undefined);
+    setOpenIssue(null);
+    setOpenIssueError(undefined);
+    setWorkspaceError(undefined);
+
+    const controller = new FireflyProjectLeaseController({
+      projectId: project.id,
+      deviceId: getDeviceId(session.user.id),
+      onTokenChange: (token) => {
+        writeLeaseToken(session.user.id, project.id, token);
+        if (token) editorAdapterRef.current?.updateEditorLeaseToken(token);
+      },
+      onLost: (error) => {
+        if (leaseControllerRef.current === controller) setWorkspaceError(error.message);
+      },
+    });
+
+    try {
+      let lease: FireflyProjectLease | undefined;
+      const resumedToken = readLeaseToken(session.user.id, project.id);
+      if (resumedToken && !options.takeover) lease = await controller.resume(resumedToken);
+      if (!lease) lease = await controller.start(options.takeover === true);
+      if (requestId !== openRequestRef.current) {
+        await controller.release();
+        return;
+      }
+      if (!lease) {
+        const snapshot = controller.getSnapshot();
+        await controller.release();
+        if (snapshot.status === 'locked') {
+          setOpenIssue({ kind: 'lease-locked', project });
+          setPhase('dashboard');
+          return;
+        }
+        throw snapshot.error ?? new Error('无法取得项目编辑租约');
+      }
+
+      const editor = await import('./FireflyEditorAdapter');
+      editorAdapterRef.current = editor;
+      const opened = await editor.openEditorProject({
+        userId: session.user.id,
+        projectId: project.id,
+        title: project.title,
+        cloudRevision: project.revision,
+        leaseToken: lease.token,
+        recoveryPreference: options.recoveryPreference ?? 'fail-on-conflict',
+      });
+      if (!opened) throw new Error('无法打开项目工作区');
+      if (requestId !== openRequestRef.current) {
+        editor.closeEditorProject();
+        await controller.release();
+        return;
+      }
+
+      attachLeaseController(controller);
+      setActiveProject(project);
+      setPhase('workspace');
+      window.history.replaceState(null, '', `/studio/atlas/?project=${encodeURIComponent(project.id)}`);
+    } catch (error) {
+      await controller.release();
+      if (requestId !== openRequestRef.current) return;
+      if (structuredErrorCode(error) === 'ATLAS_LOCAL_CLOUD_CONFLICT') {
+        setOpenIssue({ kind: 'local-cloud-conflict', project });
+        setPhase('dashboard');
+        return;
+      }
+      if (error instanceof FireflyProjectApiError && error.status === 401) {
+        redirectToFeishu();
+        return;
+      }
+      editorAdapterRef.current?.closeEditorProject();
+      editorAdapterRef.current = null;
+      setPhase('dashboard');
+      setProjectsError(displayError(error, t('projects.operationFailed')));
+    }
+  }, [attachLeaseController, t]);
+
   useEffect(() => {
-    let cancelled = false;
+    const abort = new AbortController();
     const boot = async () => {
       try {
-        const session = await atlasApi.bootstrap();
-        if (cancelled) return;
+        const session = await fireflyProjectApi.bootstrap({ signal: abort.signal });
+        if (abort.signal.aborted) return;
         setBootstrap(session);
         setPhase('dashboard');
-        await loadProjects(session);
-        const requestedProject = new URLSearchParams(window.location.search).get('project');
-        if (requestedProject) {
-          const project = (await atlasApi.listProjects()).find((candidate) => candidate.id === requestedProject);
-          if (project && !cancelled) await openProject(session, project, false);
-        }
+        void navigator.storage?.persist?.().catch(() => false);
+        await loadProjects();
       } catch (error) {
-        if (cancelled) return;
-        if (error instanceof ApiError && error.status === 401) {
+        if (abort.signal.aborted) return;
+        if (error instanceof FireflyProjectApiError && error.status === 401) {
           redirectToFeishu();
           return;
         }
@@ -65,195 +237,222 @@ export function FireflyAtlasApp() {
       }
     };
     void boot();
-    return () => { cancelled = true; };
-    // bootstrap runs exactly once; later refreshes use the explicit retry path.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => abort.abort();
+  }, [loadProjects]);
+
+  useEffect(() => {
+    if (!bootstrap || phase !== 'dashboard' || projectsLoading || autoOpenAttemptedRef.current) return;
+    autoOpenAttemptedRef.current = true;
+    const requestedProjectId = new URLSearchParams(window.location.search).get('project');
+    if (!requestedProjectId) return;
+    const openRequested = async () => {
+      try {
+        const project = projects.find((candidate) => candidate.id === requestedProjectId)
+          ?? await fireflyProjectApi.getProject(requestedProjectId);
+        await openProject(bootstrap, project);
+      } catch (error) {
+        setProjectsError(displayError(error, t('projects.operationFailed')));
+      }
+    };
+    void openRequested();
+  }, [bootstrap, openProject, phase, projects, projectsLoading, t]);
+
+  useEffect(() => {
+    const releaseOnPageHide = (event: PageTransitionEvent) => {
+      if (!event.persisted) void leaseControllerRef.current?.release();
+    };
+    window.addEventListener('pagehide', releaseOnPageHide);
+    return () => {
+      window.removeEventListener('pagehide', releaseOnPageHide);
+      leaseUnsubscribeRef.current?.();
+      void leaseControllerRef.current?.release();
+      editorAdapterRef.current?.disposeEditorRuntime();
+    };
   }, []);
 
-  const openProject = async (session: AtlasBootstrap, project: AtlasProjectSummary, forceCloud = false) => {
-    const requestId = ++openRequestRef.current;
-    setPhase('opening');
+  const returnToDashboard = useCallback(async () => {
+    if (!bootstrap || !activeProject) return;
+    setWorkspaceError(undefined);
     try {
-      const localPromise = loadLocalProject(session.user.id, project.id).catch(() => null);
-      const cloudProjectPromise = atlasApi.getProject(project.id).catch((error) => {
-        if (error instanceof ApiError && error.status === 401) redirectToFeishu();
-        return null;
-      });
-      const projectAssetsPromise = atlasApi.listProjectAssets(project.id).catch(() => []);
-      const [local, cloudProject] = await Promise.all([localPromise, cloudProjectPromise]);
-      if (requestId !== openRequestRef.current) return;
-      const effectiveProject = cloudProject ?? project;
-      const cloudDocument = effectiveProject.hasCheckpoint
-        ? await atlasApi.loadCheckpoint(project.id).then((value) => ({ ...value, title: effectiveProject.title, revision: effectiveProject.revision })).catch((error) => {
-          if (error instanceof ApiError && error.status === 404) return null;
-          throw error;
-        })
-        : null;
-      const decision = resolveProjectOpen({ local, cloud: cloudDocument, project: effectiveProject, forceCloud, cloudKnown: Boolean(cloudProject) });
-      if (requestId !== openRequestRef.current) return;
-      if (decision.kind === 'conflict') {
-        setOpenConflictError(null);
-        setOpenConflict({ project: effectiveProject, local: decision.local });
-        setActiveDocument(null);
-        setPhase('dashboard');
-        return;
+      const editor = editorAdapterRef.current;
+      if (!editor) throw new Error('编辑器尚未完成初始化');
+      const result = await editor.saveAndFlushEditorProject();
+      if (!result.savedLocally) throw new Error('项目未能保存到本机，请重试');
+      if (result.cloudStatus?.status === 'error') {
+        throw new Error(result.cloudStatus.errorMessage ?? t('workspace.saveFailed'));
       }
-      const document = reconcileProjectAssets(decision.document, await projectAssetsPromise);
-      if (requestId !== openRequestRef.current) return;
-      void saveLocalProject(session.user.id, document).catch(() => undefined);
-      setActiveDocument(document);
-      setPhase('workspace');
-      window.history.replaceState(null, '', `/studio/atlas/?project=${encodeURIComponent(project.id)}`);
-    } catch {
-      if (requestId !== openRequestRef.current) return;
+      await detachLeaseController(true);
+      editor.closeEditorProject();
+      editorAdapterRef.current = null;
+      setActiveProject(null);
       setPhase('dashboard');
-      setProjectsError(t('bootstrap.failedBody'));
-    }
-  };
-
-  const returnToDashboard = () => {
-    openRequestRef.current += 1;
-    setActiveDocument(null);
-    setPhase('dashboard');
-    window.history.replaceState(null, '', '/studio/atlas/');
-    if (bootstrap) void loadProjects(bootstrap);
-  };
-
-  const resolveOpenConflict = async (choice: 'copy' | 'cloud') => {
-    if (!openConflict || openConflictActionRef.current) return;
-    openConflictActionRef.current = true;
-    setOpenConflictPending(true);
-    setOpenConflictError(null);
-    const conflict = openConflict;
-    try {
-      if (choice === 'copy') {
-        const copyProject = await atlasApi.createProject(`${conflict.local.title} · 副本`);
-        const copy = { ...conflict.local, projectId: copyProject.id, title: copyProject.title, revision: copyProject.revision };
-        await saveLocalProject(bootstrap!.user.id, copy);
-        setProjects((current) => [copyProject, ...current]);
-        setOpenConflict(null);
-        await openProject(bootstrap!, copyProject);
-      } else {
-        setOpenConflict(null);
-        await openProject(bootstrap!, conflict.project, true);
-      }
+      window.history.replaceState(null, '', '/studio/atlas/');
+      await loadProjects();
     } catch (error) {
-      setOpenConflict(conflict);
-      setOpenConflictError(error instanceof Error ? error.message : t('projects.operationFailed'));
-    } finally {
-      openConflictActionRef.current = false;
-      setOpenConflictPending(false);
+      setWorkspaceError(displayError(error, t('workspace.saveFailed')));
     }
-  };
+  }, [activeProject, bootstrap, detachLeaseController, loadProjects, t]);
 
-  if (phase === 'booting' || phase === 'opening') {
-    return <LoadingScreen title={phase === 'opening' ? t('app.loading') : t('bootstrap.title')} body={t('bootstrap.body')} />;
+  const embeddedContext = useMemo(() => bootstrap ? {
+    user: bootstrap.user,
+    onBackToProjects: returnToDashboard,
+  } : undefined, [bootstrap, returnToDashboard]);
+
+  const retryLostLease = useCallback(async () => {
+    const controller = leaseControllerRef.current;
+    if (!controller) return;
+    setOpenIssuePending(true);
+    setOpenIssueError(undefined);
+    try {
+      const lease = await controller.takeover();
+      if (!lease) throw controller.getSnapshot().error ?? new Error('无法恢复编辑租约');
+      editorAdapterRef.current?.updateEditorLeaseToken(lease.token);
+      setWorkspaceError(undefined);
+    } catch (error) {
+      setOpenIssueError(displayError(error, '无法恢复编辑租约'));
+    } finally {
+      setOpenIssuePending(false);
+    }
+  }, []);
+
+  if (phase === 'workspace' && activeProject && bootstrap && embeddedContext) {
+    const leaseLost = leaseSnapshot?.lost === true || leaseSnapshot?.status === 'lost';
+    return (
+      <>
+        <RootApp initialExperience="editor" fireflyEmbedded={embeddedContext} />
+        {(workspaceError || leaseLost) && (
+          <div className="firefly-atlas-shell firefly-atlas-editor-overlay-host">
+            {leaseLost ? (
+              <Modal
+                title="编辑租约已失效"
+                onClose={() => undefined}
+                closeDisabled
+                actions={(
+                  <button className="atlas-button atlas-button--primary" disabled={openIssuePending} onClick={() => void retryLostLease()} type="button">
+                    {t('workspace.takeOver')}
+                  </button>
+                )}
+              >
+                <p>项目仍安全保存在本机。重新接管后才会继续写入云端。</p>
+                {openIssueError && <p role="alert">{openIssueError}</p>}
+              </Modal>
+            ) : (
+              <div className="atlas-workspace-notice" role="alert">
+                <Icon name="warning" />
+                <span>{workspaceError}</span>
+                <button className="atlas-button atlas-button--quiet" onClick={() => setWorkspaceError(undefined)} type="button">
+                  {t('app.close')}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </>
+    );
   }
 
-  if (phase === 'failed' || !bootstrap) {
+  if (phase === 'booting' || phase === 'opening') {
     return (
-      <div className="atlas-fatal">
-        <AtlasBrand />
-        <span className="atlas-fatal__icon"><Icon name="warning" /></span>
-        <h1>{t('bootstrap.failedTitle')}</h1>
-        <p>{t('bootstrap.failedBody')}</p>
-        <button className="atlas-button atlas-button--primary" type="button" onClick={() => window.location.reload()}><Icon name="refresh" />{t('app.retry')}</button>
+      <div className="firefly-atlas-shell">
+        <LoadingScreen title={phase === 'opening' ? t('app.loading') : t('bootstrap.title')} body={t('bootstrap.body')} />
       </div>
     );
   }
 
-  if (phase === 'workspace' && activeDocument) {
+  if (phase === 'failed' || !bootstrap) {
     return (
-      <Workspace
-        key={activeDocument.projectId}
-        bootstrap={bootstrap}
-        initialDocument={activeDocument}
-        onBack={returnToDashboard}
-        onProjectUpdated={(project) => setProjects((current) => mergeCloudAuthoritativeProjects([project], current.filter((candidate) => candidate.id !== project.id)))}
-        onOpenProject={(project) => void openProject(bootstrap, project)}
-      />
+      <div className="firefly-atlas-shell">
+        <div className="atlas-fatal">
+          <AtlasBrand />
+          <span className="atlas-fatal__icon"><Icon name="warning" /></span>
+          <h1>{t('bootstrap.failedTitle')}</h1>
+          <p>{t('bootstrap.failedBody')}</p>
+          <button className="atlas-button atlas-button--primary" type="button" onClick={() => window.location.reload()}>
+            <Icon name="refresh" />{t('app.retry')}
+          </button>
+        </div>
+      </div>
     );
   }
 
   return (
-    <>
-    <ProjectDashboard
-      bootstrap={bootstrap}
-      projects={projects}
-      loading={projectsLoading}
-      error={projectsError}
-      onRefresh={() => void loadProjects(bootstrap)}
-      onCreate={async (title) => {
-        const project = await atlasApi.createProject(title);
-        const document = createEmptyDocument(project.id, project.title, project.revision);
-        await saveLocalProject(bootstrap.user.id, document);
-        setProjects((current) => [project, ...current]);
-        await openProject(bootstrap, project);
-      }}
-      onOpen={(project, restore) => void openProject(bootstrap, project, restore)}
-      onRename={async (project, title) => {
-        const updated = await atlasApi.renameProject(project.id, title, project.revision);
-        setProjects((current) => current.map((candidate) => candidate.id === project.id ? { ...candidate, ...updated, title } : candidate));
-        const local = await loadLocalProject(bootstrap.user.id, project.id);
-        if (local) await saveLocalProject(bootstrap.user.id, { ...local, title, updatedAt: new Date().toISOString() });
-      }}
-      onDelete={async (project) => {
-        if (!project.localOnly) await atlasApi.deleteProject(project.id);
-        await deleteLocalProject(bootstrap.user.id, project.id);
-        setProjects((current) => current.filter((candidate) => candidate.id !== project.id));
-      }}
-    />
-    {openConflict && (
-      <Modal
-        title={t('workspace.conflictTitle')}
-        onClose={() => setOpenConflict(null)}
-        closeDisabled={openConflictPending}
-        actions={<>
-          <button className="atlas-button atlas-button--quiet" type="button" disabled={openConflictPending} onClick={() => setOpenConflict(null)}>{t('app.cancel')}</button>
-          <button className="atlas-button atlas-button--soft" type="button" disabled={openConflictPending} onClick={() => void resolveOpenConflict('copy')}>{t('workspace.keepCopy')}</button>
-          <button className="atlas-button atlas-button--primary" type="button" disabled={openConflictPending} onClick={() => void resolveOpenConflict('cloud')}>{t('workspace.reloadCloud')}</button>
-        </>}
-      >
-        <p>{t('workspace.conflictBody')}</p>
-        {openConflictError && <div className="atlas-inline-alert atlas-inline-alert--error" role="alert"><Icon name="warning" /><span><strong>{openConflictError}</strong></span></div>}
-      </Modal>
-    )}
-    </>
+    <div className="firefly-atlas-shell">
+      <ProjectDashboard
+        bootstrap={bootstrap}
+        projects={projects}
+        loading={projectsLoading}
+        error={projectsError}
+        onRefresh={() => void loadProjects()}
+        onCreate={async (title) => {
+          const project = await fireflyProjectApi.createProject(title);
+          setProjects((current) => [project, ...current]);
+          await openProject(bootstrap, project);
+        }}
+        onOpen={(project, restoreCloud) => void openProject(bootstrap, project, {
+          recoveryPreference: restoreCloud ? 'prefer-cloud' : 'fail-on-conflict',
+        })}
+        onRename={async (project, title) => {
+          const updated = await fireflyProjectApi.renameProject(project.id, title, project.revision);
+          setProjects((current) => current.map((candidate) => candidate.id === project.id ? updated : candidate));
+        }}
+        onDelete={async (project) => {
+          await fireflyProjectApi.deleteProject(project.id);
+          setProjects((current) => current.filter((candidate) => candidate.id !== project.id));
+        }}
+      />
+
+      {openIssue && (
+        <Modal
+          title={openIssue.kind === 'lease-locked' ? '项目正在另一窗口编辑' : t('workspace.conflictTitle')}
+          onClose={() => setOpenIssue(null)}
+          closeDisabled={openIssuePending}
+          actions={(
+            <>
+              <button className="atlas-button atlas-button--quiet" disabled={openIssuePending} onClick={() => setOpenIssue(null)} type="button">
+                {t('app.cancel')}
+              </button>
+              {openIssue.kind === 'lease-locked' ? (
+                <button
+                  className="atlas-button atlas-button--primary"
+                  disabled={openIssuePending}
+                  onClick={() => {
+                    setOpenIssuePending(true);
+                    void openProject(bootstrap, openIssue.project, { takeover: true })
+                      .finally(() => setOpenIssuePending(false));
+                  }}
+                  type="button"
+                >
+                  {t('workspace.takeOver')}
+                </button>
+              ) : (
+                <>
+                  <button
+                    className="atlas-button atlas-button--soft"
+                    disabled={openIssuePending}
+                    onClick={() => void openProject(bootstrap, openIssue.project, { recoveryPreference: 'prefer-local' })}
+                    type="button"
+                  >
+                    保留本地草稿
+                  </button>
+                  <button
+                    className="atlas-button atlas-button--primary"
+                    disabled={openIssuePending}
+                    onClick={() => void openProject(bootstrap, openIssue.project, { recoveryPreference: 'prefer-cloud' })}
+                    type="button"
+                  >
+                    {t('workspace.reloadCloud')}
+                  </button>
+                </>
+              )}
+            </>
+          )}
+        >
+          <p>{openIssue.kind === 'lease-locked' ? '为防止覆盖，第二个窗口默认不会进入编辑状态。' : t('workspace.conflictBody')}</p>
+          {openIssueError && <p role="alert">{openIssueError}</p>}
+        </Modal>
+      )}
+    </div>
   );
-}
-
-export function mergeCloudAuthoritativeProjects(cloud: AtlasProjectSummary[], local: AtlasProjectSummary[]): AtlasProjectSummary[] {
-  const merged = new Map(cloud.map((project) => [project.id, project]));
-  for (const draft of local) {
-    if (!merged.has(draft.id)) merged.set(draft.id, { ...draft, localOnly: true });
-  }
-  return [...merged.values()].sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime());
-}
-
-export function resolveProjectOpen(input: {
-  local: AtlasDocument | null;
-  cloud: AtlasDocument | null;
-  project: AtlasProjectSummary;
-  forceCloud: boolean;
-  cloudKnown: boolean;
-}): { kind: 'open'; document: AtlasDocument } | { kind: 'conflict'; local: AtlasDocument } {
-  const empty = () => createEmptyDocument(input.project.id, input.project.title, input.project.revision);
-  if (input.forceCloud) return { kind: 'open', document: input.cloud ?? empty() };
-  if (!input.local) return { kind: 'open', document: input.cloud ?? empty() };
-  if (!input.cloudKnown) return { kind: 'open', document: input.local };
-  if (input.cloud && documentsSemanticallyEqual(input.local, input.cloud)) return { kind: 'open', document: input.cloud };
-  if (input.local.revision !== input.project.revision) return { kind: 'conflict', local: input.local };
-  // Same base revision means the local document is a legitimate unsaved draft.
-  // Keep its own revision; never rewrite it using a timestamp comparison.
-  return { kind: 'open', document: input.local };
-}
-
-function documentsSemanticallyEqual(left: AtlasDocument, right: AtlasDocument): boolean {
-  const comparable = (document: AtlasDocument) => {
-    const stripped = stripRuntimeUrls(document);
-    return { ...stripped, title: '', revision: 0, updatedAt: '' };
-  };
-  return JSON.stringify(comparable(left)) === JSON.stringify(comparable(right));
 }
 
 function LoadingScreen({ title, body }: { title: string; body: string }) {

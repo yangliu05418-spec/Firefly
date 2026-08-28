@@ -1,14 +1,14 @@
 import type { FileStorageService } from '../core/FileStorageService';
 import type { NativeFileStorageService } from '../core/NativeFileStorageService';
 import type { NativeProjectCoreService } from '../core/NativeProjectCoreService';
-import type { ProjectCoreService } from '../core/ProjectCoreService';
+import type { ProjectHandlePort } from '../core/ProjectCorePort';
 import { PROJECT_FOLDERS, type ProjectFolderKey } from '../core/constants';
 
-type ProjectFileStorageBackend = 'fsa' | 'native';
+type ProjectFileStorageBackend = 'fsa' | 'native' | 'firefly';
 
 export interface FileStorageRoutingContext {
   activeBackend: ProjectFileStorageBackend;
-  coreService: ProjectCoreService;
+  coreService: ProjectHandlePort;
   fileStorage: FileStorageService;
   nativeCoreService: NativeProjectCoreService | null;
   nativeFileStorage: NativeFileStorageService | null;
