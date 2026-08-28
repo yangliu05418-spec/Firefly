@@ -8,6 +8,12 @@ import { NativeFileStorageService, nativeFileStorageService } from './core/Nativ
 import { NativeProjectCoreService } from './core/NativeProjectCoreService';
 import { NativeHelperClient } from '../nativeHelper/NativeHelperClient';
 import { ProjectCoreService } from './core/ProjectCoreService';
+import { FireflyProjectCoreService } from './core/FireflyProjectCoreService';
+import type { ProjectCorePort, ProjectHandlePort } from './core/ProjectCorePort';
+import type {
+  FireflyCloudSaveState,
+  OpenFireflyProjectOptions,
+} from './firefly/FireflyProjectRepository';
 import { AnalysisService } from './domains/AnalysisService';
 import { TranscriptService, type StoredTranscript } from './domains/TranscriptService';
 import { CacheService } from './domains/CacheService';
@@ -53,7 +59,7 @@ export type {
 
 const log = Logger.create('ProjectFileService');
 
-export type ProjectBackend = 'fsa' | 'native';
+export type ProjectBackend = 'fsa' | 'native' | 'firefly';
 
 class ProjectFileService {
   // Domain services
@@ -68,6 +74,7 @@ class ProjectFileService {
   // Native Helper backend (lazy-initialized)
   private nativeCoreService: NativeProjectCoreService | null = null;
   private nativeFileStorage: NativeFileStorageService | null = null;
+  private fireflyCoreService: FireflyProjectCoreService | null = null;
   private _activeBackend: ProjectBackend = 'fsa';
 
   constructor() {
@@ -83,7 +90,7 @@ class ProjectFileService {
   private get fileRoutingContext(): FileStorageRoutingContext {
     return {
       activeBackend: this._activeBackend,
-      coreService: this.coreService,
+      coreService: this.fileSystemCore,
       fileStorage: this.fileStorage,
       nativeCoreService: this.nativeCoreService,
       nativeFileStorage: this.nativeFileStorage,
@@ -93,7 +100,7 @@ class ProjectFileService {
   private get rawMediaRoutingContext(): rawMediaRouting.RawMediaRoutingContext {
     return {
       activeBackend: this._activeBackend,
-      coreService: this.coreService,
+      coreService: this.fileSystemCore,
       nativeCoreService: this.nativeCoreService,
       rawMediaService: this.rawMediaService,
       getProjectData: () => this.core.getProjectData(),
@@ -105,7 +112,7 @@ class ProjectFileService {
   private get artifactStorageContext(): artifactStorageDelegates.ArtifactStorageContext {
     return {
       activeBackend: this._activeBackend,
-      getProjectHandle: () => this.coreService.getProjectHandle(),
+      getProjectHandle: () => this.getProjectHandle(),
       getNativeProjectPath: () => this.nativeCoreService?.getProjectPath() ?? null,
       cacheService: this.cacheService,
       proxyStorageService: this.proxyStorageService,
@@ -119,7 +126,7 @@ class ProjectFileService {
   private get artifactCleanupContext(): MediaArtifactCleanupContext {
     return {
       activeBackend: this._activeBackend,
-      getProjectHandle: () => this.coreService.getProjectHandle(),
+      getProjectHandle: () => this.getProjectHandle(),
       deleteEntry: (subFolder, entryName, options) => this.deleteEntry(subFolder as keyof typeof PROJECT_FOLDERS, entryName, options),
       deleteRawFile: (relativePath) => this.deleteRawFile(relativePath),
       deleteThumbnail: (fileHash) => this.deleteThumbnail(fileHash),
@@ -161,6 +168,12 @@ class ProjectFileService {
     return nativeCore;
   }
 
+  private get fileSystemCore(): ProjectHandlePort {
+    return this._activeBackend === 'firefly' && this.fireflyCoreService
+      ? this.fireflyCoreService
+      : this.coreService;
+  }
+
   // ============================================
   // BACKEND SELECTION
   // ============================================
@@ -189,6 +202,40 @@ class ProjectFileService {
     log.info('Switched to FSA backend');
   }
 
+  async openFireflyProject(options: OpenFireflyProjectOptions): Promise<boolean> {
+    const fireflyCore = this.fireflyCoreService
+      ?? new FireflyProjectCoreService(this.fileStorage);
+    const opened = await fireflyCore.openProject(options);
+    if (!opened) return false;
+    this.fireflyCoreService = fireflyCore;
+    this._activeBackend = 'firefly';
+    log.info('Opened Firefly project backend');
+    return true;
+  }
+
+  async flushFireflyCloudSave(): Promise<FireflyCloudSaveState> {
+    if (!this.fireflyCoreService) {
+      throw new Error('No Firefly project is active');
+    }
+    return this.fireflyCoreService.flushCloudSave();
+  }
+
+  async retryFireflyCloudSave(): Promise<FireflyCloudSaveState> {
+    if (!this.fireflyCoreService) {
+      throw new Error('No Firefly project is active');
+    }
+    return this.fireflyCoreService.retryCloudSave();
+  }
+
+  getFireflyCloudSaveState(): FireflyCloudSaveState | null {
+    return this.fireflyCoreService?.getCloudSaveState() ?? null;
+  }
+
+  updateFireflyLeaseToken(leaseToken: string): void {
+    if (!this.fireflyCoreService) throw new Error('No Firefly project is active');
+    this.fireflyCoreService.updateLeaseToken(leaseToken);
+  }
+
   /** Get native core service (for native-specific operations like listProjects) */
   getNativeCoreService(): NativeProjectCoreService | null {
     return this.nativeCoreService;
@@ -204,7 +251,10 @@ class ProjectFileService {
   // ============================================
 
   /** Helper to get the active core service */
-  private get core(): ProjectCoreService | NativeProjectCoreService {
+  private get core(): ProjectCorePort | NativeProjectCoreService {
+    if (this._activeBackend === 'firefly' && this.fireflyCoreService) {
+      return this.fireflyCoreService;
+    }
     if (this._activeBackend === 'native' && this.nativeCoreService) {
       return this.nativeCoreService;
     }
@@ -212,6 +262,9 @@ class ProjectFileService {
   }
 
   isSupported(): boolean {
+    if (this._activeBackend === 'firefly') {
+      return this.fireflyCoreService?.isSupported() ?? false;
+    }
     if (this._activeBackend === 'native' || !this.isFsaAvailable) {
       return this.nativeCoreService?.isSupported() ?? false;
     }
@@ -219,11 +272,10 @@ class ProjectFileService {
   }
 
   getProjectHandle(): FileSystemDirectoryHandle | null {
-    // Only FSA backend has a handle
-    if (this._activeBackend === 'fsa' && this.isFsaAvailable) {
-      return this.coreService.getProjectHandle();
+    if (this._activeBackend === 'firefly') {
+      return this.fireflyCoreService?.getProjectHandle() ?? null;
     }
-    return null;
+    return this._activeBackend === 'fsa' ? this.coreService.getProjectHandle() : null;
   }
 
   /** Get project path (native backend) or null */
@@ -263,6 +315,7 @@ class ProjectFileService {
   }
 
   async createProject(name: string): Promise<boolean> {
+    if (this._activeBackend === 'firefly') return false;
     if (this._activeBackend === 'native' || !this.isFsaAvailable) {
       const nativeCore = await this.ensureNativeBackendReady();
       if (!nativeCore) return false;
@@ -277,7 +330,7 @@ class ProjectFileService {
       return nativeCore.createProjectAtPath(parentPath, name);
     }
 
-    return this.core.createProject(name);
+    return this.coreService.createProject(name);
   }
 
   async createProjectInFolder(handle: FileSystemDirectoryHandle, name: string): Promise<boolean> {
@@ -286,6 +339,7 @@ class ProjectFileService {
   }
 
   async openProject(): Promise<boolean> {
+    if (this._activeBackend === 'firefly') return false;
     if (this._activeBackend === 'fsa' && this.isFsaAvailable) {
       return this.coreService.openProject();
     }
@@ -331,6 +385,7 @@ class ProjectFileService {
         : false;
     }
     // FSA handle
+    this._activeBackend = 'fsa';
     return this.coreService.loadProject(handleOrPath);
   }
 
@@ -351,12 +406,13 @@ class ProjectFileService {
   }
 
   async restoreLastProject(): Promise<boolean> {
+    if (this._activeBackend === 'firefly') return false;
     if (this._activeBackend === 'native' || !this.isFsaAvailable) {
       const nativeCore = await this.ensureNativeBackendReady();
       return nativeCore ? nativeCore.restoreLastProject() : false;
     }
 
-    return this.core.restoreLastProject();
+    return this.coreService.restoreLastProject();
   }
 
   updateProjectData(updates: Partial<ProjectFile>): void {

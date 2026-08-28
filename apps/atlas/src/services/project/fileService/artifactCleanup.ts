@@ -5,7 +5,7 @@ import { artifactService } from '../domains/ArtifactService';
 
 const log = Logger.create('ProjectFileService');
 
-type ProjectFileStorageBackend = 'fsa' | 'native';
+type ProjectFileStorageBackend = 'fsa' | 'native' | 'firefly';
 
 export interface DeleteMediaFileArtifactsOptions {
   mediaId: string;
