@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { AtlasStore } from "./atlas-store.js";
 import { UserStore } from "./db.js";
@@ -25,7 +26,7 @@ describe("Atlas durable project store", () => {
     users.close();
     const store = new AtlasStore(databasePath);
     stores.push(store);
-    return { store, owner, other };
+    return { store, owner, other, databasePath };
   };
 
   it("isolates project CRUD and rejects stale revisions", () => {
@@ -139,6 +140,91 @@ describe("Atlas durable project store", () => {
       { partNumber: 1, etag: "one" }, { partNumber: 2, etag: "two" }, { partNumber: 3, etag: "three" },
     ], 55);
     expect(store.completeCheckpoint("failed-version", owner.id, 56)).toMatchObject({ status: "ok", project: { revision: 1 } });
+  });
+
+  it("fences an errored checkpoint from an old lease generation into claimed recovery", () => {
+    const { store, owner } = fresh();
+    store.createProject({ id: "production-stale", ownerId: owner.id, title: "生产恢复", now: 1 });
+    store.acquireLease("production-stale", owner.id, "tab-old", "lease-old", 2, 45_000, false);
+    store.reserveCheckpoint({
+      id: "stale-version", transferId: "stale-transfer", ownerId: owner.id, projectId: "production-stale",
+      expectedRevision: 0, objectKey: "atlas/checkpoints/stale/1.json.gz", digest: "a".repeat(64), size: 8,
+      partSize: 8, partCount: 1, now: 3, expiresAt: 86_403, leaseTokenHash: "lease-old",
+    });
+    store.activateTransfer("stale-transfer", owner.id, "stale-upload", 4);
+    store.recordTransferError("stale-transfer", owner.id, "SignatureDoesNotMatch", 5);
+    store.acquireLease("production-stale", owner.id, "tab-new", "lease-new", 6, 45_000, true);
+
+    const retry = () => store.reserveCheckpoint({
+      id: "unused-version", transferId: "unused-transfer", ownerId: owner.id, projectId: "production-stale",
+      expectedRevision: 0, objectKey: "atlas/checkpoints/stale/1.json.gz", digest: "b".repeat(64), size: 9,
+      partSize: 9, partCount: 1, now: 7, expiresAt: 86_407, leaseTokenHash: "lease-new",
+    });
+    expect(retry()).toMatchObject({
+      status: "recoverable",
+      version: { id: "stale-version", status: "failed", leaseGeneration: 1 },
+      transfer: { id: "stale-transfer", status: "failed", tosUploadId: "stale-upload" },
+    });
+    expect(retry()).toMatchObject({ status: "recoverable" });
+    expect(store.claimFailedCheckpointReset({
+      versionId: "stale-version", transferId: "stale-transfer", ownerId: owner.id, projectId: "production-stale",
+      expectedRevision: 0, now: 8, leaseTokenHash: "lease-new", claimToken: "winner",
+    })).toMatchObject({ status: "ok", previousTransfer: { tosUploadId: "stale-upload" } });
+    store.recordTransferError("stale-transfer", owner.id, "late-old-request", 8);
+    expect(store.readTransfer("stale-transfer", owner.id)?.error).toBe("RESETTING:winner");
+    expect(store.claimFailedCheckpointReset({
+      versionId: "stale-version", transferId: "stale-transfer", ownerId: owner.id, projectId: "production-stale",
+      expectedRevision: 0, now: 8, leaseTokenHash: "lease-new", claimToken: "loser",
+    })).toEqual({ status: "state_changed" });
+    expect(store.finishFailedCheckpointReset({
+      versionId: "stale-version", transferId: "stale-transfer", ownerId: owner.id, projectId: "production-stale",
+      expectedRevision: 0, digest: "b".repeat(64), size: 9, partSize: 9, partCount: 1,
+      now: 9, expiresAt: 86_409, leaseTokenHash: "lease-new", claimToken: "winner",
+    })).toMatchObject({ status: "ok", version: { status: "uploading", leaseGeneration: 2, digest: "b".repeat(64) } });
+  });
+
+  it("fails closed when a checkpoint generation is impossibly ahead of its project", () => {
+    const { store, owner, databasePath } = fresh();
+    store.createProject({ id: "future-generation", ownerId: owner.id, title: "异常代次", now: 1 });
+    store.acquireLease("future-generation", owner.id, "tab", "lease", 2, 45_000, false);
+    store.reserveCheckpoint({
+      id: "future-version", transferId: "future-transfer", ownerId: owner.id, projectId: "future-generation",
+      expectedRevision: 0, objectKey: "atlas/checkpoints/future/1.json.gz", digest: "a".repeat(64), size: 8,
+      partSize: 8, partCount: 1, now: 3, expiresAt: 100, leaseTokenHash: "lease",
+    });
+    const database = new Database(databasePath);
+    database.prepare("UPDATE atlas_projects SET lease_generation = 0 WHERE id = ?").run("future-generation");
+    database.close();
+    expect(store.reserveCheckpoint({
+      id: "unused", transferId: "unused", ownerId: owner.id, projectId: "future-generation",
+      expectedRevision: 0, objectKey: "atlas/checkpoints/future/1.json.gz", digest: "a".repeat(64), size: 8,
+      partSize: 8, partCount: 1, now: 4, expiresAt: 100,
+    })).toEqual({ status: "generation_invalid" });
+  });
+
+  it("keeps a healthy same-generation checkpoint idempotent", () => {
+    const { store, owner } = fresh();
+    store.createProject({ id: "healthy-upload", ownerId: owner.id, title: "正常上传", now: 1 });
+    store.acquireLease("healthy-upload", owner.id, "tab", "lease", 2, 45_000, false);
+    const input = {
+      id: "healthy-version", transferId: "healthy-transfer", ownerId: owner.id, projectId: "healthy-upload",
+      expectedRevision: 0, objectKey: "atlas/checkpoints/healthy/1.json.gz", digest: "a".repeat(64), size: 8,
+      partSize: 8, partCount: 1, now: 3, expiresAt: 100, leaseTokenHash: "lease",
+    };
+    expect(store.reserveCheckpoint(input)).toMatchObject({ status: "created" });
+    store.activateTransfer("healthy-transfer", owner.id, "healthy-upload-id", 4);
+    expect(store.reserveCheckpoint({ ...input, id: "unused", transferId: "unused", now: 5 })).toMatchObject({
+      status: "existing", version: { status: "uploading" }, transfer: { status: "uploading", tosUploadId: "healthy-upload-id" },
+    });
+    store.recordTransferError("healthy-transfer", owner.id, "SignatureDoesNotMatch", 6);
+    expect(store.reserveCheckpoint({ ...input, id: "unused-after-error", transferId: "unused-after-error", now: 7 })).toMatchObject({
+      status: "existing", version: { status: "uploading" }, transfer: { status: "uploading", tosUploadId: "healthy-upload-id" },
+    });
+    expect(store.reserveCheckpoint({
+      ...input, id: "unused-2", transferId: "unused-2", digest: "b".repeat(64), now: 8,
+    })).toMatchObject({
+      status: "recoverable", version: { status: "failed", leaseGeneration: 1 }, transfer: { status: "failed" },
+    });
   });
 
   it("allows a crashed checkpoint reset claim to be reclaimed after its bounded lease", () => {
