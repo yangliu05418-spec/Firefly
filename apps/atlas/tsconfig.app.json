@@ -5,7 +5,7 @@
     "useDefineForClassFields": true,
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "module": "ESNext",
-    "types": ["vite/client", "vitest/globals", "@testing-library/jest-dom"],
+    "types": ["vite/client", "@webgpu/types"],
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "moduleResolution": "bundler",
@@ -21,5 +21,6 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true
   },
-  "include": ["src/main.tsx", "src/firefly/**/*.ts", "src/firefly/**/*.tsx", "src/vite-env.d.ts", "tests/setup.ts"]
+  "include": ["src"],
+  "exclude": ["src/firefly"]
 }

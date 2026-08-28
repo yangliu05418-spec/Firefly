@@ -407,7 +407,7 @@ function createNativeFileHandle(fullPath: string, name: string): FileSystemFileH
     isSameEntry: async (other: FileSystemHandle) => other === handle,
     queryPermission: async () => 'granted' as PermissionState,
     requestPermission: async () => 'granted' as PermissionState,
-  } as FileSystemFileHandle & { __nativePath?: string };
+  } as unknown as FileSystemFileHandle & { __nativePath?: string };
 
   handle.__nativePath = fullPath;
   return handle;
