@@ -160,6 +160,40 @@ describe("trusted asset registration", () => {
     expect(saveAsset).toHaveBeenCalledWith(expect.objectContaining({ id: "asset-local-stable", providerAssetId: "asset-provider-ready", status: "Active" }));
   });
 
+  it("registers an Atlas export upload instead of sending its local id to ModelArk", async () => {
+    const selected = input();
+    selected.assets[0] = {
+      ...selected.assets[0]!, uploadId: "atlas-export:project-asset-1", assetId: "asset-local-atlas-project-asset-1",
+      name: "result.mp4", type: "video", role: "reference_video",
+    };
+    const callAsset = vi.fn(async (action: string) => {
+      if (action === "ListAssetGroups") return { Items: [{ Id: "group-1", Name: "Firefly Auto References" }] };
+      if (action === "ListAssets") return { Items: [] };
+      if (action === "CreateAsset") return { Id: "asset-provider-atlas-1" };
+      if (action === "GetAsset") return { Id: "asset-provider-atlas-1", Status: "Active" };
+      throw new Error(action);
+    });
+    const saveAsset = vi.fn();
+    const result = await prepareProviderAssets(selected, "owner-1", {
+      readUpload: vi.fn(() => ({ ownerId: "owner-1", status: "ready", contentType: "video/mp4", objectKey: "atlas/exports/out.mp4", fileName: "result.mp4" }) as never),
+      readOwnedAsset: vi.fn(() => ({ uploadId: "atlas-export:project-asset-1", status: "Active" as const })),
+      readRegisteredAsset: vi.fn(() => ({ id: "asset-local-atlas-project-asset-1", status: "Active" as const })),
+      acquireAssetLock: vi.fn(async () => ({ key: "lock", token: "token" })),
+      releaseAssetLock: vi.fn(async () => undefined),
+      cacheGet: vi.fn(async () => null), cacheSet: vi.fn(async () => undefined), callAsset: callAsset as never,
+      resolveMediaUrl: vi.fn(async () => "https://tos.example/atlas-export") as never, sleep: vi.fn(async () => undefined), now: vi.fn(() => 1),
+      saveAsset,
+    });
+
+    expect(result.assets[0]?.assetId).toBe("asset-provider-atlas-1");
+    expect(buildProviderPayload(result).content).toContainEqual({
+      type: "video_url", video_url: { url: "asset://asset-provider-atlas-1" }, role: "reference_video",
+    });
+    expect(saveAsset).toHaveBeenLastCalledWith(expect.objectContaining({
+      id: "asset-local-atlas-project-asset-1", providerAssetId: "asset-provider-atlas-1", status: "Active",
+    }));
+  });
+
   it("rejects a selected asset whose provider status is Failed", async () => {
     const selected = input();
     selected.assets[0] = { ...selected.assets[0]!, uploadId: undefined, assetId: "asset-failed" };

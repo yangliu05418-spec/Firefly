@@ -1,6 +1,8 @@
 node_modules/
 dist-web/
 dist-server/
+dist-atlas/
+apps/atlas/dist/
 .env
 .env.*
 !.env.example
@@ -24,6 +26,8 @@ output/
 .playwright-mcp/
 playwright-report/
 test-results/
+*.db-shm
+*.db-wal
 .vscode/
 .idea/
 

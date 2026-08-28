@@ -1,0 +1,13 @@
+[extend]
+useDefault = true
+
+# Atlas inherited two redaction tests that intentionally contain inert,
+# synthetic OpenAI-shaped strings. Limit the exception to those exact test
+# files; all shipped source and every other fixture remains under the default
+# Gitleaks rules.
+[[allowlists]]
+description = "Synthetic credentials used by Atlas redaction tests"
+paths = [
+  '''^apps/atlas/tests/unit/logRedaction\.test\.ts$''',
+  '''^apps/atlas/tests/unit/redact\.test\.ts$''',
+]

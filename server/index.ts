@@ -14,7 +14,7 @@ import { canvasDocumentSchema, DEFAULT_CANVAS_DOCUMENT, DEFAULT_CANVAS_DOCUMENT_
 import { resolveCanvasContext } from "./canvas-context.js";
 import { publicCanvasProject, publicCanvasProjectDetail } from "./canvas-public.js";
 import { consumeFeishuAuthorization, createFeishuAuthorization, exchangeFeishuCode } from "./feishu.js";
-import { archiveQueue, assetQueue, canvasQueue, generationQueue, imageGenerationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, previewQueue, queueConnection, readTask, redis, type StoredTask, uploadFinalizationQueue } from "./redis.js";
+import { archiveQueue, assetQueue, atlasAgentQueue, canvasQueue, generationQueue, imageGenerationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, previewQueue, queueConnection, readTask, redis, type StoredTask, uploadFinalizationQueue } from "./redis.js";
 import { canAccessTask } from "./task-access.js";
 import { publicTask } from "./task-public.js";
 import { validateGeneration } from "./provider.js";
@@ -50,8 +50,21 @@ import { buildCreationSnapshot, type CreationReferenceInput } from "./creation-s
 import { buildLegacyImageSnapshot, buildLegacyVideoSnapshot } from "./legacy-creation-snapshot.js";
 import { assertPromptLength, EDITOR_PROMPT_STORAGE_MAX_CHARS, IMAGE_PROVIDER_PROMPT_MAX_CHARS, PromptTooLongError } from "./prompt-policy.js";
 import { journeyNames, recordJourneyEvent } from "./journey-observability.js";
+import { createAtlasRuntime } from "./atlas-runtime.js";
 
 const app = express();
+const webDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist-web");
+const atlasDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist-atlas");
+const verifyAtlasStaticBundle = async () => {
+  const index = await fs.readFile(path.join(atlasDir, "index.html"), "utf8");
+  const referencedAssets = [...index.matchAll(/\/studio\/atlas\/assets\/([A-Za-z0-9._-]+)/g)].map((match) => match[1]!);
+  if (!referencedAssets.length) throw new Error("Atlas index has no immutable assets");
+  await Promise.all(referencedAssets.map((asset) => fs.access(path.join(atlasDir, "assets", asset))));
+  const assets = await fs.readdir(path.join(atlasDir, "assets"));
+  if (!assets.some((asset) => /^export\.worker-[A-Za-z0-9._-]+\.js$/.test(asset))) {
+    throw new Error("Atlas export worker is unavailable");
+  }
+};
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
 app.locals.redis = redis;
@@ -66,7 +79,15 @@ app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
   res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
-  res.setHeader("Content-Security-Policy", "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob: https:; connect-src 'self' https://*.bytepluses.com.cn");
+  const atlasDocument = req.path === "/studio/atlas" || req.path.startsWith("/studio/atlas/");
+  res.setHeader("Content-Security-Policy", atlasDocument
+    ? "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob: https:; connect-src 'self' https://*.bytepluses.com.cn"
+    : "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob: https:; connect-src 'self' https://*.bytepluses.com.cn");
+  if (atlasDocument) {
+    res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+    res.setHeader("Cross-Origin-Embedder-Policy", "credentialless");
+    res.setHeader("Origin-Agent-Cluster", "?1");
+  }
   if (config.origin.startsWith("https://")) res.setHeader("Strict-Transport-Security", "max-age=31536000");
   if (req.path.startsWith("/api/")) res.setHeader("Cache-Control", "no-store");
   if (req.path.startsWith("/api/") && ["POST", "PATCH", "PUT", "DELETE"].includes(req.method) && req.header("origin") !== applicationOrigin) return res.status(403).json({ error: "请求来源无效" });
@@ -164,7 +185,10 @@ const allowedExtensions = { image: new Set([".jpg", ".jpeg", ".png", ".webp", ".
 app.get("/api/auth/session", async (req, res) => {
   try {
     const user = await getSessionUser(redis, req, res);
-    res.json(user ? { authenticated: true, user: publicUser(user) } : { authenticated: false });
+    res.json(user ? {
+      authenticated: true,
+      user: { ...publicUser(user), features: { atlas: config.atlasEnabled } }
+    } : { authenticated: false });
   } catch (error) { respondError(res, error, 500); }
 });
 app.get("/api/auth/feishu/start", async (req, res) => {
@@ -1843,6 +1867,21 @@ app.get("/api/canvas-media/:assetId", requireAuth, createCanvasMediaHandler({
   cacheControl: previewRedirectCacheHeader
 }));
 
+const atlasRuntime = createAtlasRuntime({
+  requireAuth,
+  agentQueue: atlasAgentQueue,
+  enqueueMediaDelete: async (objectKey, jobId) => {
+    await mediaQueue.add("delete-atlas-object", { objectKey }, {
+      jobId, attempts: 8, backoff: { type: "exponential", delay: 5_000, jitter: 0.5 },
+      removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 },
+    });
+  },
+});
+// Agent middleware is path-scoped, so unmatched core routes fall through
+// without a second authentication pass or an optional-feature gate.
+app.use("/api/atlas", atlasRuntime.agentRouter);
+app.use("/api/atlas", atlasRuntime.projectRouter);
+
 const tosHealthGate = new DependencyHealthGate({ configured: tosConfigured(), failureThreshold: 3, successGraceMs: 5 * 60_000 });
 let tosProbeInFlight: Promise<void> | undefined;
 const probeTos = () => {
@@ -1870,7 +1909,7 @@ app.get("/api/health/workers", async (_req, res) => {
 });
 
 app.get("/api/health/ready", async (_req, res) => {
-  let dependency: "redis" | "database" | "reedit" | "queues" | "workers" | "tos" = "redis";
+  let dependency: "redis" | "database" | "reedit" | "queues" | "workers" | "tos" | "atlas_static" = "redis";
   let workerHealth: WorkerHealthSnapshot | undefined;
   try {
     await redis.ping();
@@ -1879,16 +1918,20 @@ app.get("/api/health/ready", async (_req, res) => {
     dependency = "reedit";
     checkReeditIntegrity();
     dependency = "queues";
-    await Promise.all([generationQueue.getJobCounts("wait", "active"), imageGenerationQueue.getJobCounts("wait", "active"), archiveQueue.getJobCounts("wait", "active"), mediaQueue.getJobCounts("wait", "active"), previewQueue.getJobCounts("wait", "active"), assetQueue.getJobCounts("wait", "active"), canvasQueue.getJobCounts("wait", "active"), uploadFinalizationQueue.getJobCounts("wait", "active")]);
+    await Promise.all([generationQueue.getJobCounts("wait", "active"), imageGenerationQueue.getJobCounts("wait", "active"), archiveQueue.getJobCounts("wait", "active"), mediaQueue.getJobCounts("wait", "active"), previewQueue.getJobCounts("wait", "active"), assetQueue.getJobCounts("wait", "active"), canvasQueue.getJobCounts("wait", "active"), uploadFinalizationQueue.getJobCounts("wait", "active"), atlasAgentQueue.getJobCounts("wait", "active")]);
     dependency = "workers";
     workerHealth = await readWorkerHealth(redis);
     if (!workerHealth.ready && Date.now() >= workerReadinessRequiredAt) throw new Error(`workers unavailable: ${workerHealth.missing.join(",")}`);
+    if (config.atlasEnabled) {
+      dependency = "atlas_static";
+      await verifyAtlasStaticBundle();
+    }
     if (tosEnabled()) {
       dependency = "tos";
       const health = tosHealthGate.snapshot();
       if (!health.configured || !health.effectiveReachable) throw new Error("TOS unavailable");
     }
-    res.json({ status: "ready", redis: "ok", database: "ok", queues: "ok", workers: workerHealth.ready ? "ok" : "starting", tos: tosEnabled() ? "ok" : "disabled", asyncJobs: users.asyncJobOutboxStats(), previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, schemaVersion: users.schemaVersion(), ...runtimeIdentity });
+    res.json({ status: "ready", redis: "ok", database: "ok", queues: "ok", workers: workerHealth.ready ? "ok" : "starting", tos: tosEnabled() ? "ok" : "disabled", atlasStatic: config.atlasEnabled ? "ok" : "disabled", asyncJobs: users.asyncJobOutboxStats(), previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, schemaVersion: users.schemaVersion(), ...runtimeIdentity });
   } catch (error) {
     const tosHealthSnapshot = tosHealthGate.snapshot();
     console.warn(JSON.stringify({ type: "readiness_failed", at: new Date().toISOString(), dependency, code: (error as { code?: string }).code ?? "unknown", tosConsecutiveFailures: tosHealthSnapshot.consecutiveFailures, tosLastProbeReachable: tosHealthSnapshot.lastProbeReachable }));
@@ -1905,7 +1948,6 @@ app.get("/api/health", async (_req, res) => {
   } catch { res.status(503).json({ status: "degraded", redis: "unavailable", database: "unavailable", tosConfigured: tosHealthSnapshot.configured, tosReachable: tosHealthSnapshot.effectiveReachable, tosLastProbeReachable: tosHealthSnapshot.lastProbeReachable, tosCheckedAt: tosHealthSnapshot.checkedAt, tosLastSuccessfulAt: tosHealthSnapshot.lastSuccessfulAt, tosConsecutiveFailures: tosHealthSnapshot.consecutiveFailures, previewTranscodeEnabled: config.tosPreviewTranscodeEnabled, ...runtimeIdentity }); }
 });
 
-const webDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist-web");
 app.get("/api/firefly-media-sw.js", createServiceWorkerHandler(webDir));
 app.get("/firefly-media-sw.js", createServiceWorkerHandler(webDir));
 
@@ -1915,6 +1957,24 @@ app.use((error: unknown, req: express.Request, res: express.Response, next: expr
   res.status(500).json({ error: "服务暂时不可用，请稍后重试", requestId: res.locals.requestId });
 });
 
+if (config.atlasEnabled) {
+  app.get(["/studio/atlas", "/studio/atlas/", "/studio/atlas/index.html"], (_req, res) => {
+    res.setHeader("Cache-Control", "no-cache");
+    res.sendFile(path.join(atlasDir, "index.html"));
+  });
+  app.use("/studio/atlas", express.static(atlasDir, { maxAge: "1y", immutable: true, index: false }));
+  app.use((req, res, next) => {
+    if (req.method !== "GET" || (req.path !== "/studio/atlas" && !req.path.startsWith("/studio/atlas/"))) return next();
+    // SPA fallback is only for document navigation. Missing hashed assets and
+    // workers must be a real 404, never Firefly/Atlas HTML with a JavaScript
+    // MIME mismatch that leaves an already-open editor silently broken.
+    if (path.extname(req.path) || !req.accepts("html")) return res.status(404).send("Not found");
+    res.setHeader("Cache-Control", "no-cache");
+    res.sendFile(path.join(atlasDir, "index.html"));
+  });
+} else {
+  app.get(["/studio/atlas", "/studio/atlas/*path"], (_req, res) => res.status(404).send("Not found"));
+}
 app.use(express.static(webDir, { maxAge: "1y", immutable: true, index: false }));
 app.use((req, res, next) => {
   if (req.method !== "GET" || req.path.startsWith("/api/") || req.path.startsWith("/media/")) return next();
@@ -1951,7 +2011,8 @@ const shutdown = async () => {
   // then close remaining streams so a blue/green retirement cannot hang indefinitely.
   const forceClose = setTimeout(() => server.closeAllConnections(), Math.min(config.shutdownGraceMs, 10_000));
   await Promise.all([httpClosed, outboxStopped]); clearTimeout(forceClose);
-  await Promise.all([generationQueue.close(), imageGenerationQueue.close(), archiveQueue.close(), mediaQueue.close(), previewQueue.close(), assetQueue.close(), canvasQueue.close(), uploadFinalizationQueue.close()]);
+  await Promise.all([generationQueue.close(), imageGenerationQueue.close(), archiveQueue.close(), mediaQueue.close(), previewQueue.close(), assetQueue.close(), canvasQueue.close(), uploadFinalizationQueue.close(), atlasAgentQueue.close()]);
+  atlasRuntime.close();
   await Promise.allSettled([redis.quit(), queueConnection.quit()]); users.close(); process.exit(0);
 };
 process.on("SIGTERM", shutdown);

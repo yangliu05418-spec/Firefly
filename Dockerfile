@@ -1,3 +1,12 @@
+FROM node:24.16.0-bookworm-slim AS atlas-build
+WORKDIR /atlas
+COPY apps/atlas/package.json apps/atlas/package-lock.json ./
+RUN npm ci
+COPY apps/atlas/index.html apps/atlas/tsconfig.json apps/atlas/tsconfig.app.json apps/atlas/tsconfig.node.json apps/atlas/vite.config.ts ./
+COPY apps/atlas/src/main.tsx apps/atlas/src/vite-env.d.ts ./src/
+COPY apps/atlas/src/firefly ./src/firefly
+RUN npm run build
+
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
@@ -28,6 +37,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/dist-web ./dist-web
 COPY --from=build /app/dist-server ./dist-server
+COPY --from=atlas-build /atlas/dist ./dist-atlas
 COPY ops ./ops
 EXPOSE 8090
 CMD ["node", "dist-server/index.js"]

@@ -10,13 +10,25 @@ export default defineConfig({
   // Exercise the exact optimized bundle that ships to production. Vite's development
   // transform server made parallel WebKit runs wait on cold module transforms and hid
   // real chunk-loading behavior behind test-only timing noise.
-  webServer: {
-    command: "npm run build && npm exec vite preview -- --host 127.0.0.1 --port 4173 --strictPort",
-    env: { ...process.env, VITE_DISABLE_PRIVATE_MEDIA_CACHE: "true" },
-    url: "http://127.0.0.1:4173",
-    reuseExistingServer: !process.env.CI,
-    timeout: 120_000
-  },
+  webServer: [
+    {
+      command: "npm run build && npm exec vite preview -- --host 127.0.0.1 --port 4173 --strictPort",
+      env: { ...process.env, VITE_DISABLE_PRIVATE_MEDIA_CACHE: "true" },
+      url: "http://127.0.0.1:4173",
+      reuseExistingServer: !process.env.CI,
+      timeout: 120_000
+    },
+    {
+      // Build the independent Atlas SPA exactly as the production image does,
+      // then serve it at its real sub-path with production-equivalent headers.
+      command: process.env.ATLAS_E2E_PREBUILT === "true"
+        ? "node e2e/atlas-static-server.mjs"
+        : "npm --prefix apps/atlas ci && npm --prefix apps/atlas run build && node e2e/atlas-static-server.mjs",
+      url: "http://127.0.0.1:4174/studio/atlas/",
+      reuseExistingServer: !process.env.CI,
+      timeout: 120_000
+    },
+  ],
   projects: [
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },
     { name: "webkit", use: { ...devices["Desktop Safari"] } },

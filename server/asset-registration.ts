@@ -43,8 +43,8 @@ type RegistrationDeps = {
   resolveMediaUrl: (media: { objectKey: string; uploadId?: string; fileName: string }) => Promise<string>;
   sleep: (ms: number) => Promise<unknown>;
   now: () => number;
-  readOwnedAsset?: (assetId: string, ownerId: string) => { providerAssetId?: string; status: "Active" | "Processing" | "Failed" } | null;
-  readRegisteredAsset?: (ownerId: string, uploadId: string) => { id: string; providerAssetId?: string } | undefined;
+  readOwnedAsset?: (assetId: string, ownerId: string) => { providerAssetId?: string; uploadId?: string; status: "Active" | "Processing" | "Failed" } | null;
+  readRegisteredAsset?: (ownerId: string, uploadId: string) => { id: string; providerAssetId?: string; status?: "Active" | "Processing" | "Failed" } | undefined;
   readSnapshotReference?: typeof users.readCreationSnapshotReference;
   updateSnapshotReference?: typeof users.updateCreationSnapshotReference;
   resolveSnapshotMediaUrl?: (objectKey: string) => string;
@@ -131,6 +131,7 @@ const registerUpload = async (uploadId: string, ownerId: string, name: string, i
   let unknownSince = cached.unknownSince;
   let creationLock: { key: string; token: string } | null = null;
   let registrationPending = false;
+  let localAssetId: string | undefined;
   let groupId = "";
   let assetType: "Image" | "Video" | "Audio" = inputType === "video" ? "Video" : inputType === "audio" ? "Audio" : "Image";
   if (!assetId) {
@@ -138,10 +139,15 @@ const registerUpload = async (uploadId: string, ownerId: string, name: string, i
       creationLock = await deps.acquireAssetLock(ownerId, uploadId);
       if (!creationLock) throw new AssetRegistrationRejected(`参考素材「${name}」正在可信资产注册中，请稍后重试`, "ASSET_PROCESSING_TIMEOUT");
       const registered = deps.readRegisteredAsset?.(ownerId, uploadId);
+      localAssetId = registered?.id;
       cached = readCachedRegistration(await deps.cacheGet(cacheKey));
       assetId = registered?.providerAssetId ?? (registered && !registered.id.startsWith("asset-local-") ? registered.id : undefined) ?? cached.assetId;
       unknownSince = cached.unknownSince;
-      registrationPending = Boolean(registered && !assetId);
+      // Processing means the background registrar currently owns this local
+      // row. An Active Atlas export is already durable in TOS but intentionally
+      // has no Provider id yet; it must be registered just in time here rather
+      // than being trapped forever in a synthetic "processing" state.
+      registrationPending = Boolean(registered?.status === "Processing" && !assetId);
     }
   }
   try {
@@ -190,12 +196,12 @@ const registerUpload = async (uploadId: string, ownerId: string, name: string, i
     }
     assetId = created.Id;
     await deps.cacheSet(cacheKey, assetId);
-    deps.saveAsset?.({ id: assetId, providerAssetId: assetId, ownerId, groupId: created.GroupId ?? groupId, uploadId, name, assetType: created.AssetType ?? assetType, status: created.Status === "Active" ? "Active" : "Processing", url: created.URL, createdAt: deps.now(), updatedAt: deps.now() });
+    deps.saveAsset?.({ id: localAssetId ?? assetId, providerAssetId: assetId, ownerId, groupId: created.GroupId ?? groupId, uploadId, name, assetType: created.AssetType ?? assetType, status: created.Status === "Active" ? "Active" : "Processing", url: created.URL, createdAt: deps.now(), updatedAt: deps.now() });
     console.info(JSON.stringify({ type: "provider_asset_registered", at: new Date().toISOString(), ownerId, uploadId, assetId, groupId }));
   }
   } finally { if (creationLock && deps.releaseAssetLock) await deps.releaseAssetLock(creationLock).catch(() => undefined); }
   const active = await waitForActive(assetId, name, deps);
-  deps.saveAsset?.({ id: assetId, providerAssetId: assetId, ownerId, groupId: active.GroupId ?? groupId, uploadId, name, assetType: active.AssetType ?? assetType, status: "Active", url: active.URL, createdAt: deps.now(), updatedAt: deps.now() });
+  deps.saveAsset?.({ id: localAssetId ?? assetId, providerAssetId: assetId, ownerId, groupId: active.GroupId ?? groupId, uploadId, name, assetType: active.AssetType ?? assetType, status: "Active", url: active.URL, createdAt: deps.now(), updatedAt: deps.now() });
   console.info(JSON.stringify({ type: "provider_asset_active", at: new Date().toISOString(), ownerId, uploadId, assetId }));
   return assetId;
 };
@@ -308,7 +314,13 @@ export const prepareProviderAssets = async (input: GenerationInput, ownerId: str
       } else if (asset.assetId) {
         const owned = deps.readOwnedAsset?.(asset.assetId, ownerId);
         if (deps.readOwnedAsset && !owned) throw new AssetRegistrationRejected(`参考素材「${asset.name}」不属于当前用户`, "ASSET_NOT_OWNED");
-        const providerAssetId = owned?.providerAssetId ?? (!asset.assetId.startsWith("asset-local-") ? asset.assetId : undefined);
+        // Local Firefly assets (including Atlas exports) can be Active in our
+        // library before they have a ModelArk asset id. Register their durable
+        // upload on first Seedance use instead of treating the local id as an
+        // `asset://` provider id.
+        const providerAssetId = owned?.providerAssetId
+          ?? (owned?.uploadId ? await registerUpload(owned.uploadId, ownerId, asset.name, asset.type, deps) : undefined)
+          ?? (!asset.assetId.startsWith("asset-local-") ? asset.assetId : undefined);
         if (!providerAssetId) throw new AssetRegistrationRejected(`参考素材「${asset.name}」正在可信资产注册中，请稍后重试`, "ASSET_PROCESSING_TIMEOUT");
         const active = await waitForActive(providerAssetId, asset.name, deps);
         deps.saveAsset?.({ id: asset.assetId, providerAssetId, ownerId, groupId: active.GroupId ?? "", name: asset.name, assetType: active.AssetType ?? (asset.type === "video" ? "Video" : asset.type === "audio" ? "Audio" : "Image"), status: "Active", url: active.URL, createdAt: deps.now(), updatedAt: deps.now() });

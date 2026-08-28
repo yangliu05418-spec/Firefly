@@ -35,7 +35,36 @@ for candidate in "$enabled_dir"/firefly.conf.bak-*; do
   archive_config "$candidate" "$base"
 done
 
-install -o root -g root -m 0644 "$source_config" "$available_dir/firefly.conf"
-ln -sfn "$available_dir/firefly.conf" "$enabled_dir/firefly.conf"
-"$nginx_bin" -t
-"$systemctl_bin" reload nginx
+target="$available_dir/firefly.conf"
+candidate="$available_dir/.firefly.conf.candidate-$$"
+backup="$available_dir/.firefly.conf.backup-$$"
+had_target=0
+cleanup() { rm -f "$candidate" "$backup"; }
+trap cleanup EXIT
+
+install -o root -g root -m 0644 "$source_config" "$candidate"
+if [ -f "$target" ]; then
+  cp -p "$target" "$backup"
+  had_target=1
+fi
+mv "$candidate" "$target"
+ln -sfn "$target" "$enabled_dir/firefly.conf"
+
+restore_previous() {
+  if [ "$had_target" -eq 1 ]; then mv "$backup" "$target"; else rm -f "$target"; fi
+  ln -sfn "$target" "$enabled_dir/firefly.conf"
+}
+
+if ! "$nginx_bin" -t; then
+  restore_previous
+  "$nginx_bin" -t >/dev/null 2>&1 || true
+  exit 1
+fi
+if ! "$systemctl_bin" reload nginx; then
+  restore_previous
+  "$nginx_bin" -t && "$systemctl_bin" reload nginx || true
+  exit 1
+fi
+
+rm -f "$backup"
+trap - EXIT

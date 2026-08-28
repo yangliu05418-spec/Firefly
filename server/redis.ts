@@ -20,6 +20,7 @@ export const assetQueue = new Queue("asset-ingest", { connection: queueConnectio
 export const canvasQueue = new Queue("canvas-jobs", { connection: queueConnection });
 export const imageGenerationQueue = new Queue("image-generation", { connection: queueConnection });
 export const uploadFinalizationQueue = new Queue("upload-finalization", { connection: queueConnection });
+export const atlasAgentQueue = new Queue("atlas-agent", { connection: queueConnection });
 
 export type ImageGenerationQueuePayload = {
   ownerId: string;
