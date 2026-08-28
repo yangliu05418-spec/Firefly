@@ -1,0 +1,584 @@
+@import './TimelineTracksAudioControls.css';
+@import './TimelineTracksAudioMeters.css';
+@import './TimelineTracksLanes.css';
+
+@layer features {
+/* Composition switch: track rows stay visible while their labels/heights update. */
+.phase-exiting > .track-header,
+.phase-exiting > .track-lane,
+.phase-entering > .track-header,
+.phase-entering > .track-lane {
+  animation: none;
+  transition-duration: var(--composition-switch-layout-duration, 475ms), 160ms, 160ms;
+}
+
+/* Track headers */
+.track-headers {
+  box-sizing: border-box;
+  width: var(--track-header-width, 210px);
+  flex-shrink: 0;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-color);
+}
+
+.track-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+  position: relative;
+  overflow: hidden;
+  transition: height 220ms cubic-bezier(0.22, 1, 0.36, 1), background 160ms ease, border-color 160ms ease;
+}
+
+.track-header.popover-open {
+  overflow: visible;
+  z-index: 90;
+}
+
+/* Drag-to-reorder grip + indicators (video layers / audio tracks).
+   Absolutely positioned in the header's left padding gutter so it consumes no
+   flex width (otherwise it squeezes the track name on compact mixer tracks). */
+.track-reorder-handle {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  color: var(--text-muted, #888);
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease;
+  touch-action: none;
+  z-index: 2;
+}
+
+.track-header:hover .track-reorder-handle {
+  opacity: 0.5;
+}
+
+.track-reorder-handle:hover {
+  opacity: 1;
+  color: var(--text-primary);
+}
+
+.track-reorder-handle:active {
+  cursor: grabbing;
+}
+
+.track-reorder-grip {
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: -2px;
+  user-select: none;
+  pointer-events: none;
+}
+
+.track-header.track-reordering {
+  opacity: 0.55;
+}
+
+.track-header.track-reorder-target-before {
+  box-shadow: inset 0 2px 0 0 var(--accent, #2d8ceb);
+}
+
+.track-header.track-reorder-target-after {
+  box-shadow: inset 0 -2px 0 0 var(--accent, #2d8ceb);
+}
+
+body.track-reordering-active {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.track-header.video {
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--track-color, #303030) 24%, transparent), transparent 58%),
+    var(--bg-tertiary);
+}
+
+.track-header.mixer {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 34%),
+    linear-gradient(90deg, color-mix(in srgb, var(--track-color, #303030) 18%, var(--bg-tertiary)), var(--bg-tertiary));
+}
+
+/* MIDI tracks without a custom label color get a flat blue base derived from
+   the shared --midi-color (same hue as MIDI clips), darkened toward the header
+   background. Keeps the standard top sheen for consistency with other headers,
+   but no vertical gradient. */
+.track-header.midi.midi-default-tint {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 34%),
+    color-mix(in srgb, var(--midi-color, #3a4050) 50%, var(--bg-tertiary));
+}
+
+.track-header.targeted {
+  border-left: 3px solid var(--timeline-toggle-active-color, var(--accent));
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--timeline-toggle-active-color, var(--accent)) 22%, transparent), transparent 64%),
+    linear-gradient(90deg, color-mix(in srgb, var(--track-color, #303030) 28%, var(--bg-tertiary)), var(--bg-tertiary));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--timeline-toggle-active-color, var(--accent)) 30%, transparent);
+}
+
+.track-header.targeted .track-name {
+  color: #fff;
+}
+
+.track-header.properties-selected {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--border-color));
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--accent) 36%, transparent),
+    inset 4px 0 0 color-mix(in srgb, var(--accent) 84%, transparent);
+}
+
+.track-header.properties-selected .track-name {
+  color: var(--text-primary);
+}
+
+.track-header.locked {
+  border-left: 2px solid var(--warning);
+  filter: saturate(0.78) brightness(0.86);
+}
+
+.track-header.locked::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.08) 0,
+      rgba(255, 255, 255, 0.08) 1px,
+      transparent 1px,
+      transparent 7px
+    ),
+    rgba(0, 0, 0, 0.14);
+}
+
+.track-header.locked > * {
+  position: relative;
+  z-index: 2;
+}
+
+.track-header.track-muted,
+.track-header.track-hidden {
+  filter: saturate(0.42) brightness(0.72);
+}
+
+.track-header.track-muted:not(.locked)::after,
+.track-header.track-hidden:not(.locked)::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.track-header.track-muted > *,
+.track-header.track-hidden > * {
+  position: relative;
+  z-index: 2;
+}
+
+/* Neutral separator line between video and audio track sections */
+.track-header.video + .track-header.mixer,
+.track-lane.video + .track-lane.audio {
+  border-top: 2px solid color-mix(in srgb, var(--text-muted) 48%, var(--border-color));
+}
+
+/* Preview header shown when dragging media to create new track */
+.track-header-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed rgba(255, 255, 255, 0.3);
+  border-radius: 2px;
+  margin: 4px 4px 0 4px;
+  background: rgba(255, 255, 255, 0.05);
+  transition: all 0.15s ease;
+}
+
+.track-header-preview.video {
+  border-color: rgba(37, 99, 235, 0.4);
+}
+
+.track-header-preview.video.active {
+  border-color: rgba(37, 99, 235, 0.8);
+  background: rgba(37, 99, 235, 0.15);
+}
+
+.track-header-preview.audio {
+  border-color: rgba(22, 163, 74, 0.4);
+}
+
+.track-header-preview.audio.active {
+  border-color: rgba(22, 163, 74, 0.8);
+  background: rgba(22, 163, 74, 0.15);
+}
+
+.track-header-preview-label {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+  font-weight: 500;
+}
+
+.track-header-preview.active .track-header-preview-label {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.track-header.dimmed,
+.track-lane.dimmed {
+  opacity: 0.4;
+}
+
+.track-name {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-primary);
+  cursor: text;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 116px;
+}
+
+.track-layer-id {
+  display: none;
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-secondary);
+  line-height: 1;
+}
+
+.track-color-chip {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 16px;
+  border: 1px solid rgba(0, 0, 0, 0.62);
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+
+/* Track-type identifier glyph (waveform / piano-roll bars) sits on its own line
+   above the track name on mixer tracks. */
+.track-type-icon-badge {
+  display: flex;
+  align-items: center;
+  flex: 0 0 100%;
+  color: #fff;
+  line-height: 0;
+}
+
+.track-type-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.55));
+}
+
+/* MIDI instrument picker — full-width row at the bottom of the header (after the
+   name and pan row). flex:0 0 100% forces it onto its own wrapped line and
+   min-width:0 lets the select shrink instead of pushing the header wider. */
+.midi-instrument-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 100%;
+  width: 100%;
+  min-width: 0;
+  margin-top: 2px;
+  box-sizing: border-box;
+}
+
+.midi-instrument-icon {
+  flex-shrink: 0;
+  color: var(--track-color, var(--accent-timeline));
+  font-size: 11px;
+  line-height: 1;
+}
+
+.midi-instrument-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  padding: 1px 4px;
+  border: 1px solid color-mix(in srgb, var(--track-color, var(--accent-timeline)) 45%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--track-color, var(--accent-timeline)) 18%, var(--bg-primary));
+  color: var(--text-primary);
+  font-size: 10px;
+  line-height: 14px;
+  cursor: pointer;
+  outline: none;
+}
+
+.midi-instrument-select:hover {
+  border-color: color-mix(in srgb, var(--track-color, var(--accent-timeline)) 70%, transparent);
+}
+
+.track-name-input {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--accent-timeline);
+  border-radius: 2px;
+  padding: 0 4px;
+  width: 80px;
+  outline: none;
+}
+
+.track-controls {
+  display: grid;
+  grid-template-columns: repeat(2, 16px);
+  grid-auto-rows: 15px;
+  align-items: center;
+  justify-items: center;
+  gap: 2px;
+  margin-left: auto;
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 3;
+}
+
+.track-controls .btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 15px;
+  min-width: 16px;
+  padding: 0;
+  border-radius: 3px;
+  font-size: 9px;
+  line-height: 1;
+}
+
+.track-header.video .track-controls {
+  grid-template-columns: repeat(3, 16px);
+  grid-auto-rows: 15px;
+  right: 2px;
+  width: 56px;
+  justify-content: center;
+}
+
+.track-header.video .track-controls .btn-icon {
+  color: rgba(246, 248, 250, 0.82);
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.track-header.video .track-controls .btn-icon:hover {
+  color: rgba(255, 255, 255, 0.96);
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.track-header.video .track-controls .btn-icon.solo-active,
+.track-header.video .track-controls .btn-icon.locked-active {
+  color: var(--warning);
+  background: rgba(255, 170, 0, 0.14);
+  border-color: rgba(255, 170, 0, 0.34);
+  opacity: 1;
+}
+
+.track-header-icon {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.track-header.mixer .track-controls {
+  grid-template-columns: repeat(3, 22px);
+  grid-auto-rows: 22px;
+  gap: 3px;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%) scale(var(--audio-strip-control-scale, 1));
+  transform-origin: right center;
+}
+
+.track-header.mixer .track-controls .btn-icon {
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  color: rgba(246, 248, 250, 0.9);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.015)),
+    rgba(16, 19, 22, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 1px 2px rgba(0, 0, 0, 0.45);
+}
+
+.track-header.mixer .track-controls .btn-icon:hover {
+  border-color: rgba(255, 255, 255, 0.24);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.03)),
+    rgba(21, 25, 30, 0.98);
+}
+
+.track-header.audio.audio-layer-advanced.audio-strip-full:not(.audio-summary-meter-visible) .track-controls {
+  grid-template-columns: repeat(4, 19px);
+  grid-auto-rows: 18px;
+  gap: 2px;
+  right: 5px;
+  top: 8px;
+  transform: scale(var(--audio-strip-control-scale, 1));
+  transform-origin: right top;
+}
+
+.track-header.audio.audio-layer-advanced.audio-strip-full:not(.audio-summary-meter-visible) .track-controls .btn-icon {
+  width: 19px;
+  height: 18px;
+  min-width: 19px;
+  border-radius: 3px;
+  font-size: 9px;
+}
+
+.audio-button-label-short {
+  display: none;
+}
+
+.track-header.mixer.audio-strip-compact .track-controls {
+  --audio-strip-control-scale: 1;
+  grid-template-columns: repeat(4, 16px);
+  grid-auto-rows: 16px;
+  gap: 2px;
+  right: 4px;
+}
+
+.track-header.mixer.audio-strip-compact .track-controls .btn-icon {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  border-radius: 3px;
+  font-size: 8px;
+}
+
+.track-header.audio.audio-layer-advanced.audio-strip-compact:not(.audio-summary-meter-visible) .track-controls {
+  grid-template-columns: repeat(4, 16px);
+  grid-auto-rows: 15px;
+  gap: 1px;
+  right: 4px;
+  top: 2px;
+  transform: none;
+  transform-origin: right top;
+}
+
+.track-header.audio.audio-layer-advanced.audio-strip-compact:not(.audio-summary-meter-visible) .track-controls .btn-icon {
+  width: 16px;
+  height: 15px;
+  min-width: 16px;
+  font-size: 8px;
+}
+
+.track-header.mixer.audio-strip-compact .audio-button-label-wide,
+.track-header.mixer.audio-strip-condensed .audio-button-label-wide {
+  display: none;
+}
+
+.track-header.mixer.audio-strip-compact .audio-button-label-short,
+.track-header.mixer.audio-strip-condensed .audio-button-label-short {
+  display: inline;
+}
+
+.track-header.mixer.audio-strip-condensed .track-controls {
+  --audio-strip-control-scale: 1;
+  grid-template-columns: repeat(7, 12px);
+  grid-auto-rows: 12px;
+  gap: 1px;
+  right: 3px;
+  top: 50%;
+}
+
+.track-header.mixer.audio-strip-condensed .track-controls .btn-icon {
+  width: 12px;
+  height: 12px;
+  min-width: 12px;
+  border-radius: 2px;
+  font-size: 7px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.track-controls .btn-icon.btn-active {
+  color: var(--accent);
+  background:
+    linear-gradient(180deg, rgba(93, 164, 255, 0.22), rgba(93, 164, 255, 0.07)),
+    rgba(12, 24, 36, 0.98);
+  border-color: rgba(93, 164, 255, 0.45);
+  opacity: 1;
+}
+
+.track-controls .btn-icon.record-active {
+  color: #ff5a4f;
+  background: rgba(255, 90, 79, 0.18);
+  border-color: rgba(255, 90, 79, 0.38);
+  opacity: 1;
+}
+
+/* Track pick whip for layer parenting */
+.track-pick-whip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  cursor: grab;
+  opacity: 0.5;
+  transition: opacity 0.15s, transform 0.15s;
+  color: var(--expr-color);
+}
+
+.track-pick-whip:hover {
+  opacity: 1;
+  transform: scale(1.1);
+}
+
+.track-pick-whip.dragging {
+  cursor: grabbing;
+  opacity: 1;
+  transform: scale(1.2);
+}
+
+.track-pick-whip.has-parent {
+  opacity: 1;
+  color: var(--expr-color);
+}
+
+.track-pick-whip.has-children {
+  opacity: 0.8;
+  color: var(--expr-connected);
+}
+
+.track-pick-whip.has-parent.has-children {
+  opacity: 1;
+  color: var(--expr-color);
+}
+
+.track-pick-whip-icon {
+  width: 14px;
+  height: 14px;
+}
+
+}

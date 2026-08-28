@@ -1,0 +1,8 @@
+// Panels component exports
+export { MediaPanel } from './MediaPanel';
+export { PropertiesPanel } from './properties';
+export { TranscriptPanel } from './TranscriptPanel';
+export { AnalysisPanel } from './AnalysisPanel';
+export { MIDIMappingPanel } from './MIDIMappingPanel';
+export { TransitionsPanel } from './TransitionsPanel';
+export { SceneDescriptionPanel } from './SceneDescriptionPanel';

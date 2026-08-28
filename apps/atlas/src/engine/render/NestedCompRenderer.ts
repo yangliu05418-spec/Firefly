@@ -1,0 +1,918 @@
+// Pre-renders nested compositions to offscreen textures
+
+import type { TimelineClip, TimelineTrack } from '../../types';
+import type { Layer, LayerRenderData } from '../core/types';
+import type { CompositorPipeline } from '../pipeline/CompositorPipeline';
+import type { EffectsPipeline } from '../../effects/EffectsPipeline';
+import type { ColorPipeline } from '../color/ColorPipeline';
+import type { TextureManager } from '../texture/TextureManager';
+import type { MaskTextureManager } from '../texture/MaskTextureManager';
+import type { ScrubbingCache } from '../texture/ScrubbingCache';
+import { flags } from '../featureFlags';
+import { MAX_NESTING_DEPTH } from '../../stores/timeline/constants';
+import { Logger } from '../../services/logger';
+import {
+  getRuntimeFrameProvider,
+  readRuntimeFrameForSource,
+} from '../../services/mediaRuntime/runtimePlayback';
+import { scrubSettleState } from '../../services/scrubSettleState';
+import { wcPipelineMonitor } from '../../services/wcPipelineMonitor';
+import { useTimelineStore } from '../../stores/timeline';
+import type { MotionRenderer } from '../motion/MotionRenderer';
+import { Compositor } from './Compositor';
+import { applyMotionRenderPlacement } from '../motion/MotionTypes';
+import {
+  createMotionFrameRuntimeAdmission,
+  describeMotionFrameRuntimeFailure,
+  getMotionDeviceMaxInstances,
+  getMotionDeviceTextureLimits,
+  getMotionRenderSizeForAdmission,
+  hasMotionFrameLayers,
+  type MotionFrameRuntimeAdmission,
+} from '../motion/MotionFrameRuntime';
+import { compositeNestedLayers } from './nestedComp/compositeNestedLayers';
+import { tryCollectHtmlVideoPreview } from './nestedComp/htmlVideoPreview';
+import { NestedCompositionTexturePool } from './nestedComp/NestedCompositionTexturePool';
+import { process3DLayersForNestedScene } from './nestedComp/sharedScene';
+import {
+  getFrameTimestampSeconds,
+  isPendingWebCodecsFrameStable,
+} from './nestedComp/videoProviderPolicy';
+
+const log = Logger.create('NestedCompRenderer');
+
+interface NestedCompTexture {
+  compositionId: string;
+  renderOccurrenceKey?: string;
+  texture: GPUTexture;
+  view: GPUTextureView;
+  initialized: boolean;
+  lastRenderedTimeSeconds?: number;
+}
+
+function getNestedCompCacheKey(compositionId: string, renderOccurrenceKey?: string): string {
+  return renderOccurrenceKey === undefined
+    ? compositionId
+    : `occurrence:${JSON.stringify([compositionId, renderOccurrenceKey])}`;
+}
+
+function getNestedRenderOccurrenceKey(parentOccurrenceKey: string | undefined, layerId: string): string {
+  return JSON.stringify([parentOccurrenceKey ?? null, layerId]);
+}
+
+const MAX_NESTED_PLAYBACK_PREVIEW_SCALE = 0.5;
+const MAX_OCCURRENCE_HANDOFF_DELTA_SECONDS = 1;
+
+export function resolveNestedPreviewRenderScale(input: {
+  compositionWidth: number;
+  compositionHeight: number;
+  outputWidth: number;
+  outputHeight: number;
+  isPlaying: boolean;
+  particleQuality: 'preview' | 'export';
+}): number {
+  if (input.particleQuality === 'export') return 1;
+
+  const widthScale = input.compositionWidth > 0
+    ? input.outputWidth / input.compositionWidth
+    : 1;
+  const heightScale = input.compositionHeight > 0
+    ? input.outputHeight / input.compositionHeight
+    : 1;
+  const outputScale = Math.max(0.01, Math.min(1, widthScale, heightScale));
+
+  return input.isPlaying
+    ? Math.min(outputScale, MAX_NESTED_PLAYBACK_PREVIEW_SCALE)
+    : outputScale;
+}
+
+function isRenderableNestedLayer(layer: Layer): boolean {
+  return !!layer?.source && layer.visible !== false && layer.opacity !== 0;
+}
+
+function isActiveNestedLayer(layer: Layer): boolean {
+  return !!layer && layer.visible !== false && layer.opacity !== 0;
+}
+
+function isCriticalNestedLayer(layer: Layer): boolean {
+  if (!isRenderableNestedLayer(layer)) return false;
+  const source = layer.source;
+  return !!(
+    source?.nestedComposition ||
+    source?.type === 'video' ||
+    source?.videoElement ||
+    source?.videoFrame ||
+    source?.webCodecsPlayer ||
+    source?.runtimeSourceId ||
+    source?.nativeDecoder
+  );
+}
+
+function hasMissingCriticalNestedLayer(
+  layers: readonly Layer[],
+  layerData: readonly LayerRenderData[],
+): boolean {
+  const collectedLayerIds = new Set(layerData.map((entry) => entry.layer.id));
+  return layers.some((layer) => isCriticalNestedLayer(layer) && !collectedLayerIds.has(layer.id));
+}
+
+function scaleNestedLayerGeometryForPreview(
+  layerData: LayerRenderData[],
+  renderScale: number,
+): void {
+  if (renderScale === 1) return;
+
+  for (const data of layerData) {
+    if (Number.isFinite(data.sourceWidth) && data.sourceWidth > 0) {
+      data.sourceWidth *= renderScale;
+    }
+    if (Number.isFinite(data.sourceHeight) && data.sourceHeight > 0) {
+      data.sourceHeight *= renderScale;
+    }
+  }
+}
+
+export class NestedCompRenderer {
+  private device: GPUDevice;
+  private compositor: Compositor;
+  private textureManager: TextureManager;
+  private maskTextureManager: MaskTextureManager;
+  private scrubbingCache: ScrubbingCache | null;
+  private motionRenderer: MotionRenderer | null;
+  private nestedCompTextures: Map<string, NestedCompTexture> = new Map();
+
+  private texturePool: NestedCompositionTexturePool;
+
+  // Frame caching: track last render time to skip redundant re-renders
+  private lastRenderTime: Map<string, number> = new Map();
+  private lastLayerCount: Map<string, number> = new Map();
+  private lastMotionFrameRevision: Map<string, string> = new Map();
+  private activeOccurrenceCacheKeys = new Set<string>();
+  private providerIds = new WeakMap<object, number>();
+  private nextProviderId = 1;
+  private lastSuccessfulVideoProviderKey = new Map<string, string>();
+  private lastCollectorState = new Map<string, 'render' | 'hold' | 'drop'>();
+  private htmlHoldUntil = new Map<string, number>();
+
+  private initializeFromRecentOccurrence(
+    target: NestedCompTexture,
+    commandEncoder: GPUCommandEncoder,
+    currentTime: number | undefined,
+  ): boolean {
+    if (target.initialized || !Number.isFinite(currentTime)) return target.initialized;
+
+    let source: NestedCompTexture | undefined;
+    let closestDelta = Number.POSITIVE_INFINITY;
+    for (const candidate of this.nestedCompTextures.values()) {
+      if (
+        candidate === target ||
+        candidate.compositionId !== target.compositionId ||
+        !candidate.initialized ||
+        candidate.texture.width !== target.texture.width ||
+        candidate.texture.height !== target.texture.height ||
+        !Number.isFinite(candidate.lastRenderedTimeSeconds)
+      ) {
+        continue;
+      }
+      const delta = Math.abs(candidate.lastRenderedTimeSeconds! - currentTime!);
+      if (delta <= MAX_OCCURRENCE_HANDOFF_DELTA_SECONDS && delta < closestDelta) {
+        source = candidate;
+        closestDelta = delta;
+      }
+    }
+
+    if (!source) return false;
+
+    commandEncoder.copyTextureToTexture(
+      { texture: source.texture },
+      { texture: target.texture },
+      { width: target.texture.width, height: target.texture.height },
+    );
+    target.initialized = true;
+    target.lastRenderedTimeSeconds = source.lastRenderedTimeSeconds;
+    return true;
+  }
+
+  private getProviderObjectId(provider: object): number {
+    const existing = this.providerIds.get(provider);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const next = this.nextProviderId++;
+    this.providerIds.set(provider, next);
+    return next;
+  }
+
+  private getVideoProviderKey(
+    layer: Layer,
+    frameProvider: NonNullable<Layer['source']>['webCodecsPlayer'] | null,
+    runtimeProvider: NonNullable<Layer['source']>['webCodecsPlayer'] | null
+  ): string | null {
+    if (!frameProvider) {
+      return null;
+    }
+    if (
+      runtimeProvider &&
+      frameProvider === runtimeProvider &&
+      layer.source?.runtimeSourceId &&
+      layer.source.runtimeSessionKey
+    ) {
+      return `runtime:${layer.source.runtimeSourceId}:${layer.source.runtimeSessionKey}`;
+    }
+    return `provider:${this.getProviderObjectId(frameProvider as object)}`;
+  }
+
+  private getLayerReuseKey(layer: Layer): string {
+    return layer.sourceClipId ? `${layer.id}:${layer.sourceClipId}` : layer.id;
+  }
+
+  private canReuseLastSuccessfulVideoFrame(layerId: string, providerKey: string | null): boolean {
+    return !!providerKey && this.lastSuccessfulVideoProviderKey.get(layerId) === providerKey;
+  }
+
+  private setCollectorState(
+    layerId: string,
+    state: 'render' | 'hold' | 'drop',
+    detail?: Record<string, number | string>
+  ): void {
+    if (this.lastCollectorState.get(layerId) === state) {
+      return;
+    }
+    this.lastCollectorState.set(layerId, state);
+    if (state === 'hold') {
+      wcPipelineMonitor.record('collector_hold', detail);
+    } else if (state === 'drop') {
+      wcPipelineMonitor.record('collector_drop', detail);
+    }
+  }
+
+  constructor(
+    device: GPUDevice,
+    compositorPipeline: CompositorPipeline,
+    effectsPipeline: EffectsPipeline,
+    textureManager: TextureManager,
+    maskTextureManager: MaskTextureManager,
+    scrubbingCache: ScrubbingCache | null = null,
+    colorPipeline: ColorPipeline | null = null,
+    motionRenderer: MotionRenderer | null = null
+  ) {
+    this.device = device;
+    this.compositor = new Compositor(
+      compositorPipeline,
+      effectsPipeline,
+      maskTextureManager,
+      colorPipeline,
+    );
+    this.textureManager = textureManager;
+    this.maskTextureManager = maskTextureManager;
+    this.texturePool = new NestedCompositionTexturePool(device);
+    this.scrubbingCache = scrubbingCache;
+    this.motionRenderer = motionRenderer;
+  }
+
+  preRender(
+    compositionId: string,
+    nestedLayers: Layer[],
+    width: number,
+    height: number,
+    commandEncoder: GPUCommandEncoder,
+    sampler: GPUSampler,
+    currentTime?: number,
+    sceneClips?: TimelineClip[],
+    sceneTracks?: TimelineTrack[],
+    depth: number = 0,
+    skipEffects = false,
+    particleQuality: 'preview' | 'export' = 'preview',
+    suppliedMotionFrameAdmission?: MotionFrameRuntimeAdmission,
+    renderOccurrenceKey?: string,
+    previewRenderScale = 1,
+  ): GPUTextureView | null {
+    if (depth >= MAX_NESTING_DEPTH) {
+      log.warn('Max nesting depth reached in preRender', { compositionId, depth });
+      return null;
+    }
+    const cacheKey = getNestedCompCacheKey(compositionId, renderOccurrenceKey);
+    if (renderOccurrenceKey !== undefined) this.activeOccurrenceCacheKeys.add(cacheKey);
+    const effectiveRenderScale = particleQuality === 'export'
+      ? 1
+      : Math.max(0.01, Math.min(1, previewRenderScale));
+    const renderWidth = Math.max(1, Math.round(width * effectiveRenderScale));
+    const renderHeight = Math.max(1, Math.round(height * effectiveRenderScale));
+
+    // Get or create one output texture per render occurrence. Two wrapper layers
+    // can reference the same composition at different local times in one frame,
+    // so composition identity alone is not a safe render-target cache key.
+    let compTexture = this.nestedCompTextures.get(cacheKey);
+    if (!compTexture || compTexture.texture.width !== renderWidth || compTexture.texture.height !== renderHeight) {
+      // Destroy old texture to free VRAM (safe - not in current command encoder yet)
+      if (compTexture) compTexture.texture.destroy();
+
+      const texture = this.device.createTexture({
+        size: { width: renderWidth, height: renderHeight },
+        format: 'rgba8unorm',
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+      });
+      compTexture = {
+        compositionId,
+        ...(renderOccurrenceKey !== undefined ? { renderOccurrenceKey } : {}),
+        texture,
+        view: texture.createView(),
+        initialized: false,
+      };
+      this.nestedCompTextures.set(cacheKey, compTexture);
+    }
+
+    // Frame caching: skip re-render if same time and layer count
+    // Quantize time to ~60fps frames to avoid floating point issues
+    const quantizedTime = currentTime !== undefined ? Math.round(currentTime * 60) : -1;
+    const lastTime = this.lastRenderTime.get(cacheKey);
+    const lastCount = this.lastLayerCount.get(cacheKey);
+    const motionFrameAdmission = suppliedMotionFrameAdmission ?? (
+      hasMotionFrameLayers(nestedLayers)
+        ? createMotionFrameRuntimeAdmission({
+            consumer: particleQuality === 'export' ? 'export' : 'nested-preview',
+            compositionId,
+            timelineTimeSeconds: currentTime ?? 0,
+            layers: nestedLayers,
+            deviceMaxInstances: getMotionDeviceMaxInstances(this.device),
+            ...getMotionDeviceTextureLimits(this.device),
+          })
+        : undefined
+    );
+    const motionFrameRevision = motionFrameAdmission === undefined
+      ? 'none'
+      : motionFrameAdmission.ok
+        ? motionFrameAdmission.consumerInput.frameState.evaluationRevision
+        : `failed:${motionFrameAdmission.failures.map((failure) => failure.code).join(',')}`;
+    const lastMotionFrameRevision = this.lastMotionFrameRevision.get(cacheKey);
+    if (motionFrameAdmission && !motionFrameAdmission.ok) {
+      const failure = describeMotionFrameRuntimeFailure(motionFrameAdmission);
+      if (particleQuality === 'export') {
+        throw new Error(`Nested export Motion frame admission failed: ${failure}`);
+      }
+      log.warn('Nested Motion frame admission failed; affected Motion layers are hidden', {
+        compositionId,
+        failure,
+      });
+    }
+
+    if (!nestedLayers.some(isCriticalNestedLayer) && compTexture.initialized && quantizedTime >= 0 && lastTime === quantizedTime && lastCount === nestedLayers.length && lastMotionFrameRevision === motionFrameRevision) {
+      // Same frame, return cached texture
+      return compTexture.view;
+    }
+
+    // Acquire ping-pong textures from pool
+    const texturePair = this.texturePool.acquire(renderWidth, renderHeight);
+    const effectTexturePair = this.texturePool.acquire(renderWidth, renderHeight);
+    const nestedPingView = texturePair.pingView;
+    const nestedPongView = texturePair.pongView;
+    const effectTempView = effectTexturePair.pingView;
+    const effectTempView2 = effectTexturePair.pongView;
+
+    try {
+      // Collect layer data (including sub-nested compositions)
+      const nestedLayerData = this.collectNestedLayerData(
+        nestedLayers,
+        commandEncoder,
+        sampler,
+        depth,
+        skipEffects,
+        particleQuality,
+        motionFrameAdmission,
+        renderOccurrenceKey,
+        effectiveRenderScale,
+      );
+      if (hasMissingCriticalNestedLayer(nestedLayers, nestedLayerData)) {
+        if (particleQuality === 'preview') {
+          this.initializeFromRecentOccurrence(compTexture, commandEncoder, currentTime);
+        }
+        return compTexture.initialized ? compTexture.view : null;
+      }
+
+      // The reduced preview texture represents the same logical composition,
+      // so its source geometry must shrink by the same factor. Otherwise the
+      // compositor interprets full-resolution source pixels inside a smaller
+      // target and the nested result appears zoomed during playback.
+      scaleNestedLayerGeometryForPreview(nestedLayerData, effectiveRenderScale);
+
+      // Process 3D layers through the shared scene renderer.
+      if (flags.use3DLayers) {
+        this.process3DLayersForNested(
+          nestedLayerData,
+          renderWidth,
+          renderHeight,
+          currentTime,
+          compositionId,
+          sceneClips,
+          sceneTracks,
+        );
+      }
+
+      // Handle empty composition
+      if (nestedLayerData.length === 0) {
+        const hasActiveNestedLayer = nestedLayers.some(isActiveNestedLayer);
+        const hasPendingSceneWithoutLayers = nestedLayers.length === 0 && (sceneClips?.length ?? 0) > 0;
+        if (hasActiveNestedLayer || hasPendingSceneWithoutLayers) {
+          // Input layers exist but none could be collected (transient decode gap)
+          // Retain the existing texture which holds the last good frame
+          if (particleQuality === 'preview') {
+            this.initializeFromRecentOccurrence(compTexture, commandEncoder, currentTime);
+          }
+          return compTexture.initialized ? compTexture.view : null;
+        }
+        // Genuinely empty composition - clear to transparent
+        const clearPass = commandEncoder.beginRenderPass({
+          colorAttachments: [{
+            view: compTexture.view,
+            clearValue: { r: 0, g: 0, b: 0, a: 0 },
+            loadOp: 'clear',
+            storeOp: 'store',
+          }],
+        });
+        clearPass.end();
+        compTexture.initialized = true;
+        compTexture.lastRenderedTimeSeconds = Number.isFinite(currentTime) ? currentTime : undefined;
+        this.lastRenderTime.set(cacheKey, quantizedTime);
+        this.lastLayerCount.set(cacheKey, nestedLayers.length);
+        this.lastMotionFrameRevision.set(cacheKey, motionFrameRevision);
+        return compTexture.view;
+      }
+
+      const sourceTexture = compositeNestedLayers({
+        layerData: nestedLayerData,
+        device: this.device,
+        compositionId,
+        width: renderWidth,
+        height: renderHeight,
+        commandEncoder,
+        sampler,
+        compositor: this.compositor,
+        maskTextureManager: this.maskTextureManager,
+        skipEffects,
+        texturePair,
+        effectTexturePair,
+        nestedPingView,
+        nestedPongView,
+        effectTempView,
+        effectTempView2,
+        motionTime: currentTime,
+        particleQuality,
+        resourceNamespace: cacheKey,
+      });
+      commandEncoder.copyTextureToTexture(
+        { texture: sourceTexture },
+        { texture: compTexture.texture },
+        { width: renderWidth, height: renderHeight }
+      );
+
+      compTexture.initialized = true;
+      compTexture.lastRenderedTimeSeconds = Number.isFinite(currentTime) ? currentTime : undefined;
+      this.lastRenderTime.set(cacheKey, quantizedTime);
+      this.lastLayerCount.set(cacheKey, nestedLayers.length);
+      this.lastMotionFrameRevision.set(cacheKey, motionFrameRevision);
+      return compTexture.view;
+    } finally {
+      this.texturePool.release(effectTexturePair);
+      this.texturePool.release(texturePair);
+    }
+  }
+
+  /**
+   * Process 3D layers inside nested compositions via the shared scene renderer.
+   */
+  private process3DLayersForNested(
+    layerData: LayerRenderData[],
+    width: number,
+    height: number,
+    currentTime?: number,
+    compositionId?: string,
+    sceneClips?: TimelineClip[],
+    sceneTracks?: TimelineTrack[],
+  ): void {
+    process3DLayersForNestedScene({
+      layerData,
+      device: this.device,
+      maskTextureManager: this.maskTextureManager,
+      log,
+      width,
+      height,
+      currentTime,
+      compositionId,
+      sceneClips,
+      sceneTracks,
+    });
+  }
+
+  private collectNestedLayerData(
+    layers: Layer[],
+    commandEncoder?: GPUCommandEncoder,
+    sampler?: GPUSampler,
+    depth: number = 0,
+    skipEffects = false,
+    particleQuality: 'preview' | 'export' = 'preview',
+    motionFrameAdmission?: MotionFrameRuntimeAdmission,
+    renderOccurrenceKey?: string,
+    previewRenderScale = 1,
+  ): LayerRenderData[] {
+    const result: LayerRenderData[] = [];
+
+    for (let i = layers.length - 1; i >= 0; i--) {
+      const layer = layers[i];
+      if (!layer?.visible || !layer.source || layer.opacity === 0) continue;
+
+      // Sub-nested composition (Level 3+)
+      if (layer.source.nestedComposition && commandEncoder && sampler) {
+        const nc = layer.source.nestedComposition;
+        const subTextureView = this.preRender(
+          nc.compositionId,
+          nc.layers,
+          nc.width,
+          nc.height,
+          commandEncoder,
+          sampler,
+          nc.currentTime,
+          nc.sceneClips,
+          nc.sceneTracks,
+          depth + 1,
+          skipEffects,
+          particleQuality,
+          motionFrameAdmission,
+          getNestedRenderOccurrenceKey(renderOccurrenceKey, layer.id),
+          previewRenderScale,
+        );
+        if (subTextureView) {
+          result.push({
+            layer,
+            isVideo: false,
+            externalTexture: null,
+            textureView: subTextureView,
+            sourceWidth: nc.width,
+            sourceHeight: nc.height,
+          });
+        }
+        continue;
+      }
+
+      if (layer.source.type === 'motion') {
+        if (!motionFrameAdmission?.ok) {
+          continue;
+        }
+        const rendered = commandEncoder && this.motionRenderer
+          ? this.motionRenderer.renderLayer(layer, commandEncoder, motionFrameAdmission)
+          : null;
+        const size = rendered ?? getMotionRenderSizeForAdmission(layer, motionFrameAdmission);
+        result.push({
+          layer: applyMotionRenderPlacement(layer, size),
+          isVideo: false,
+          externalTexture: null,
+          textureView: rendered?.textureView ?? null,
+          sourceWidth: size.width,
+          sourceHeight: size.height,
+        });
+        continue;
+      }
+
+      if (layer.source.type === 'motion-adjustment') {
+        result.push({
+          layer,
+          isVideo: false,
+          externalTexture: null,
+          textureView: null,
+          sourceWidth: layer.source.intrinsicWidth ?? 0,
+          sourceHeight: layer.source.intrinsicHeight ?? 0,
+        });
+        continue;
+      }
+
+      // Shared-scene native 3D layers do not contribute a 2D source texture of their own.
+      if (layer.source.type === 'model' || layer.source.type === 'gaussian-splat') {
+        result.push({
+          layer,
+          isVideo: false,
+          externalTexture: null,
+          textureView: null,
+          sourceWidth: 0,
+          sourceHeight: 0,
+        });
+        continue;
+      }
+
+      // NativeDecoder (turbo mode — ImageBitmap-based)
+      if (layer.source.nativeDecoder) {
+        const bitmap = layer.source.nativeDecoder.getCurrentFrame();
+        if (bitmap) {
+          const texture = this.textureManager.createImageBitmapTexture(bitmap, layer.id);
+          if (texture) {
+            result.push({
+              layer, isVideo: false, externalTexture: null,
+              textureView: this.textureManager.getDynamicTextureView(layer.id) ?? texture.createView(),
+              sourceWidth: bitmap.width, sourceHeight: bitmap.height,
+            });
+            continue;
+          }
+        }
+      }
+
+      // VideoFrame
+      if (layer.source.videoFrame) {
+        const frame = layer.source.videoFrame;
+        const extTex = this.textureManager.importVideoTexture(frame);
+        if (extTex) {
+          result.push({
+            layer, isVideo: true, externalTexture: extTex, textureView: null,
+            sourceWidth: frame.displayWidth, sourceHeight: frame.displayHeight,
+          });
+          continue;
+        }
+      }
+
+      const runtimeProvider = getRuntimeFrameProvider(layer.source, 'background');
+      const clipProvider = layer.source.webCodecsPlayer?.isFullMode()
+        ? layer.source.webCodecsPlayer
+        : null;
+      const htmlVideoPreview = tryCollectHtmlVideoPreview({
+        layer,
+        runtimeProvider,
+        clipProvider,
+        textureManager: this.textureManager,
+        scrubbingCache: this.scrubbingCache,
+        htmlHoldUntil: this.htmlHoldUntil,
+        debug: (message, context) => log.debug(message, context),
+        warn: (message, context) => log.warn(message, context),
+      });
+      if (htmlVideoPreview !== undefined) {
+        if (htmlVideoPreview) {
+          result.push(htmlVideoPreview);
+        }
+        continue;
+      }
+
+      const runtimeProviderStable = isPendingWebCodecsFrameStable(runtimeProvider ?? undefined);
+      const runtimeHasFrame =
+        (runtimeProvider?.hasFrame?.() ?? false) ||
+        !!runtimeProvider?.getCurrentFrame?.();
+      const allowPendingScrubFrame = useTimelineStore.getState().isDraggingPlayhead;
+      const shouldPreferRuntimeProvider =
+        !!runtimeProvider?.isFullMode() &&
+        runtimeProvider !== clipProvider &&
+        runtimeProviderStable &&
+        runtimeHasFrame;
+      const frameProvider =
+        shouldPreferRuntimeProvider
+          ? runtimeProvider
+          : clipProvider ?? (runtimeProvider?.isFullMode()
+            ? runtimeProvider
+            : null);
+      const providerKey = this.getVideoProviderKey(layer, frameProvider, runtimeProvider);
+      const runtimeProviderKey = runtimeProvider
+        ? this.getVideoProviderKey(layer, runtimeProvider, runtimeProvider)
+        : providerKey;
+      const layerReuseKey = this.getLayerReuseKey(layer);
+      const canReuseLastFrame = this.canReuseLastSuccessfulVideoFrame(layerReuseKey, providerKey);
+      const frameProviderStable = isPendingWebCodecsFrameStable(frameProvider ?? undefined);
+      const holdingFrame = !frameProviderStable && canReuseLastFrame;
+      const allowRuntimeFrameReadDuringSettle =
+        scrubSettleState.isPending(layer.sourceClipId) &&
+        !!runtimeProvider?.isFullMode() &&
+        runtimeProvider !== clipProvider;
+      const canReadRuntimeFrame =
+        !!layer.source.runtimeSourceId &&
+        !!layer.source.runtimeSessionKey &&
+        !!runtimeProvider?.isFullMode() &&
+        (!frameProvider || frameProvider === runtimeProvider || allowRuntimeFrameReadDuringSettle) &&
+        (
+          runtimeProviderStable ||
+          canReuseLastFrame ||
+          allowPendingScrubFrame ||
+          allowRuntimeFrameReadDuringSettle
+        );
+      const runtimeFrameRead = canReadRuntimeFrame
+        ? readRuntimeFrameForSource(layer.source, 'background')
+        : null;
+      const runtimeFrame = runtimeFrameRead?.frameHandle?.frame;
+      if (
+        runtimeFrame &&
+        'displayWidth' in runtimeFrame &&
+        'displayHeight' in runtimeFrame
+      ) {
+        const targetMediaTime =
+          layer.source?.mediaTime ??
+          runtimeFrameRead?.binding.session.currentTime ??
+          runtimeProvider?.getPendingSeekTime?.() ??
+          runtimeProvider?.currentTime;
+        const displayedMediaTime = getFrameTimestampSeconds(
+          runtimeFrameRead?.frameHandle?.timestamp,
+          targetMediaTime
+        );
+        const extTex = this.textureManager.importVideoTexture(runtimeFrame);
+        if (extTex) {
+          if (runtimeProviderKey) {
+            this.lastSuccessfulVideoProviderKey.set(layerReuseKey, runtimeProviderKey);
+          }
+          this.setCollectorState(layerReuseKey, holdingFrame ? 'hold' : 'render', {
+            reason: holdingFrame ? 'same_provider_pending' : 'runtime_frame',
+          });
+          result.push({
+            layer, isVideo: true, externalTexture: extTex, textureView: null,
+            sourceWidth: runtimeFrame.displayWidth, sourceHeight: runtimeFrame.displayHeight,
+            displayedMediaTime, targetMediaTime, previewPath: 'webcodecs',
+          });
+          continue;
+        }
+      }
+
+      // WebCodecs
+      if (frameProvider?.isFullMode()) {
+        if (!frameProviderStable && !canReuseLastFrame && !allowPendingScrubFrame) {
+          this.setCollectorState(layerReuseKey, 'drop', {
+            reason: 'pending_unstable',
+          });
+          continue;
+        }
+        const frame = frameProvider.getCurrentFrame();
+        if (frame) {
+          const targetMediaTime =
+            layer.source?.mediaTime ??
+            frameProvider.getPendingSeekTime?.() ??
+            frameProvider.currentTime;
+          const displayedMediaTime = getFrameTimestampSeconds(
+            frame.timestamp,
+            targetMediaTime
+          );
+          const extTex = this.textureManager.importVideoTexture(frame);
+          if (extTex) {
+            if (providerKey) {
+              this.lastSuccessfulVideoProviderKey.set(layerReuseKey, providerKey);
+            }
+            this.setCollectorState(layerReuseKey, holdingFrame ? 'hold' : 'render', {
+              reason: holdingFrame ? 'same_provider_pending' : 'provider_frame',
+            });
+            result.push({
+              layer, isVideo: true, externalTexture: extTex, textureView: null,
+              sourceWidth: frame.displayWidth, sourceHeight: frame.displayHeight,
+              displayedMediaTime, targetMediaTime, previewPath: 'webcodecs',
+            });
+            continue;
+          }
+          this.setCollectorState(layerReuseKey, 'drop', {
+            reason: 'import_failed',
+          });
+        } else {
+          // WebCodecs has no frame yet - normal during decode startup
+          this.setCollectorState(layerReuseKey, 'drop', {
+            reason: 'no_frame',
+          });
+        }
+      }
+
+      // Image
+      if (layer.source.imageElement) {
+        const img = layer.source.imageElement;
+        let texture = this.textureManager.getCachedImageTexture(img);
+        if (!texture) texture = this.textureManager.createImageTexture(img) ?? undefined;
+        if (texture) {
+          result.push({
+            layer, isVideo: false, externalTexture: null,
+            isDynamic: layer.source?.proxyFrameIndex !== undefined,
+            textureView: this.textureManager.getImageView(texture),
+            sourceWidth: img.naturalWidth, sourceHeight: img.naturalHeight,
+            displayedMediaTime: layer.source?.mediaTime,
+            targetMediaTime: layer.source?.targetMediaTime ?? layer.source?.mediaTime,
+            previewPath: layer.source?.previewPath,
+          });
+          continue;
+        }
+      }
+
+      // Text
+      if (layer.source.textCanvas) {
+        const canvas = layer.source.textCanvas;
+        const texture = this.textureManager.createCanvasTexture(canvas);
+        if (texture) {
+          result.push({
+            layer, isVideo: false, externalTexture: null,
+            textureView: this.textureManager.getImageView(texture),
+            sourceWidth: canvas.width, sourceHeight: canvas.height,
+          });
+        }
+      }
+    }
+
+    return result;
+  }
+
+  hasTexture(compositionId: string): boolean {
+    for (const texture of this.nestedCompTextures.values()) {
+      if (texture.compositionId === compositionId) return true;
+    }
+    return false;
+  }
+
+  getTexture(compositionId: string, renderOccurrenceKey?: string): NestedCompTexture | undefined {
+    if (renderOccurrenceKey !== undefined) {
+      const cacheKey = getNestedCompCacheKey(compositionId, renderOccurrenceKey);
+      const texture = this.nestedCompTextures.get(cacheKey);
+      if (texture) this.activeOccurrenceCacheKeys.add(cacheKey);
+      return texture;
+    }
+
+    let match: { cacheKey: string; texture: NestedCompTexture } | undefined;
+    for (const [cacheKey, texture] of this.nestedCompTextures) {
+      if (texture.compositionId !== compositionId) continue;
+      if (match) return undefined;
+      match = { cacheKey, texture };
+    }
+    if (match) this.activeOccurrenceCacheKeys.add(match.cacheKey);
+    return match?.texture;
+  }
+
+  cleanupPendingTextures(): void {
+    for (const [cacheKey, entry] of this.nestedCompTextures) {
+      if (
+        entry.renderOccurrenceKey === undefined ||
+        this.activeOccurrenceCacheKeys.has(cacheKey)
+      ) {
+        continue;
+      }
+      entry.texture.destroy();
+      this.nestedCompTextures.delete(cacheKey);
+      this.lastRenderTime.delete(cacheKey);
+      this.lastLayerCount.delete(cacheKey);
+      this.lastMotionFrameRevision.delete(cacheKey);
+    }
+    this.activeOccurrenceCacheKeys.clear();
+  }
+
+  cleanupTexture(compositionId: string): void {
+    for (const [cacheKey, entry] of this.nestedCompTextures) {
+      if (entry.compositionId !== compositionId) continue;
+      entry.texture.destroy();
+      this.nestedCompTextures.delete(cacheKey);
+      this.activeOccurrenceCacheKeys.delete(cacheKey);
+      this.lastRenderTime.delete(cacheKey);
+      this.lastLayerCount.delete(cacheKey);
+      this.lastMotionFrameRevision.delete(cacheKey);
+    }
+  }
+
+  /**
+   * Cache the current main render output for a composition
+   */
+  cacheActiveCompOutput(compositionId: string, sourceTexture: GPUTexture, width: number, height: number): void {
+    let compTexture = this.nestedCompTextures.get(compositionId);
+    if (!compTexture || compTexture.texture.width !== width || compTexture.texture.height !== height) {
+      if (compTexture) compTexture.texture.destroy();
+
+      const texture = this.device.createTexture({
+        size: { width, height },
+        format: 'rgba8unorm',
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      });
+      compTexture = { compositionId, texture, view: texture.createView(), initialized: false };
+      this.nestedCompTextures.set(compositionId, compTexture);
+    }
+
+    const commandEncoder = this.device.createCommandEncoder();
+    commandEncoder.copyTextureToTexture(
+      { texture: sourceTexture },
+      { texture: compTexture.texture },
+      { width, height }
+    );
+    this.device.queue.submit([commandEncoder.finish()]);
+    compTexture.initialized = true;
+  }
+
+  /**
+   * Invalidate frame cache for a specific composition or all
+   */
+  invalidateCache(compositionId?: string): void {
+    if (compositionId) {
+      for (const [cacheKey, texture] of this.nestedCompTextures) {
+        if (texture.compositionId !== compositionId) continue;
+        this.lastRenderTime.delete(cacheKey);
+        this.lastLayerCount.delete(cacheKey);
+        this.lastMotionFrameRevision.delete(cacheKey);
+      }
+    } else {
+      this.lastRenderTime.clear();
+      this.lastLayerCount.clear();
+      this.lastMotionFrameRevision.clear();
+    }
+  }
+
+  destroy(): void {
+    // Clear frame cache
+    this.lastRenderTime.clear();
+    this.lastLayerCount.clear();
+    this.lastMotionFrameRevision.clear();
+    this.activeOccurrenceCacheKeys.clear();
+
+    // Destroy nested comp textures
+    for (const tex of this.nestedCompTextures.values()) {
+      tex.texture.destroy();
+    }
+    this.nestedCompTextures.clear();
+
+    this.texturePool.destroy();
+  }
+}

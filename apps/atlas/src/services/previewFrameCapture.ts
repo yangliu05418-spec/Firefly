@@ -1,0 +1,75 @@
+import { Logger } from './logger';
+import { renderHostPort } from './render/renderHostPort';
+
+const log = Logger.create('PreviewFrameCapture');
+
+interface CapturedPreviewFrameCanvas {
+  canvas: HTMLCanvasElement;
+  width: number;
+  height: number;
+}
+
+async function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality?: number): Promise<Blob | null> {
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => resolve(blob), type, quality);
+  });
+}
+
+export async function captureCurrentPreviewFrameCanvas(): Promise<CapturedPreviewFrameCanvas | null> {
+  try {
+    const pixels = await renderHostPort.readPixels();
+    if (!pixels) {
+      return null;
+    }
+
+    const { width, height } = renderHostPort.getOutputDimensions();
+    if (!width || !height) {
+      return null;
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      return null;
+    }
+
+    const imageData = new ImageData(new Uint8ClampedArray(pixels), width, height);
+    ctx.putImageData(imageData, 0, 0);
+
+    return { canvas, width, height };
+  } catch (error) {
+    log.error('Failed to capture current preview frame', error);
+    return null;
+  }
+}
+
+export async function captureCurrentPreviewFrameDataUrl(): Promise<string | null> {
+  const capture = await captureCurrentPreviewFrameCanvas();
+  if (!capture) {
+    return null;
+  }
+
+  return capture.canvas.toDataURL('image/png');
+}
+
+export async function captureCurrentPreviewFrameFile(filenamePrefix = 'preview_frame'): Promise<File | null> {
+  const capture = await captureCurrentPreviewFrameCanvas();
+  if (!capture) {
+    return null;
+  }
+
+  const blob = await canvasToBlob(capture.canvas, 'image/png');
+  if (!blob) {
+    return null;
+  }
+
+  return new File([blob], `${filenamePrefix}_${Date.now()}.png`, { type: 'image/png' });
+}
+
+export async function captureCurrentPreviewFrameJpegBlob(quality = 0.92): Promise<Blob | null> {
+  const capture = await captureCurrentPreviewFrameCanvas();
+  return capture ? canvasToBlob(capture.canvas, 'image/jpeg', quality) : null;
+}

@@ -1,0 +1,46 @@
+// Project folder structure constants
+
+export const PROJECT_FOLDERS = {
+  RAW: 'Raw',
+  RAW_BAKED_AUDIO: 'Raw/Baked Audio',
+  PROXY: 'Proxy',
+  AUDIO_PROXIES: 'Audio Proxies',
+  ANALYSIS: 'Analysis',
+  TRANSCRIPTS: 'Transcripts',
+  CACHE: 'Cache',
+  CACHE_THUMBNAILS: 'Cache/thumbnails',
+  CACHE_FACE_THUMBNAILS: 'Cache/face-thumbnails',
+  CACHE_SPLATS: 'Cache/splats',
+  CACHE_WAVEFORMS: 'Cache/waveforms',
+  CACHE_ARTIFACTS: 'Cache/artifacts',
+  RENDERS: 'Renders',
+  BACKUPS: 'Backups',
+  DOWNLOADS: 'Downloads',
+  PROMPTS: 'Prompts',
+  AI_CHAT: 'AI/Chat',
+} as const;
+
+export type ProjectFolderKey = keyof typeof PROJECT_FOLDERS;
+
+export const MAX_BACKUPS = 20;
+
+// All folders to create when initializing a project
+export const PROJECT_FOLDER_PATHS = [
+  PROJECT_FOLDERS.RAW,
+  PROJECT_FOLDERS.RAW_BAKED_AUDIO,
+  PROJECT_FOLDERS.PROXY,
+  PROJECT_FOLDERS.AUDIO_PROXIES,
+  PROJECT_FOLDERS.ANALYSIS,
+  PROJECT_FOLDERS.TRANSCRIPTS,
+  PROJECT_FOLDERS.CACHE,
+  PROJECT_FOLDERS.CACHE_THUMBNAILS,
+  PROJECT_FOLDERS.CACHE_FACE_THUMBNAILS,
+  PROJECT_FOLDERS.CACHE_SPLATS,
+  PROJECT_FOLDERS.CACHE_WAVEFORMS,
+  PROJECT_FOLDERS.CACHE_ARTIFACTS,
+  PROJECT_FOLDERS.RENDERS,
+  PROJECT_FOLDERS.BACKUPS,
+  PROJECT_FOLDERS.DOWNLOADS,
+  PROJECT_FOLDERS.PROMPTS,
+  PROJECT_FOLDERS.AI_CHAT,
+] as const;

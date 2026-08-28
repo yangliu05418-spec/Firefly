@@ -1,0 +1,326 @@
+// Timeline store selectors - Optimized for minimal re-renders
+// Using individual selectors allows Zustand to only trigger re-renders
+// when the specific selected value changes, not when ANY store value changes.
+
+import type { TimelineStore } from './types';
+
+// ===========================================
+// CORE DATA SELECTORS (frequently changing)
+// ===========================================
+
+export const selectTracks = (state: TimelineStore) => state.tracks;
+export const selectClips = (state: TimelineStore) => state.clips;
+export const selectPlayheadPosition = (state: TimelineStore) => state.playheadPosition;
+export const selectDuration = (state: TimelineStore) => state.duration;
+export const selectZoom = (state: TimelineStore) => state.zoom;
+export const selectScrollX = (state: TimelineStore) => state.scrollX;
+export const selectIsPlaying = (state: TimelineStore) => state.isPlaying;
+export const selectSelectedClipIds = (state: TimelineStore) => state.selectedClipIds;
+export const selectPropertiesSelection = (state: TimelineStore) => state.propertiesSelection;
+export const selectMarkers = (state: TimelineStore) => state.markers;
+
+// Multi-ruler infrastructure (issue #257)
+export const selectRulerLanes = (state: TimelineStore) => state.rulerLanes;
+export const selectActiveRulerLaneId = (state: TimelineStore) => state.activeRulerLaneId;
+export const selectTempoMap = (state: TimelineStore) => state.tempoMap;
+
+// ===========================================
+// UI STATE SELECTORS (less frequent changes)
+// ===========================================
+
+export const selectSnappingEnabled = (state: TimelineStore) => state.snappingEnabled;
+export const selectTimelineGridSubdivision = (state: TimelineStore) => state.timelineGridSubdivision;
+export const selectMetronomeEnabled = (state: TimelineStore) => state.metronomeEnabled;
+export const selectMetronomeVolume = (state: TimelineStore) => state.metronomeVolume;
+export const selectMetronomeMode = (state: TimelineStore) => state.metronomeMode;
+export const selectInPoint = (state: TimelineStore) => state.inPoint;
+export const selectOutPoint = (state: TimelineStore) => state.outPoint;
+export const selectLoopPlayback = (state: TimelineStore) => state.loopPlayback;
+export const selectToolMode = (state: TimelineStore) => state.toolMode;
+export const selectActiveTimelineToolId = (state: TimelineStore) => state.activeTimelineToolId;
+export const selectLastTimelineToolByGroup = (state: TimelineStore) => state.lastTimelineToolByGroup;
+export const selectOpenTimelineToolGroupId = (state: TimelineStore) => state.openTimelineToolGroupId;
+export const selectTimelineRangeSelection = (state: TimelineStore) => state.timelineRangeSelection;
+export const selectTimelineToolPreview = (state: TimelineStore) => state.timelineToolPreview;
+export const selectThumbnailsEnabled = (state: TimelineStore) => state.thumbnailsEnabled;
+export const selectWaveformsEnabled = (state: TimelineStore) => state.waveformsEnabled;
+export const selectAudioDisplayMode = (state: TimelineStore) => state.audioDisplayMode;
+export const selectAudioFocusMode = (state: TimelineStore) => state.audioFocusMode;
+export const selectTrackFocusMode = (state: TimelineStore) => state.trackFocusMode;
+export const selectAudioRegionSelection = (state: TimelineStore) => state.audioRegionSelection;
+export const selectVideoBakeRegionSelection = (state: TimelineStore) => state.videoBakeRegionSelection;
+export const selectVideoBakeRegions = (state: TimelineStore) => state.videoBakeRegions;
+export const selectAudioRegionClipboard = (state: TimelineStore) => state.audioRegionClipboard;
+export const selectShowAudioRegionEditMarkers = (state: TimelineStore) => state.showAudioRegionEditMarkers;
+export const selectIsDraggingPlayhead = (state: TimelineStore) => state.isDraggingPlayhead;
+
+// ===========================================
+// PREVIEW/EXPORT STATE SELECTORS
+// ===========================================
+
+export const selectRamPreviewEnabled = (state: TimelineStore) => state.ramPreviewEnabled;
+export const selectRamPreviewProgress = (state: TimelineStore) => state.ramPreviewProgress;
+export const selectRamPreviewRange = (state: TimelineStore) => state.ramPreviewRange;
+export const selectIsRamPreviewing = (state: TimelineStore) => state.isRamPreviewing;
+export const selectClipVideoBakeProgress = (state: TimelineStore) => state.clipVideoBakeProgress;
+export const selectIsClipVideoBakeRendering = (state: TimelineStore) => state.isClipVideoBakeRendering;
+export const selectIsExporting = (state: TimelineStore) => state.isExporting;
+export const selectExportProgress = (state: TimelineStore) => state.exportProgress;
+export const selectExportRange = (state: TimelineStore) => state.exportRange;
+export const selectExportPreviewFrame = (state: TimelineStore) => state.exportPreviewFrame;
+export const selectIsProxyCaching = (state: TimelineStore) => state.isProxyCaching;
+export const selectProxyCacheProgress = (state: TimelineStore) => state.proxyCacheProgress;
+
+// ===========================================
+// KEYFRAME STATE SELECTORS
+// ===========================================
+
+export const selectSelectedKeyframeIds = (state: TimelineStore) => state.selectedKeyframeIds;
+export const selectClipKeyframes = (state: TimelineStore) => state.clipKeyframes;
+export const selectExpandedCurveProperties = (state: TimelineStore) => state.expandedCurveProperties;
+
+// ===========================================
+// GROUPED STATE SELECTORS (for useShallow)
+// Reduces 29 individual subscriptions to 6 grouped ones.
+// Use with useShallow() from 'zustand/react/shallow'.
+// ===========================================
+
+// Core timeline structure (changes on edits)
+export const selectCoreData = (state: TimelineStore) => ({
+  tracks: state.tracks,
+  clips: state.clips,
+  duration: state.duration,
+  selectedClipIds: state.selectedClipIds,
+  markers: state.markers,
+});
+
+// Playback state (changes every frame during playback)
+export const selectPlaybackState = (state: TimelineStore) => ({
+  playheadPosition: state.playheadPosition,
+  isPlaying: state.isPlaying,
+  isDraggingPlayhead: state.isDraggingPlayhead,
+});
+
+// View state (changes on zoom/scroll)
+export const selectViewState = (state: TimelineStore) => ({
+  zoom: state.zoom,
+  scrollX: state.scrollX,
+  trackHeaderWidth: state.trackHeaderWidth,
+  timelineSplitRatio: state.timelineSplitRatio,
+});
+
+// UI settings (rarely changes)
+export const selectUISettings = (state: TimelineStore) => ({
+  snappingEnabled: state.snappingEnabled,
+  inPoint: state.inPoint,
+  outPoint: state.outPoint,
+  loopPlayback: state.loopPlayback,
+  toolMode: state.toolMode,
+  activeTimelineToolId: state.activeTimelineToolId,
+  openTimelineToolGroupId: state.openTimelineToolGroupId,
+  thumbnailsEnabled: state.thumbnailsEnabled,
+  waveformsEnabled: state.waveformsEnabled,
+  audioDisplayMode: state.audioDisplayMode,
+  audioLayerAdvancedMode: state.audioLayerAdvancedMode,
+  audioFocusMode: state.audioFocusMode,
+  trackFocusMode: state.trackFocusMode,
+  showAudioRegionEditMarkers: state.showAudioRegionEditMarkers,
+  showFaceRanges: state.showFaceRanges,
+});
+
+// Preview/export state (changes during preview/export operations)
+export const selectPreviewExportState = (state: TimelineStore) => ({
+  ramPreviewEnabled: state.ramPreviewEnabled,
+  ramPreviewProgress: state.ramPreviewProgress,
+  ramPreviewRange: state.ramPreviewRange,
+  isRamPreviewing: state.isRamPreviewing,
+  clipVideoBakeProgress: state.clipVideoBakeProgress,
+  isClipVideoBakeRendering: state.isClipVideoBakeRendering,
+  isExporting: state.isExporting,
+  exportProgress: state.exportProgress,
+  exportRange: state.exportRange,
+  exportPreviewFrame: state.exportPreviewFrame,
+  exportPreviewFrameTime: state.exportPreviewFrameTime,
+});
+
+// Keyframe state (changes during keyframe edits)
+export const selectKeyframeState = (state: TimelineStore) => ({
+  selectedKeyframeIds: state.selectedKeyframeIds,
+  clipKeyframes: state.clipKeyframes,
+  expandedCurveProperties: state.expandedCurveProperties,
+});
+
+// ===========================================
+// DERIVED SELECTORS (computed from state)
+// ===========================================
+
+export const selectVideoTracks = (state: TimelineStore) =>
+  state.tracks.filter(t => t.type === 'video');
+
+export const selectAudioTracks = (state: TimelineStore) =>
+  state.tracks.filter(t => t.type === 'audio');
+
+export const selectHasAnyVideoSolo = (state: TimelineStore) =>
+  state.tracks.some(t => t.type === 'video' && t.solo);
+
+export const selectHasAnyAudioSolo = (state: TimelineStore) =>
+  state.tracks.some(t => t.type === 'audio' && t.solo);
+
+// ===========================================
+// STABLE ACTION SELECTORS
+// Actions are stable references and don't cause re-renders.
+// We group them for convenience while maintaining type safety.
+// ===========================================
+
+// Playback actions
+export const selectPlaybackActions = (state: TimelineStore) => ({
+  play: state.play,
+  pause: state.pause,
+  stop: state.stop,
+  playForward: state.playForward,
+  playReverse: state.playReverse,
+  setPlayheadPosition: state.setPlayheadPosition,
+  setDraggingPlayhead: state.setDraggingPlayhead,
+});
+
+// Track actions
+export const selectTrackActions = (state: TimelineStore) => ({
+  addTrack: state.addTrack,
+  isTrackExpanded: state.isTrackExpanded,
+  toggleTrackExpanded: state.toggleTrackExpanded,
+  getExpandedTrackHeight: state.getExpandedTrackHeight,
+  trackHasKeyframes: state.trackHasKeyframes,
+  setTrackLocked: state.setTrackLocked,
+  setTrackParent: state.setTrackParent,
+});
+
+// Clip actions
+export const selectClipActions = (state: TimelineStore) => ({
+  addClip: state.addClip,
+  addCompClip: state.addCompClip,
+  addTextClip: state.addTextClip,
+  addSolidClip: state.addSolidClip,
+  addStoryboardClip: state.addStoryboardClip,
+  addMathSceneClip: state.addMathSceneClip,
+  updateSolidColor: state.updateSolidColor,
+  moveClip: state.moveClip,
+  trimClip: state.trimClip,
+  removeClip: state.removeClip,
+  selectClip: state.selectClip,
+  unlinkGroup: state.unlinkGroup,
+  splitClip: state.splitClip,
+  splitClipAtPlayhead: state.splitClipAtPlayhead,
+  toggleClipReverse: state.toggleClipReverse,
+  updateClipTransform: state.updateClipTransform,
+  setClipParent: state.setClipParent,
+  generateWaveformForClip: state.generateWaveformForClip,
+});
+
+// Transform/interpolation getters (stable functions)
+export const selectTransformGetters = (state: TimelineStore) => ({
+  getInterpolatedTransform: state.getInterpolatedTransform,
+  getInterpolatedCameraSettings: state.getInterpolatedCameraSettings,
+  getInterpolatedEffects: state.getInterpolatedEffects,
+  getInterpolatedNodeGraphParams: state.getInterpolatedNodeGraphParams,
+  getInterpolatedVectorAnimationSettings: state.getInterpolatedVectorAnimationSettings,
+  getInterpolatedSpeed: state.getInterpolatedSpeed,
+  getSourceTimeForClip: state.getSourceTimeForClip,
+  getSnappedPosition: state.getSnappedPosition,
+  getPositionWithResistance: state.getPositionWithResistance,
+});
+
+// Keyframe actions
+export const selectKeyframeActions = (state: TimelineStore) => ({
+  getClipKeyframes: state.getClipKeyframes,
+  selectKeyframe: state.selectKeyframe,
+  deselectAllKeyframes: state.deselectAllKeyframes,
+  hasKeyframes: state.hasKeyframes,
+  addKeyframe: state.addKeyframe,
+  moveKeyframe: state.moveKeyframe,
+  moveKeyframes: state.moveKeyframes,
+  updateKeyframe: state.updateKeyframe,
+  removeKeyframe: state.removeKeyframe,
+  setPropertyValue: state.setPropertyValue,
+  toggleCurveExpanded: state.toggleCurveExpanded,
+  updateBezierHandle: state.updateBezierHandle,
+});
+
+// In/out point actions
+export const selectInOutActions = (state: TimelineStore) => ({
+  setInPoint: state.setInPoint,
+  setOutPoint: state.setOutPoint,
+  setInPointAtPlayhead: state.setInPointAtPlayhead,
+  setOutPointAtPlayhead: state.setOutPointAtPlayhead,
+  clearInOut: state.clearInOut,
+});
+
+// Zoom/scroll actions
+export const selectViewActions = (state: TimelineStore) => ({
+  setZoom: state.setZoom,
+  setScrollX: state.setScrollX,
+  setDuration: state.setDuration,
+  toggleSnapping: state.toggleSnapping,
+});
+
+// Preview actions
+export const selectPreviewActions = (state: TimelineStore) => ({
+  toggleLoopPlayback: state.toggleLoopPlayback,
+  toggleRamPreviewEnabled: state.toggleRamPreviewEnabled,
+  startRamPreview: state.startRamPreview,
+  cancelRamPreview: state.cancelRamPreview,
+  getCachedRanges: state.getCachedRanges,
+  getProxyCachedRanges: state.getProxyCachedRanges,
+  getScrubCachedRanges: state.getScrubCachedRanges,
+  startProxyCachePreload: state.startProxyCachePreload,
+  cancelProxyCachePreload: state.cancelProxyCachePreload,
+});
+
+// Tool actions
+export const selectToolActions = (state: TimelineStore) => ({
+  setActiveTimelineTool: state.setActiveTimelineTool,
+  activateTimelineToolGroup: state.activateTimelineToolGroup,
+  cycleTimelineToolGroup: state.cycleTimelineToolGroup,
+  setOpenTimelineToolGroup: state.setOpenTimelineToolGroup,
+  setMomentaryTimelineTool: state.setMomentaryTimelineTool,
+  clearMomentaryTimelineTool: state.clearMomentaryTimelineTool,
+  setToolMode: state.setToolMode,
+  toggleCutTool: state.toggleCutTool,
+  toggleThumbnailsEnabled: state.toggleThumbnailsEnabled,
+  toggleWaveformsEnabled: state.toggleWaveformsEnabled,
+  setAudioDisplayMode: state.setAudioDisplayMode,
+  toggleAudioFocusMode: state.toggleAudioFocusMode,
+  setTrackFocusMode: state.setTrackFocusMode,
+});
+
+// Marker actions
+export const selectMarkerActions = (state: TimelineStore) => ({
+  addMarker: state.addMarker,
+  moveMarker: state.moveMarker,
+  removeMarker: state.removeMarker,
+});
+
+// Ruler-lane actions (issue #257)
+export const selectRulerLaneActions = (state: TimelineStore) => ({
+  addRulerLane: state.addRulerLane,
+  removeRulerLane: state.removeRulerLane,
+  setActiveRulerLane: state.setActiveRulerLane,
+  reorderRulerLanes: state.reorderRulerLanes,
+});
+
+// Tempo-map editing actions (issue #299)
+export const selectTempoActions = (state: TimelineStore) => ({
+  setProjectTempo: state.setProjectTempo,
+  addTempoChange: state.addTempoChange,
+  updateTempoChange: state.updateTempoChange,
+  removeTempoChange: state.removeTempoChange,
+});
+
+// Clipboard actions
+export const selectClipboardActions = (state: TimelineStore) => ({
+  copyClips: state.copyClips,
+  pasteClips: state.pasteClips,
+  copyClipEffects: state.copyClipEffects,
+  pasteClipEffects: state.pasteClipEffects,
+  copyClipColor: state.copyClipColor,
+  pasteClipColor: state.pasteClipColor,
+});

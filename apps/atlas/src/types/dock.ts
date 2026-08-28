@@ -1,0 +1,314 @@
+import type {
+  RenderSourceActiveComp,
+  RenderSourceComposition,
+  RenderSourceLayerIndex,
+} from './renderTarget';
+
+// Dock system type definitions
+
+// Panel types that can be docked
+// Note: Effects, Transcript, Analysis are now integrated into Properties panel
+export type PanelType = 'start' | 'preview' | 'multi-preview' | 'timeline' | 'clip-properties' | 'history' | 'audio-mixer' | 'node-workspace' | 'media' | 'export' | 'midi-mapping' | 'capture' | 'ai-segment' | 'scene-description' | 'transitions' | 'scope-waveform' | 'scope-histogram' | 'scope-vectorscope';
+export type DockLayoutTransitionStaggerMode = 'puzzle' | 'sequence';
+export type DockLayoutStartTransitionDirection = 'to-start' | 'from-start';
+
+// Scope panel types for filtering in View menu
+export const SCOPE_PANEL_TYPES: PanelType[] = ['scope-waveform', 'scope-histogram', 'scope-vectorscope'];
+
+// WIP panel types — shown grayed out with bug icon in View menu
+export const WIP_PANEL_TYPES: PanelType[] = [];
+
+// Panel types that may exist more than once at the same time. These spawn a fresh,
+// independent instance (unique id) from the tab-bar "+" instead of focusing the
+// existing one. Timeline is intentionally excluded (single instance).
+export const MULTI_INSTANCE_PANEL_TYPES: PanelType[] = ['preview'];
+
+// AI panel types for View menu grouping
+export const AI_PANEL_TYPES: PanelType[] = ['ai-segment', 'scene-description'];
+
+// Registered for saved-layout compatibility, but intentionally absent from panel pickers.
+export const PANEL_PICKER_HIDDEN_TYPES: PanelType[] = ['start', 'scene-description'];
+
+export type PreviewPanelSource =
+  | RenderSourceActiveComp
+  | RenderSourceComposition
+  | RenderSourceLayerIndex;
+
+// Panel-specific data for configurable panels
+export interface PreviewPanelData {
+  source?: PreviewPanelSource;
+  compositionId?: string | null; // legacy: null = active composition
+  showTransparencyGrid?: boolean; // per-tab transparency grid toggle (default false)
+  initialEditMode?: boolean;
+  initialEditCameraView?: 'camera' | 'front' | 'side' | 'top';
+}
+
+export interface MultiPreviewSlotData {
+  compositionId: string | null;
+}
+
+export interface MultiPreviewPanelData {
+  sourceCompositionId: string | null; // null = custom mode (per-slot), string = auto-distribute layers
+  slots: [MultiPreviewSlotData, MultiPreviewSlotData, MultiPreviewSlotData, MultiPreviewSlotData];
+  showTransparencyGrid: boolean;
+}
+
+export type PanelData = PreviewPanelData | MultiPreviewPanelData;
+
+// A panel instance
+export interface DockPanel {
+  id: string;
+  type: PanelType;
+  title: string;
+  data?: PanelData; // Optional panel-specific configuration
+}
+
+// A group of tabbed panels
+export interface DockTabGroup {
+  kind: 'tab-group';
+  id: string;
+  panels: DockPanel[];
+  activeIndex: number;
+}
+
+// A split container with two children
+export interface DockSplit {
+  kind: 'split';
+  id: string;
+  direction: 'horizontal' | 'vertical';
+  children: [DockNode, DockNode];
+  ratio: number; // 0-1, position of splitter
+}
+
+// Union type for dock tree nodes
+export type DockNode = DockTabGroup | DockSplit;
+
+// Floating panel (detached from dock)
+export interface FloatingPanel {
+  id: string;
+  panel: DockPanel;
+  position: { x: number; y: number };
+  size: { width: number; height: number };
+  zIndex: number;
+}
+
+// Detached browser window panel. Persisted only in the local dock store so a
+// browser refresh can rebuild detached windows; saved/project layouts still
+// store docked and floating panels only.
+export interface BrowserWindowPanel {
+  id: string;
+  panel: DockPanel;
+  returnGroupId: string | null;
+  size?: { width: number; height: number };
+  position?: { left: number; top: number };
+}
+
+// Root layout state
+export interface DockLayout {
+  root: DockNode;
+  floatingPanels: FloatingPanel[];
+  panelZoom: Record<string, number>; // Panel ID -> zoom level (1.0 = 100%)
+}
+
+export type SavedDockTimelineAudioDisplayMode = 'compact' | 'detailed' | 'spectral';
+export type SavedDockTimelineTrackFocusMode = 'balanced' | 'audio' | 'video';
+
+export interface SavedDockTimelineLayout {
+  audioDisplayMode?: SavedDockTimelineAudioDisplayMode;
+  audioLayerAdvancedMode?: boolean;
+  audioFocusMode?: boolean;
+  trackFocusMode?: SavedDockTimelineTrackFocusMode;
+  trackHeaderWidth?: number;
+  timelineSplitRatio?: number | null;
+  trackHeights?: Record<string, number>;
+  trackTypeHeights?: Partial<Record<'video' | 'audio' | 'midi', number>>;
+  trackVisibility?: Record<string, boolean>;
+  trackTypeVisibility?: Partial<Record<'video' | 'audio' | 'midi', boolean>>;
+  trackTypeCounts?: Partial<Record<'video' | 'audio' | 'midi', number>>;
+  trackTypeLayouts?: Partial<Record<'video' | 'audio' | 'midi', SavedDockTimelineTrackSlotLayout[]>>;
+}
+
+export interface SavedDockTimelineTrackSlotLayout {
+  height?: number;
+  visible?: boolean;
+}
+
+export interface SavedDockLayout {
+  id: string;
+  name: string;
+  layout: DockLayout;
+  createdAt: number;
+  updatedAt: number;
+  favorite?: boolean;
+  factory?: boolean;
+  timeline?: SavedDockTimelineLayout;
+}
+
+export interface HoveredDockTabTarget {
+  kind: 'panel' | 'timeline-composition';
+  panelId: string;
+  groupId: string;
+  compositionId?: string;
+}
+
+// Drop target for drag operations
+export type DropPosition = 'center' | 'left' | 'right' | 'top' | 'bottom';
+export type DropScope = 'pane' | 'root-edge';
+
+export interface DropTarget {
+  groupId: string;
+  position: DropPosition;
+  scope?: DropScope; // Omitted/`pane` targets an existing tab group; `root-edge` wraps the full dock root
+  tabInsertIndex?: number; // When position is 'center', which slot to insert at
+}
+
+// Drag state
+export interface DockDragState {
+  isDragging: boolean;
+  draggedPanel: DockPanel | null;
+  sourceGroupId: string | null;
+  sourceFloatingId: string | null;
+  dropTarget: DropTarget | null;
+  dragOffset: { x: number; y: number };
+  currentPos: { x: number; y: number };
+}
+
+// Panel metadata for configuration
+export interface PanelConfig {
+  type: PanelType;
+  title: string;
+  icon?: string;
+  minWidth?: number;
+  minHeight?: number;
+  closable?: boolean;
+}
+
+export const PANEL_CONFIGS: Record<PanelType, PanelConfig> = {
+  start: {
+    type: 'start',
+    title: 'Start',
+    minWidth: 320,
+    minHeight: 240,
+    closable: false,
+  },
+  preview: {
+    type: 'preview',
+    title: 'Preview',
+    minWidth: 200,
+    minHeight: 150,
+    closable: false,
+  },
+  'multi-preview': {
+    type: 'multi-preview',
+    title: 'Multi Preview',
+    minWidth: 400,
+    minHeight: 300,
+    closable: false,
+  },
+  timeline: {
+    type: 'timeline',
+    title: 'Timeline',
+    minWidth: 300,
+    minHeight: 150,
+    closable: false,
+  },
+  'clip-properties': {
+    type: 'clip-properties',
+    title: 'Properties',
+    minWidth: 200,
+    minHeight: 150,
+    closable: false,
+  },
+  history: {
+    type: 'history',
+    title: 'History',
+    minWidth: 240,
+    minHeight: 180,
+    closable: false,
+  },
+  'audio-mixer': {
+    type: 'audio-mixer',
+    title: 'Audio Mixer',
+    minWidth: 420,
+    minHeight: 280,
+    closable: false,
+  },
+  'node-workspace': {
+    type: 'node-workspace',
+    title: 'Nodes',
+    minWidth: 520,
+    minHeight: 360,
+    closable: false,
+  },
+  media: {
+    type: 'media',
+    title: 'Media',
+    minWidth: 200,
+    minHeight: 200,
+    closable: false,
+  },
+  export: {
+    type: 'export',
+    title: 'Export',
+    minWidth: 200,
+    minHeight: 300,
+    closable: false,
+  },
+  'midi-mapping': {
+    type: 'midi-mapping',
+    title: 'MIDI Mapping',
+    minWidth: 280,
+    minHeight: 240,
+    closable: false,
+  },
+  capture: {
+    type: 'capture',
+    title: 'Capture',
+    minWidth: 320,
+    minHeight: 420,
+    closable: false,
+  },
+  transitions: {
+    type: 'transitions',
+    title: 'Transitions',
+    icon: 'Blend',
+    minWidth: 200,
+    minHeight: 200,
+    closable: false,
+  },
+  'ai-segment': {
+    type: 'ai-segment',
+    title: 'AI Segment',
+    minWidth: 280,
+    minHeight: 300,
+    closable: false,
+  },
+  'scene-description': {
+    type: 'scene-description',
+    title: 'AI Scene Description',
+    minWidth: 280,
+    minHeight: 300,
+    closable: false,
+  },
+  'scope-waveform': {
+    type: 'scope-waveform',
+    title: 'Waveform',
+    minWidth: 200,
+    minHeight: 200,
+    closable: false,
+  },
+  'scope-histogram': {
+    type: 'scope-histogram',
+    title: 'Histogram',
+    minWidth: 200,
+    minHeight: 200,
+    closable: false,
+  },
+  'scope-vectorscope': {
+    type: 'scope-vectorscope',
+    title: 'Vectorscope',
+    minWidth: 200,
+    minHeight: 200,
+    closable: false,
+  },
+};

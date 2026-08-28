@@ -1,0 +1,282 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { BillingSummaryResponse } from '../../src/services/cloudApi';
+
+const { createChatMock, createVideoMock, videoCapabilitiesMock, videoStatusMock } = vi.hoisted(() => ({
+  createChatMock: vi.fn(),
+  createVideoMock: vi.fn(),
+  videoCapabilitiesMock: vi.fn(),
+  videoStatusMock: vi.fn(),
+}));
+
+vi.mock('../../src/services/cloudApi', () => ({
+  cloudApi: {
+    ai: {
+      chat: {
+        create: createChatMock,
+        stream: vi.fn(),
+      },
+      video: {
+        capabilities: videoCapabilitiesMock,
+        create: createVideoMock,
+        status: videoStatusMock,
+      },
+    },
+  },
+}));
+
+import { cloudAiService } from '../../src/services/cloudAiService';
+import { resetCreditCoordinatorForTests } from '../../src/services/credits/creditBalanceCoordinator';
+import { useAccountStore } from '../../src/stores/accountStore';
+import { useCreditActivityStore } from '../../src/stores/creditActivityStore';
+
+function createBillingSummary(creditBalance: number): BillingSummaryResponse {
+  return {
+    creditBalance,
+    creditMeterReference: Math.max(4500, creditBalance),
+    entitlements: {},
+    hostedAIEnabled: true,
+    plan: {
+      id: 'starter',
+      label: 'Starter',
+      monthlyCredits: 4500,
+    },
+    recentCredits: [],
+    stripeCustomerId: 'cus_test',
+    subscription: {
+      cancelAtPeriodEnd: false,
+      currentPeriodEnd: '2026-05-14T10:16:15.000Z',
+      currentPeriodStart: '2026-04-14T10:16:15.000Z',
+      id: 'sub_local',
+      planId: 'starter',
+      status: 'active',
+      stripeSubscriptionId: 'sub_stripe',
+      updatedAt: '2026-04-14T10:16:15.000Z',
+    },
+    usage: {
+      byFeature: [],
+      completedCount: 0,
+      creditCost: 0,
+      failedCount: 0,
+      pendingCount: 0,
+      since: '2026-04-01T00:00:00.000Z',
+    },
+    user: null,
+  };
+}
+
+function resetAccountStore(creditBalance = 200): void {
+  useAccountStore.setState({
+    billingSummary: createBillingSummary(creditBalance),
+    creditBalance,
+    creditMeterReference: Math.max(4500, creditBalance),
+    dialog: null,
+    entitlements: {},
+    error: null,
+    hostedAIEnabled: true,
+    isInitialized: true,
+    isLoading: false,
+    notice: null,
+    session: {
+      authenticated: true,
+      provider: 'magic_link',
+    },
+    user: {
+      email: 'mail@romankuskowski.de',
+      id: 'user_1',
+    },
+  });
+}
+
+describe('cloudAiService billing sync', () => {
+  beforeEach(() => {
+    createChatMock.mockReset();
+    createVideoMock.mockReset();
+    videoCapabilitiesMock.mockReset();
+    videoStatusMock.mockReset();
+    resetCreditCoordinatorForTests();
+    resetAccountStore();
+  });
+
+  it('updates accountStore immediately after hosted video creation', async () => {
+    createVideoMock.mockResolvedValue({
+      creditBalance: 160,
+      data: { taskId: 'task_123' },
+      kind: 'ai.video',
+      mode: 'hosted',
+      ok: true,
+      provider: 'cloud-kling',
+      requestId: 'req_1',
+      status: 'accepted',
+    });
+
+    const taskId = await cloudAiService.createTextToVideo({
+      aspectRatio: '16:9',
+      duration: 5,
+      mode: 'std',
+      prompt: 'Sunset over the sea',
+      provider: 'cloud-kling',
+      version: 'latest',
+    });
+
+    expect(taskId).toBe('task_123');
+    expect(useAccountStore.getState().creditBalance).toBe(160);
+    expect(useAccountStore.getState().billingSummary?.creditBalance).toBe(160);
+  });
+
+  it('forwards the stable video idempotency key used for reload recovery', async () => {
+    createVideoMock.mockResolvedValue({
+      creditBalance: 160,
+      data: { taskId: 'task_123' },
+      kind: 'ai.video',
+      mode: 'hosted',
+      ok: true,
+      provider: 'cloud-kling',
+      requestId: 'req_1',
+      status: 'accepted',
+    });
+
+    await cloudAiService.createTextToVideo({
+      aspectRatio: '16:9',
+      duration: 5,
+      mode: 'std',
+      prompt: 'Sunset over the sea',
+      provider: 'cloud-kling',
+      version: 'latest',
+    }, 'flashboard-video:record-1');
+
+    expect(createVideoMock).toHaveBeenCalledWith(expect.objectContaining({
+      idempotencyKey: 'flashboard-video:record-1',
+    }));
+  });
+
+  it('forwards Seedance reference media to hosted video creation', async () => {
+    createVideoMock.mockResolvedValue({
+      creditBalance: 140,
+      data: { taskId: 'task_seedance' },
+      kind: 'ai.video',
+      mode: 'hosted',
+      ok: true,
+      provider: 'bytedance/seedance-2',
+      requestId: 'req_seedance',
+      status: 'accepted',
+    });
+
+    await cloudAiService.createTextToVideo({
+      aspectRatio: '16:9',
+      duration: 8,
+      mode: '720p',
+      prompt: 'A presenter speaks naturally on camera',
+      provider: 'bytedance/seedance-2',
+      referenceMedia: [
+        {
+          fileName: 'voice-drive.wav',
+          label: 'Voice drive',
+          mediaType: 'audio',
+          mimeType: 'audio/wav',
+          source: 'data:audio/wav;base64,UklGRg==',
+        },
+      ],
+      version: 'latest',
+    });
+
+    expect(createVideoMock).toHaveBeenCalledWith(expect.objectContaining({
+      params: expect.objectContaining({
+        provider: 'bytedance/seedance-2',
+        referenceMedia: [
+          expect.objectContaining({
+            fileName: 'voice-drive.wav',
+            mediaType: 'audio',
+            source: 'data:audio/wav;base64,UklGRg==',
+          }),
+        ],
+      }),
+    }));
+  });
+
+  it('updates accountStore immediately after hosted chat completion', async () => {
+    createChatMock.mockResolvedValue({
+      creditBalance: 154,
+      data: { text: 'done' },
+      kind: 'ai.chat',
+      mode: 'hosted',
+      ok: true,
+      provider: 'openai',
+      requestId: 'req_2',
+      status: 'completed',
+    });
+
+    await cloudAiService.createChatCompletion({
+      messages: [{ content: 'hello', role: 'user' }],
+      model: 'gpt-4.1-mini',
+    });
+
+    expect(useAccountStore.getState().creditBalance).toBe(154);
+    expect(useAccountStore.getState().billingSummary?.creditBalance).toBe(154);
+    expect(useCreditActivityStore.getState().visualSettlements).toEqual([]);
+  });
+
+  it('animates a charged response once when it carries a stable credit mutation id', async () => {
+    createChatMock.mockResolvedValue({
+      creditBalance: 193,
+      creditMutationId: 'ledger-chat-1',
+      creditsCharged: 7,
+      data: { text: 'done' },
+      kind: 'ai.chat',
+      mode: 'hosted',
+      ok: true,
+      provider: 'openai',
+      requestId: 'req_charged',
+      status: 'completed',
+    });
+
+    await cloudAiService.createChatCompletion({
+      idempotencyKey: 'chat-request-1',
+      messages: [{ content: 'hello', role: 'user' }],
+      model: 'gpt-4.1-mini',
+    });
+
+    expect(useAccountStore.getState().creditBalance).toBe(193);
+    expect(useCreditActivityStore.getState().visualSettlements).toHaveLength(1);
+    expect(useCreditActivityStore.getState().terminalSummary).toMatchObject({
+      credits: 7,
+      status: 'completed',
+    });
+
+    await cloudAiService.createChatCompletion({
+      idempotencyKey: 'chat-request-1',
+      messages: [{ content: 'hello', role: 'user' }],
+      model: 'gpt-4.1-mini',
+    });
+
+    expect(useCreditActivityStore.getState().visualSettlements).toHaveLength(1);
+    expect(useCreditActivityStore.getState().terminalSummary?.credits).toBe(0);
+  });
+
+  it('keeps polling hosted video tasks through transient fetch failures', async () => {
+    videoStatusMock
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce({
+        creditBalance: 151,
+        data: {
+          id: 'task_123',
+          status: 'completed',
+          videoUrl: 'https://cdn.example.com/video.mp4',
+        },
+        kind: 'ai.video',
+        mode: 'hosted',
+        ok: true,
+        provider: 'cloud-kling',
+        requestId: 'req_status',
+        status: 'completed',
+      });
+
+    const task = await cloudAiService.pollTaskUntilComplete('task_123', undefined, 0, 1000);
+
+    expect(videoStatusMock).toHaveBeenCalledTimes(2);
+    expect(task).toMatchObject({
+      id: 'task_123',
+      status: 'completed',
+      videoUrl: '/api/ai/video?taskId=task_123&download=1',
+    });
+  });
+});

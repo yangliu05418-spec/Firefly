@@ -1,0 +1,513 @@
+@layer features {
+.audio-track-faders {
+  position: absolute;
+  left: 4px;
+  top: 7px;
+  bottom: 7px;
+  width: 43px;
+  display: grid;
+  grid-template-columns: 16px 23px;
+  grid-template-rows: 1fr;
+  gap: 4px;
+  min-width: 0;
+  overflow: visible;
+  transform: scale(var(--audio-strip-fader-scale, 1));
+  transform-origin: left center;
+  z-index: 4;
+}
+.audio-track-faders .audio-level-meter {
+  width: 100%;
+  height: 100%;
+}
+
+.audio-track-faders .audio-track-level-meter.stereo {
+  gap: 2px;
+  padding: 1px;
+  border-radius: 4px;
+}
+
+.audio-track-faders .audio-track-level-meter.stereo .audio-level-meter-stereo-channel {
+  border-radius: 2px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 22%),
+    rgba(3, 12, 13, 0.94);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
+}
+
+.audio-track-faders .audio-track-level-meter.stereo.vertical .audio-level-meter-scale {
+  background:
+    linear-gradient(0deg, rgba(67, 205, 139, 0.16) 0 60%, rgba(255, 219, 92, 0.14) 69% 86%, rgba(255, 87, 72, 0.18) 88%),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.11) 0 1px, transparent 1px 10px);
+  opacity: 0.6;
+}
+
+.audio-track-faders .audio-track-level-meter.stereo .audio-level-meter-rms,
+.audio-track-faders .audio-track-level-meter.stereo .audio-level-meter-peak {
+  display: none;
+}
+
+.audio-track-fader-column {
+  position: relative;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) 12px;
+  align-items: stretch;
+  justify-items: center;
+  min-width: 0;
+  height: 100%;
+  overflow: visible;
+  padding: 1px 0 0;
+}
+
+.audio-track-fader-control {
+  position: relative;
+  width: 14px;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  overflow: visible;
+  cursor: ns-resize;
+}
+
+.audio-track-fader-rail {
+  position: absolute;
+  inset: 0 5px;
+  overflow: visible;
+  border-radius: 999px;
+  background: rgba(215, 225, 218, 0.22);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+    inset 0 1px 1px rgba(255, 255, 255, 0.08),
+    0 1px 1px rgba(0, 0, 0, 0.4);
+}
+
+.audio-track-fader-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: calc(var(--audio-track-volume-unit, 0.7692) * 100%);
+  border-radius: 999px;
+  background: linear-gradient(0deg, #23d17b 0%, #31dd85 100%);
+}
+
+.audio-track-fader-thumb {
+  position: absolute;
+  left: 50%;
+  bottom: calc(var(--audio-track-volume-unit, 0.7692) * 100%);
+  width: 13px;
+  height: 13px;
+  border-radius: 999px;
+  background: #2bd77c;
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.24);
+  transform: translate(-50%, 50%);
+}
+
+.audio-track-fader {
+  position: absolute;
+  inset: -6px;
+  width: auto;
+  height: auto;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  cursor: ns-resize;
+  writing-mode: vertical-lr;
+  direction: rtl;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.audio-track-fader::-webkit-slider-runnable-track {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+}
+
+.audio-track-fader::-webkit-slider-thumb {
+  width: 1px;
+  height: 1px;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.audio-track-fader::-moz-range-track {
+  background: transparent;
+}
+
+.audio-track-fader::-moz-range-thumb {
+  width: 1px;
+  height: 1px;
+  border: 0;
+  background: transparent;
+}
+
+.audio-track-fader-value {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  color: rgba(230, 240, 235, 0.74);
+  font-size: 7px;
+  font-variant-numeric: tabular-nums;
+  line-height: 10px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.audio-track-pan-row {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  width: 100%;
+  margin-top: 4px;
+  padding-right: 2px;
+  min-width: 0;
+}
+
+.audio-track-pan-label {
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.audio-track-pan-inline {
+  --pan-track-bg: rgba(17, 24, 32, 0.92);
+  --pan-center-line: rgba(150, 174, 210, 0.64);
+  --pan-fill-color: rgba(93, 164, 255, 0.92);
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  height: 10px;
+  margin: 0;
+  padding: 0;
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: ew-resize;
+}
+
+.audio-track-pan-inline::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 999px;
+  background:
+    linear-gradient(
+      90deg,
+      transparent 0 var(--pan-fill-start, 50%),
+      var(--pan-fill-color) var(--pan-fill-start, 50%) var(--pan-fill-end, 50%),
+      transparent var(--pan-fill-end, 50%) 100%
+    ),
+    linear-gradient(
+      90deg,
+      var(--pan-track-bg) 0 49%,
+      var(--pan-center-line) 49% 51%,
+      var(--pan-track-bg) 51% 100%
+    );
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+
+.audio-track-pan-inline::-webkit-slider-thumb {
+  width: 8px;
+  height: 8px;
+  margin-top: -2.5px;
+  border: 1px solid rgba(3, 6, 10, 0.96);
+  border-radius: 999px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: #9bbdff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+}
+
+.audio-track-pan-inline::-moz-range-track {
+  height: 3px;
+  border-radius: 999px;
+  background:
+    linear-gradient(
+      90deg,
+      transparent 0 var(--pan-fill-start, 50%),
+      var(--pan-fill-color) var(--pan-fill-start, 50%) var(--pan-fill-end, 50%),
+      transparent var(--pan-fill-end, 50%) 100%
+    ),
+    linear-gradient(
+      90deg,
+      var(--pan-track-bg) 0 49%,
+      var(--pan-center-line) 49% 51%,
+      var(--pan-track-bg) 51% 100%
+    );
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+
+.audio-track-pan-inline::-moz-range-progress {
+  background: transparent;
+}
+
+.audio-track-pan-inline::-moz-range-thumb {
+  width: 8px;
+  height: 8px;
+  border: 1px solid rgba(3, 6, 10, 0.96);
+  border-radius: 999px;
+  background: #9bbdff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+}
+
+.audio-track-pan-inline:focus-visible {
+  outline: 1px solid rgba(139, 208, 255, 0.5);
+  outline-offset: 2px;
+}
+
+.audio-track-pan-value {
+  width: 24px;
+  overflow: hidden;
+  color: rgba(160, 196, 255, 0.9);
+  font-size: 8px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  line-height: 1;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.track-header.mixer > .track-header-top {
+  padding-right: max(66px, calc(84px * var(--audio-strip-control-scale, 1)));
+  padding-left: 4px;
+}
+
+.track-header.audio.audio-layer-advanced.audio-strip-full:not(.audio-summary-meter-visible) > .track-header-top {
+  align-items: flex-start;
+  padding-right: 4px;
+  padding-bottom: 22px;
+}
+
+.track-header.mixer.audio-strip-condensed > .track-header-top {
+  padding-right: 96px;
+}
+
+.track-header.mixer .track-header-main {
+  flex-wrap: wrap;
+  align-items: center;
+  align-content: center;
+  row-gap: 2px;
+  padding-left: 50px;
+  box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
+}
+
+.track-header.mixer .track-header-main > .track-name {
+  max-width: 100%;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.track-header.audio.audio-layer-advanced.audio-strip-full:not(.audio-summary-meter-visible) .track-header-main {
+  align-content: flex-start;
+  padding-top: 8px;
+  padding-right: 86px;
+}
+
+.track-header.audio.audio-layer-advanced.audio-strip-full:not(.audio-summary-meter-visible) .audio-track-pan-footer {
+  position: absolute;
+  left: 50px;
+  right: 5px;
+  bottom: 7px;
+  z-index: 5;
+  width: auto;
+  margin-top: 0;
+  padding-right: 0;
+}
+
+.track-header.audio.audio-layer-advanced.audio-strip-full:not(.audio-summary-meter-visible) .audio-track-pan-value {
+  width: 20px;
+}
+
+.track-header.mixer.audio-strip-compact .track-header-main {
+  row-gap: 0;
+  padding-left: 22px;
+}
+
+.track-header.mixer.audio-strip-compact .track-header-main > .track-name {
+  font-size: 11px;
+}
+
+/* MIDI mixer tracks keep the original two-column compact fader layout that the
+   #182 mixer-parity work was built against (audio adopts staging's redesign below). */
+.track-header.midi.audio-strip-compact .audio-track-pan-row,
+.track-header.midi.audio-strip-condensed .audio-track-pan-row {
+  display: none;
+}
+
+.track-header.midi.audio-strip-compact .audio-track-faders {
+  top: 7px;
+  bottom: 7px;
+  width: 29px;
+  grid-template-columns: 12px 13px;
+  gap: 3px;
+}
+
+.track-header.midi.audio-strip-compact .audio-track-fader-column {
+  grid-template-rows: 1fr;
+}
+
+.track-header.midi.audio-strip-compact .audio-track-fader-control {
+  width: 12px;
+}
+
+.track-header.midi.audio-strip-compact .audio-track-fader {
+  inset: -5px;
+}
+
+.track-header.midi.audio-strip-compact .audio-track-fader-value {
+  display: none;
+}
+
+/* Audio tracks: staging's refined single-column compact layout. */
+.track-header.audio.audio-strip-condensed .audio-track-pan-row {
+  display: none;
+}
+
+.track-header.audio.audio-layer-advanced.audio-strip-compact:not(.audio-summary-meter-visible) > .track-header-top {
+  align-items: flex-start;
+  padding-right: 4px;
+  padding-bottom: 14px;
+}
+
+.track-header.audio.audio-layer-advanced.audio-strip-compact:not(.audio-summary-meter-visible) .track-header-main {
+  align-content: flex-start;
+  padding-top: 5px;
+  padding-right: 74px;
+}
+
+.track-header.audio.audio-layer-advanced.audio-strip-compact:not(.audio-summary-meter-visible) .audio-track-pan-footer {
+  position: absolute;
+  left: 22px;
+  right: 4px;
+  bottom: 2px;
+  z-index: 5;
+  width: auto;
+  margin-top: 0;
+  padding-right: 0;
+}
+
+.track-header.audio.audio-layer-advanced.audio-strip-compact:not(.audio-summary-meter-visible) .audio-track-pan-value {
+  width: 20px;
+}
+
+.track-header.audio.audio-strip-compact .audio-track-faders {
+  top: 7px;
+  bottom: 7px;
+  width: 12px;
+  grid-template-columns: 12px;
+  gap: 0;
+}
+
+.track-header.mixer.audio-strip-condensed .track-header-main {
+  flex-wrap: nowrap;
+  padding-left: 0;
+}
+
+.track-header.mixer.audio-strip-condensed .track-header-icon {
+  width: 10px;
+  height: 10px;
+}
+
+.track-header.mixer.audio-strip-condensed .track-header-main > .track-name {
+  font-size: 9px;
+  max-width: 78px;
+}
+
+.track-header.mixer.audio-strip-condensed .track-layer-id,
+.track-header.mixer.audio-strip-condensed .audio-track-faders {
+  display: none;
+}
+
+.track-header.mixer.audio-layer-basic > .track-header-top {
+  padding-left: 8px;
+  padding-right: 60px;
+}
+
+.track-header.mixer.audio-layer-basic .track-header-main {
+  flex-wrap: nowrap;
+  padding-left: 0;
+  gap: 4px;
+}
+
+.track-header.mixer.audio-layer-basic .track-header-main > .track-name {
+  max-width: 116px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.track-header.mixer.audio-layer-basic .track-controls,
+.track-header.mixer.audio-layer-basic.audio-strip-compact .track-controls {
+  grid-template-columns: repeat(3, 16px);
+  grid-auto-rows: 15px;
+  gap: 2px;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  transform-origin: center;
+}
+
+.track-header.mixer.audio-layer-basic .track-controls .btn-icon,
+.track-header.mixer.audio-layer-basic.audio-strip-compact .track-controls .btn-icon,
+.track-header.mixer.audio-layer-basic.audio-strip-condensed .track-controls .btn-icon {
+  width: 16px;
+  height: 15px;
+  min-width: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: none;
+  box-shadow: none;
+  font-size: 9px;
+  font-weight: inherit;
+}
+
+/* Solo is a loud, exclusive state - give it a filled amber chip on mixer
+   tracks (audio + MIDI) so it reads at a glance, matching the video header. */
+.track-header.mixer .track-controls .btn-icon.solo-active,
+.track-header.mixer.audio-layer-basic .track-controls .btn-icon.solo-active {
+  color: var(--warning);
+  background: rgba(243, 156, 18, 0.2);
+  border: 1px solid rgba(243, 156, 18, 0.5);
+  font-weight: bold;
+  opacity: 1;
+}
+
+.track-header.mixer.audio-layer-basic .track-controls .btn-icon.locked-active {
+  color: var(--warning);
+  opacity: 1;
+}
+
+.track-header.mixer.audio-layer-basic .track-controls .btn-icon:hover {
+  background: none;
+  border: 0;
+}
+
+.track-header.mixer.audio-layer-basic.audio-strip-condensed > .track-header-top {
+  padding-left: 8px;
+  padding-right: 60px;
+}
+
+.track-header.mixer.audio-layer-basic.audio-strip-condensed .track-controls {
+  grid-template-columns: repeat(3, 16px);
+  grid-auto-rows: 15px;
+  gap: 2px;
+  right: 4px;
+}
+
+.track-header.mixer.audio-layer-basic.audio-strip-condensed .track-header-main > .track-name {
+  max-width: 116px;
+  font-size: 11px;
+}
+
+.track-header.mixer.audio-layer-basic .audio-track-faders,
+.track-header.mixer.audio-layer-basic .audio-track-pan-row,
+.track-header.mixer.audio-layer-basic .audio-summary-background-meter {
+  display: none;
+}
+}

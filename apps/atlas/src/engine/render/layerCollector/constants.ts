@@ -1,0 +1,5 @@
+export const ENABLE_VISUAL_HTML_VIDEO_FALLBACK = false;
+export const SCRUB_GRACE_MS = 150;
+export const HTML_HOLD_RECOVERY_MS = 80;
+export const MAX_DRAG_FALLBACK_DRIFT_SECONDS = 0.35;
+export const MAX_DRAG_LIVE_IMPORT_DRIFT_SECONDS = 0.35;

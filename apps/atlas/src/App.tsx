@@ -1,0 +1,635 @@
+// WebVJ Mixer - Main Application
+
+// Changelog visibility controlled by Vite define:
+// npm run dev          → hidden (default)
+// npm run dev:changelog → shown
+// npm run build        → always shown
+declare const __SHOW_CHANGELOG__: boolean;
+const SHOW_CHANGELOG = typeof __SHOW_CHANGELOG__ !== 'undefined' ? __SHOW_CHANGELOG__ : true;
+
+import { useState, useCallback, useEffect, lazy, Suspense } from 'react';
+import { flushSync } from 'react-dom';
+import { Toolbar } from './components/common/Toolbar';
+import { DockContainer } from './components/dock';
+import { AccountDialog } from './components/common/AccountDialog';
+import { AuthDialog } from './components/common/AuthDialog';
+import { BillingSuccessCelebration } from './components/common/BillingSuccessCelebration';
+import { WelcomeOverlay } from './components/common/WelcomeOverlay';
+import { WhatsNewDialog } from './components/common/WhatsNewDialog';
+import { SplashScreen } from './components/common/SplashScreen';
+import { IndexedDBErrorDialog } from './components/common/IndexedDBErrorDialog';
+import { LinuxVulkanWarning } from './components/common/LinuxVulkanWarning';
+import { ProjectLoadProgressOverlay } from './components/common/ProjectLoadProgressOverlay';
+import { PricingDialog } from './components/common/PricingDialog';
+import { HistoryActionToast } from './components/common/HistoryActionToast';
+import { ShortcutDisplayOverlay } from './components/common/ShortcutDisplayOverlay';
+import { MuscriptorDialogHost } from './components/common/MuscriptorDialogHost';
+import { GuidedActionOverlay } from './components/guidedActions/GuidedActionOverlay';
+import { TutorialOverlay } from './components/common/TutorialOverlay';
+import { TutorialCampaignDialog } from './components/common/TutorialCampaignDialog';
+import { InteractiveTutorialOverlay } from './components/common/tutorial/InteractiveTutorialOverlay';
+import { TutorialSetupOverlay } from './components/common/tutorial/TutorialSetupOverlay';
+import {
+  getNextInteractiveCampaign,
+  INTERACTIVE_CAMPAIGNS,
+  isInteractiveCampaignId,
+  STARTUP_GUIDED_TUTORIAL_ID,
+} from './components/common/tutorial/interactiveCampaigns';
+import { getCampaignById } from './components/common/tutorialCampaigns';
+import type { CampaignStep } from './components/common/tutorialCampaigns';
+import { MobileApp } from './components/mobile';
+import { useTheme } from './hooks/useTheme';
+import { useGlobalSelectWheel } from './hooks/useGlobalSelectWheel';
+import { useBackNavigationGuard } from './hooks/useBackNavigationGuard';
+import { usePageZoom } from './hooks/usePageZoom';
+import { useGlobalHistory } from './hooks/useGlobalHistory';
+import { useClipPanelSync } from './hooks/useClipPanelSync';
+import { useIsMobile, useForceMobile } from './hooks/useIsMobile';
+import { useMIDIRuntime } from './hooks/useMIDIRuntime';
+import { useLiveInputFeedbackCoordinator } from './hooks/useLiveInputFeedbackCoordinator';
+import { usePointerFocusHandoff } from './hooks/usePointerFocusHandoff';
+import { useAccountStore } from './stores/accountStore';
+import { useSettingsStore } from './stores/settingsStore';
+import { useUiSettingsStore } from './stores/uiSettingsStore';
+import {
+  FACTORY_START_LAYOUT_ID,
+  START_CHROME_EXIT_DELAY_MS,
+  START_CHROME_TRANSITION_DURATION_MS,
+  START_CHROME_TRANSITION_EVENT,
+  START_LAYOUT_REVEAL_DURATION_MS,
+  useDockStore,
+} from './stores/dockStore';
+import { nodeContainsPanelType } from './stores/dockStore/layoutTree';
+import { projectDB } from './services/projectDB';
+import { projectFileService } from './services/projectFileService';
+import { audioRoutingManager } from './services/audioRoutingManager';
+import { APP_VERSION, shouldAutoShowChangelog } from './version';
+import './styles/app-shell.css';
+import './styles/shared-controls.css';
+
+// Dev test pages - lazy loaded to avoid bloating main bundle
+// Access via ?test=parallel-decode or ?test=flex-eq
+const ParallelDecodeTest = lazy(() =>
+  import('./test/ParallelDecodeTest').then(m => ({ default: m.ParallelDecodeTest }))
+);
+const FlexEqVisualQa = lazy(() =>
+  import('./test/FlexEqVisualQa').then(m => ({ default: m.FlexEqVisualQa }))
+);
+const KeyframeCurveVisualQa = lazy(() =>
+  import('./test/KeyframeCurveVisualQa').then(m => ({ default: m.KeyframeCurveVisualQa }))
+);
+
+function App() {
+  // Check for test mode via URL param
+  const urlParams = new URLSearchParams(window.location.search);
+  const testMode = urlParams.get('test');
+  const [redeemCode, setRedeemCode] = useState(() => urlParams.get('redeem')?.trim() ?? '');
+
+  // === ALL HOOKS MUST BE CALLED BEFORE ANY EARLY RETURNS ===
+
+  // Mobile detection
+  const isMobile = useIsMobile();
+  const forceMobile = useForceMobile();
+  const forceDesktopMode = useSettingsStore((s) => s.forceDesktopMode);
+  const isStartLayout = useDockStore((s) => (
+    s.activeSavedLayoutId === FACTORY_START_LAYOUT_ID
+    || nodeContainsPanelType(s.layout.root, 'start')
+  ));
+  const [toolbarTransition, setToolbarTransition] = useState<'entering' | 'exiting' | null>(null);
+  const [showStartTransitionBackground, setShowStartTransitionBackground] = useState(false);
+  const toolbarChromeState = toolbarTransition ?? (isStartLayout ? 'hidden' : 'visible');
+
+  useEffect(() => {
+    let timeoutId: number | null = null;
+    let backgroundTimeoutId: number | null = null;
+
+    const handleStartChromeTransition = (event: Event) => {
+      if (!(event instanceof CustomEvent)) return;
+      if (event.detail?.durationMs <= 0) return;
+      if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+
+      const nextTransition = event.detail?.direction === 'to-start'
+        ? 'exiting'
+        : event.detail?.direction === 'from-start'
+          ? 'entering'
+          : null;
+      if (!nextTransition) return;
+
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+      if (backgroundTimeoutId !== null) {
+        window.clearTimeout(backgroundTimeoutId);
+        backgroundTimeoutId = null;
+      }
+      flushSync(() => {
+        setToolbarTransition(nextTransition);
+        setShowStartTransitionBackground(nextTransition === 'entering');
+      });
+      if (nextTransition === 'entering') {
+        backgroundTimeoutId = window.setTimeout(() => {
+          setShowStartTransitionBackground(false);
+          backgroundTimeoutId = null;
+        }, event.detail.durationMs);
+      }
+      timeoutId = window.setTimeout(() => {
+        setToolbarTransition(null);
+        timeoutId = null;
+      }, (
+        START_CHROME_TRANSITION_DURATION_MS
+        + (nextTransition === 'exiting' ? START_CHROME_EXIT_DELAY_MS : 0)
+      ));
+    };
+
+    window.addEventListener(START_CHROME_TRANSITION_EVENT, handleStartChromeTransition);
+    return () => {
+      window.removeEventListener(START_CHROME_TRANSITION_EVENT, handleStartChromeTransition);
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+      if (backgroundTimeoutId !== null) {
+        window.clearTimeout(backgroundTimeoutId);
+      }
+    };
+  }, []);
+
+  // Apply theme to document root
+  useTheme();
+
+  // Scroll the mouse wheel over any native <select> to change its value instantly (#174)
+  useGlobalSelectWheel();
+
+  // Trap browser back/swipe so it never leaves the app (#200)
+  useBackNavigationGuard();
+
+  // Overall UI zoom slider + block browser Ctrl+wheel page zoom (#209)
+  usePageZoom();
+
+  // Release stale control focus when pointer interaction moves back to an editor surface.
+  usePointerFocusHandoff();
+
+  // Initialize global undo/redo system
+  const { historyNotice, clearHistoryNotice } = useGlobalHistory();
+
+  // Auto-switch panels based on clip selection
+  useClipPanelSync();
+
+  // Browser MIDI runtime
+  useMIDIRuntime();
+
+  // Keep composition-feedback streams aligned with mounted preview canvases.
+  useLiveInputFeedbackCoordinator();
+
+  const audioOutputDeviceId = useUiSettingsStore((s) => s.audioOutputDeviceId);
+  const audioLatencyHint = useUiSettingsStore((s) => s.audioLatencyHint);
+
+  useEffect(() => {
+    audioRoutingManager.setLatencyHint(audioLatencyHint);
+    void audioRoutingManager.setOutputDevice(audioOutputDeviceId);
+  }, [audioOutputDeviceId, audioLatencyHint]);
+
+  useEffect(() => {
+    const preventBrowserContextMenu = (event: MouseEvent) => {
+      event.preventDefault();
+    };
+
+    document.addEventListener('contextmenu', preventBrowserContextMenu, { capture: true });
+    return () => {
+      document.removeEventListener('contextmenu', preventBrowserContextMenu, { capture: true });
+    };
+  }, []);
+
+  // Check if there's a stored project in IndexedDB (the only allowed browser storage)
+  const [isChecking, setIsChecking] = useState(true);
+  const [hasStoredProject, setHasStoredProject] = useState(false);
+  const [manuallyDismissed, setManuallyDismissed] = useState(false);
+  const [startupOverlaysReady, setStartupOverlaysReady] = useState(() => !isStartLayout);
+
+  useEffect(() => {
+    if (isStartLayout) {
+      const frameId = window.requestAnimationFrame(() => {
+        setStartupOverlaysReady(false);
+      });
+      return () => window.cancelAnimationFrame(frameId);
+    }
+
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const timeoutId = window.setTimeout(() => {
+      setStartupOverlaysReady(true);
+    }, reduceMotion ? 0 : START_LAYOUT_REVEAL_DURATION_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [isStartLayout]);
+
+  // Splash screen state - shown on startup with video + notices
+  const [showSplash, setShowSplash] = useState(false);
+  // Changelog dialog state - full changelog with calendar + all changes
+  const [showChangelog, setShowChangelog] = useState(false);
+  const showChangelogOnStartup = useSettingsStore((s) => s.showChangelogOnStartup);
+  const lastSeenChangelogVersion = useSettingsStore((s) => s.lastSeenChangelogVersion);
+
+  // Tutorial completion state
+  const hasSeenTutorial = useSettingsStore((s) => s.hasSeenTutorial);
+  const setHasSeenTutorial = useSettingsStore((s) => s.setHasSeenTutorial);
+  const setHasSeenTutorialPart2 = useSettingsStore((s) => s.setHasSeenTutorialPart2);
+
+  // Campaign tutorial state
+  const [showCampaignDialog, setShowCampaignDialog] = useState(false);
+  const [showTutorialSetup, setShowTutorialSetup] = useState(false);
+  const [activeCampaign, setActiveCampaign] = useState<{ id: string; title: string; steps: CampaignStep[]; interactive?: boolean } | null>(null);
+  const completeTutorial = useSettingsStore((s) => s.completeTutorial);
+
+  // IndexedDB error dialog state
+  const [showIndexedDBError, setShowIndexedDBError] = useState(false);
+
+  // Load the optional non-AI YouTube integration credential on mount.
+  const loadIntegrationCredentials = useSettingsStore((s) => s.loadIntegrationCredentials);
+  useEffect(() => {
+    void loadIntegrationCredentials();
+  }, [loadIntegrationCredentials]);
+
+  const accountDialog = useAccountStore((s) => s.dialog);
+  const accountCreditBalance = useAccountStore((s) => s.creditBalance);
+  const closeAccountDialog = useAccountStore((s) => s.closeDialog);
+  const isAccountInitialized = useAccountStore((s) => s.isInitialized);
+  const loadAccountState = useAccountStore((s) => s.loadAccountState);
+  const openAccountDialog = useAccountStore((s) => s.openAccountDialog);
+  const [billingSuccessCelebration, setBillingSuccessCelebration] = useState<{
+    planId: string | null;
+    token: number;
+  } | null>(null);
+  const closeBillingSuccessCelebration = useCallback(() => {
+    setBillingSuccessCelebration(null);
+  }, []);
+  useEffect(() => {
+    void loadAccountState();
+  }, [loadAccountState]);
+
+  useEffect(() => {
+    if (!isAccountInitialized) {
+      return;
+    }
+
+    const currentUrl = new URL(window.location.href);
+    const authStatus = currentUrl.searchParams.get('auth');
+    const billingStatus = currentUrl.searchParams.get('billing');
+    const billingPlanId = currentUrl.searchParams.get('plan');
+    const showBillingSuccessPreview = currentUrl.searchParams.get('showBillingSuccess') === '1';
+
+    if (authStatus !== 'success' && billingStatus !== 'success' && !showBillingSuccessPreview) {
+      return;
+    }
+
+    const finalize = async () => {
+      await loadAccountState();
+      if (!showBillingSuccessPreview) {
+        openAccountDialog();
+      }
+      if (billingStatus === 'success' || showBillingSuccessPreview) {
+        setBillingSuccessCelebration({
+          planId: billingPlanId,
+          token: Date.now(),
+        });
+      }
+
+      currentUrl.searchParams.delete('auth');
+      currentUrl.searchParams.delete('billing');
+      currentUrl.searchParams.delete('plan');
+      currentUrl.searchParams.delete('showBillingSuccess');
+      window.history.replaceState({}, document.title, `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`);
+    };
+
+    void finalize();
+  }, [isAccountInitialized, loadAccountState, openAccountDialog]);
+
+  const clearRedeemCode = useCallback(() => {
+    const currentUrl = new URL(window.location.href);
+    currentUrl.searchParams.delete('offer');
+    currentUrl.searchParams.delete('offerPreview');
+    currentUrl.searchParams.delete('redeem');
+    window.history.replaceState({}, document.title, `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`);
+    setRedeemCode('');
+  }, []);
+
+  // Check for stored project on mount, then poll for changes
+  // This handles the case where Toolbar's restore fails and clears handles
+  useEffect(() => {
+    const checkProject = async () => {
+      // Check if IndexedDB has failed to initialize
+      if (projectDB.hasInitFailed()) {
+        setShowIndexedDBError(true);
+        setIsChecking(false);
+        return;
+      }
+
+      try {
+        // Check both: IndexedDB handle exists AND project is actually open
+        const hasHandle = await projectDB.hasLastProject();
+        const isOpen = projectFileService.isProjectOpen();
+        setHasStoredProject(hasHandle || isOpen);
+      } catch {
+        // If hasLastProject fails, IndexedDB is corrupted
+        if (projectDB.hasInitFailed()) {
+          setShowIndexedDBError(true);
+        }
+      }
+      setIsChecking(false);
+    };
+
+    checkProject();
+
+    // Poll for changes (handles cleared after failed restore)
+    // Using 2000ms interval to reduce CPU usage - project state changes are rare
+    const interval = setInterval(async () => {
+      // Check if IndexedDB has failed (could happen after initial load)
+      if (projectDB.hasInitFailed()) {
+        setShowIndexedDBError(true);
+        return;
+      }
+
+      try {
+        const hasHandle = await projectDB.hasLastProject();
+        const isOpen = projectFileService.isProjectOpen();
+        setHasStoredProject(hasHandle || isOpen);
+      } catch {
+        if (projectDB.hasInitFailed()) {
+          setShowIndexedDBError(true);
+        }
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  // Show welcome if no stored project and not manually dismissed this session
+  // Don't show while checking to avoid flash
+  const showWelcome = startupOverlaysReady
+    && !isStartLayout
+    && !isChecking
+    && !hasStoredProject
+    && !manuallyDismissed;
+  const shouldShowChangelogOnStartup = SHOW_CHANGELOG
+    && shouldAutoShowChangelog(showChangelogOnStartup, lastSeenChangelogVersion, APP_VERSION);
+  // Show Splash screen after initial check (when no welcome overlay)
+  // This effect intentionally sets state based on derived conditions
+  useEffect(() => {
+    if (!startupOverlaysReady || isStartLayout) return;
+    if (!shouldShowChangelogOnStartup) return;
+    if (isChecking) return;
+
+    // If welcome is showing, don't show splash yet
+    if (showWelcome) return;
+
+    // Show splash screen - this is intentional state sync, not a cascading render
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setShowSplash(true);
+  }, [isChecking, isStartLayout, showWelcome, shouldShowChangelogOnStartup, startupOverlaysReady]);
+
+  const activateTutorialCampaign = useCallback((campaignId: string) => {
+    const campaign = getCampaignById(campaignId);
+    if (!campaign) return false;
+    setShowCampaignDialog(false);
+    setActiveCampaign({
+      id: campaign.id,
+      title: campaign.title,
+      steps: campaign.steps,
+      interactive: campaign.interactive,
+    });
+    return true;
+  }, []);
+
+  const startTutorialSequence = useCallback(() => {
+    setShowCampaignDialog(false);
+    setActiveCampaign(null);
+    setShowTutorialSetup(true);
+  }, []);
+
+  const handleTutorialSetupComplete = useCallback(() => {
+    setShowTutorialSetup(false);
+    activateTutorialCampaign(STARTUP_GUIDED_TUTORIAL_ID);
+  }, [activateTutorialCampaign]);
+
+  const handleTutorialSetupCancel = useCallback(() => {
+    setShowTutorialSetup(false);
+    setHasSeenTutorial(true);
+    setHasSeenTutorialPart2(true);
+  }, [setHasSeenTutorial, setHasSeenTutorialPart2]);
+
+  const handleWelcomeComplete = useCallback(() => {
+    setManuallyDismissed(true);
+    setHasStoredProject(true); // Project was just created
+    // After welcome, show splash screen with small delay for animation
+    if (shouldShowChangelogOnStartup) {
+      setTimeout(() => setShowSplash(true), 300);
+    } else if (!hasSeenTutorial) {
+      // No splash → start tutorial directly
+      setTimeout(startTutorialSequence, 200);
+    }
+  }, [hasSeenTutorial, shouldShowChangelogOnStartup, startTutorialSequence]);
+
+  const handleSplashClose = useCallback(() => {
+    setShowSplash(false);
+    if (!hasSeenTutorial) {
+      setTimeout(startTutorialSequence, 200);
+    }
+  }, [hasSeenTutorial, startTutorialSequence]);
+
+  const handleSplashOpenChangelog = useCallback(() => {
+    setShowSplash(false);
+    setShowChangelog(true);
+  }, []);
+
+  const handleChangelogClose = useCallback(() => {
+    setShowChangelog(false);
+    if (!hasSeenTutorial) {
+      setTimeout(startTutorialSequence, 200);
+    }
+  }, [hasSeenTutorial, startTutorialSequence]);
+
+  // Campaign tutorial handlers
+  const handleStartCampaign = useCallback((campaignId: string) => {
+    activateTutorialCampaign(campaignId);
+  }, [activateTutorialCampaign]);
+
+  const handleCampaignClose = useCallback(() => {
+    if (activeCampaign) {
+      completeTutorial(activeCampaign.id);
+      if (activeCampaign.interactive) {
+        const nextCampaign = getNextInteractiveCampaign(activeCampaign.id);
+        if (nextCampaign) {
+          activateTutorialCampaign(nextCampaign.id);
+          return;
+        }
+      }
+      if (isInteractiveCampaignId(activeCampaign.id)) {
+        setHasSeenTutorial(true);
+        setHasSeenTutorialPart2(true);
+      }
+    }
+    setActiveCampaign(null);
+  }, [
+    activateTutorialCampaign,
+    activeCampaign,
+    completeTutorial,
+    setHasSeenTutorial,
+    setHasSeenTutorialPart2,
+  ]);
+
+  const handleCampaignSkip = useCallback(() => {
+    if (activeCampaign && isInteractiveCampaignId(activeCampaign.id)) {
+      setHasSeenTutorial(true);
+      setHasSeenTutorialPart2(true);
+    }
+    setActiveCampaign(null);
+  }, [activeCampaign, setHasSeenTutorial, setHasSeenTutorialPart2]);
+
+  const handleCampaignCancel = useCallback(() => {
+    if (activeCampaign && isInteractiveCampaignId(activeCampaign.id)) {
+      setHasSeenTutorial(true);
+      setHasSeenTutorialPart2(true);
+    }
+    setActiveCampaign(null);
+  }, [activeCampaign, setHasSeenTutorial, setHasSeenTutorialPart2]);
+
+  // Listen for manual tutorial trigger from Info menu
+  useEffect(() => {
+    const handleStartTutorial = () => {
+      startTutorialSequence();
+    };
+    const handleOpenCampaignDialog = () => {
+      setShowCampaignDialog(true);
+    };
+    window.addEventListener('start-tutorial', handleStartTutorial);
+    window.addEventListener('open-tutorial-campaigns', handleOpenCampaignDialog);
+    return () => {
+      window.removeEventListener('start-tutorial', handleStartTutorial);
+      window.removeEventListener('open-tutorial-campaigns', handleOpenCampaignDialog);
+    };
+  }, [startTutorialSequence]);
+
+  const handleIndexedDBErrorClose = useCallback(() => {
+    setShowIndexedDBError(false);
+  }, []);
+
+  // === EARLY RETURNS AFTER ALL HOOKS ===
+
+  // Test mode - wrapped in Suspense for lazy-loaded component
+  if (testMode === 'parallel-decode') {
+    return (
+      <Suspense fallback={<div style={{ padding: 20 }}>Loading test...</div>}>
+        <ParallelDecodeTest />
+      </Suspense>
+    );
+  }
+
+  if (testMode === 'flex-eq') {
+    return (
+      <Suspense fallback={<div style={{ padding: 20 }}>Loading test...</div>}>
+        <FlexEqVisualQa />
+      </Suspense>
+    );
+  }
+
+  if (testMode === 'keyframe-curve') {
+    return (
+      <Suspense fallback={<div style={{ padding: 20 }}>Loading test...</div>}>
+        <KeyframeCurveVisualQa />
+      </Suspense>
+    );
+  }
+
+  // Show mobile UI unless user explicitly requested desktop mode
+  const showMobileUI = !isStartLayout && (isMobile || forceMobile) && !forceDesktopMode;
+  if (showMobileUI) {
+    return <MobileApp />;
+  }
+
+  const activeInteractiveCampaign = activeCampaign?.interactive
+    ? INTERACTIVE_CAMPAIGNS.find((campaign) => campaign.id === activeCampaign.id) ?? null
+    : null;
+
+  return (
+    <div
+      className={[
+        'app',
+        isStartLayout ? 'app--start-layout' : 'app--editor-layout',
+        `app--toolbar-${toolbarChromeState}`,
+      ].filter(Boolean).join(' ')}
+    >
+      {!isStartLayout && <LinuxVulkanWarning />}
+      {showStartTransitionBackground && (
+        <div className="app-start-transition-background" aria-hidden="true" />
+      )}
+      <Toolbar onOpenChangelog={() => setShowChangelog(true)} onOpenSplash={() => setShowSplash(true)} />
+      <DockContainer />
+      {!isStartLayout && (
+        <>
+          <GuidedActionOverlay />
+          <ShortcutDisplayOverlay />
+          <ProjectLoadProgressOverlay />
+          <MuscriptorDialogHost />
+          <HistoryActionToast notice={historyNotice} onDone={clearHistoryNotice} />
+          {showWelcome && (
+            <WelcomeOverlay onComplete={handleWelcomeComplete} noFadeOnClose />
+          )}
+          {showSplash && startupOverlaysReady && (
+            <SplashScreen onClose={handleSplashClose} onOpenChangelog={handleSplashOpenChangelog} />
+          )}
+          {showChangelog && (
+            <WhatsNewDialog onClose={handleChangelogClose} />
+          )}
+          {showIndexedDBError && (
+            <IndexedDBErrorDialog onClose={handleIndexedDBErrorClose} />
+          )}
+          {showCampaignDialog && (
+            <TutorialCampaignDialog
+              onClose={() => setShowCampaignDialog(false)}
+              onStartCampaign={handleStartCampaign}
+            />
+          )}
+          {showTutorialSetup && (
+            <TutorialSetupOverlay
+              onCancel={handleTutorialSetupCancel}
+              onComplete={handleTutorialSetupComplete}
+            />
+          )}
+          {activeInteractiveCampaign ? (
+            <InteractiveTutorialOverlay
+              key={`interactive-${activeInteractiveCampaign.id}`}
+              campaign={activeInteractiveCampaign}
+              onCancel={handleCampaignCancel}
+              onClose={handleCampaignClose}
+              onSkip={handleCampaignSkip}
+            />
+          ) : activeCampaign && !activeCampaign.interactive ? (
+            <TutorialOverlay
+              key={`campaign-${activeCampaign.id}`}
+              onClose={handleCampaignClose}
+              onSkip={handleCampaignSkip}
+              campaignSteps={activeCampaign.steps}
+              campaignTitle={activeCampaign.title}
+            />
+          ) : null}
+          {accountDialog === 'auth' && <AuthDialog onClose={closeAccountDialog} />}
+          {accountDialog === 'pricing' && <PricingDialog onClose={closeAccountDialog} />}
+          {accountDialog === 'account' && (
+            <AccountDialog
+              initialRedeemCode={redeemCode}
+              onClose={closeAccountDialog}
+              onRedeemed={clearRedeemCode}
+            />
+          )}
+          {billingSuccessCelebration && (
+            <BillingSuccessCelebration
+              creditBalance={accountCreditBalance}
+              onClose={closeBillingSuccessCelebration}
+              planId={billingSuccessCelebration.planId}
+              key={billingSuccessCelebration.token}
+            />
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+export default App;

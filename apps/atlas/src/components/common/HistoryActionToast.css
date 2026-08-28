@@ -1,0 +1,53 @@
+@layer overlays {
+.history-action-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 18px;
+  z-index: calc(var(--z-overlay) + 1);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: fit-content;
+  max-width: min(420px, calc(100vw - 32px));
+  min-width: 220px;
+  min-height: 42px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+  box-shadow: var(--shadow-lg);
+  color: var(--text-primary);
+  pointer-events: none;
+  transform: translateX(-50%);
+  animation: history-action-toast-fade 500ms ease-in 1000ms forwards;
+}
+
+.history-action-toast-operation {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: var(--font-sm);
+  font-weight: var(--font-medium);
+}
+
+.history-action-toast-label {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: var(--font-md);
+  font-weight: var(--font-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes history-action-toast-fade {
+  from {
+    opacity: 1;
+    transform: translateX(-50%);
+  }
+
+  to {
+    opacity: 0;
+    transform: translate(-50%, 4px);
+  }
+}
+}

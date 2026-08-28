@@ -1,0 +1,471 @@
+import type { TempoMap, TimelineClip, TimelineTrack } from '../../../../types/timeline';
+import type { TimelineToolId, TimelineToolPreview } from '../../../../stores/timeline/types';
+import type { TimelineEditOperation } from '../../../../stores/timeline/editOperations/types';
+import {
+  collectBarsGridSnapTimes,
+  type TimelineGridSubdivision,
+} from '../../../../timeline/tempo/barsGrid';
+import { isTimelineSnappingActive } from '../../utils/timelineSnappingModifiers';
+
+export const TIMELINE_TOOL_SNAP_THRESHOLD_PX = 10;
+
+export interface TimelineClipPointerContext {
+  toolId: TimelineToolId;
+  clip: TimelineClip;
+  track: TimelineTrack;
+  clips: TimelineClip[];
+  playheadPosition: number;
+  snappingEnabled: boolean;
+  displayStartTime: number;
+  displayDuration: number;
+  width: number;
+  clientX: number;
+  rectLeft: number;
+  altKey: boolean;
+  shiftKey: boolean;
+  // Tempo grid (issue #299, §3.5). Optional so call sites that predate the
+  // feature keep today's clip-edge/playhead snapping unchanged; supplying a
+  // tempoMap with barsLaneEnabled adds the same bar/beat candidates the clip
+  // drag path uses, so both paths snap to what the grid draws.
+  tempoMap?: TempoMap;
+  barsLaneEnabled?: boolean;
+  gridSubdivision?: TimelineGridSubdivision;
+}
+
+export interface TimelineClipPointerDispatchResult {
+  handled: boolean;
+  preview?: TimelineToolPreview | null;
+  operation?: TimelineEditOperation;
+  nextToolId?: TimelineToolId;
+}
+
+export interface TimelineToolCursorIconDefinition {
+  paths: string[];
+  hotspotX: number;
+  hotspotY: number;
+}
+
+export function isTimelineBladeTool(toolId: TimelineToolId): toolId is 'blade' | 'blade-all-tracks' {
+  return toolId === 'blade' || toolId === 'blade-all-tracks';
+}
+
+export function isTimelineGlueTool(toolId: TimelineToolId): toolId is 'glue' {
+  return toolId === 'glue';
+}
+
+export function isTimelineTrackSelectTool(
+  toolId: TimelineToolId,
+): toolId is 'track-select-forward' | 'track-select-backward' | 'track-select-forward-all' {
+  return toolId === 'track-select-forward' ||
+    toolId === 'track-select-backward' ||
+    toolId === 'track-select-forward-all';
+}
+
+export function isTimelinePointerTool(toolId: TimelineToolId): boolean {
+  return isTimelineBladeTool(toolId) ||
+    isTimelineGlueTool(toolId) ||
+    isTimelineTrackSelectTool(toolId) ||
+    toolId === 'range-select' ||
+    toolId === 'edge-trim' ||
+    toolId === 'ripple-trim' ||
+    toolId === 'rolling-edit' ||
+    toolId === 'slip' ||
+    toolId === 'slide' ||
+    toolId === 'rate-stretch' ||
+    toolId === 'position-overwrite' ||
+    toolId === 'hand' ||
+    toolId === 'zoom' ||
+    toolId === 'pen-keyframe';
+}
+
+function createIconCursor(
+  paths: string[],
+  fallback: string,
+  hotspotX = 8,
+  hotspotY = 8,
+): string {
+  const content = paths.join('');
+  const svg = [
+    '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">',
+    '<g transform="translate(4 4)" fill="none" stroke-linecap="round" stroke-linejoin="round">',
+    `<g stroke="white" stroke-width="5">${content}</g>`,
+    `<g stroke="#111827" stroke-width="2.35">${content}</g>`,
+    '</g>',
+    '</svg>',
+  ].join('');
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}") ${hotspotX} ${hotspotY}, ${fallback}`;
+}
+
+const CURSOR_PATHS = {
+  pointer: [
+    '<path d="M5 3l14 9-6 1.5 3.5 6-3 1.7-3.4-6-4.1 4z" />',
+  ],
+  blade: [
+    '<path d="M16 4l-7 16" />',
+    '<path d="M8 20h7" />',
+    '<path d="M13 4h6" />',
+  ],
+  bladeAllTracks: [
+    '<path d="M5 6h14" />',
+    '<path d="M5 12h14" />',
+    '<path d="M5 18h14" />',
+    '<path d="M15 4l-6 16" />',
+  ],
+  glue: [
+    '<path d="M9.5 7L12 3l2.5 4z" />',
+    '<path d="M10.5 7v2" />',
+    '<path d="M13.5 7v2" />',
+    '<path d="M10.5 9Q7 9.5 7 13v6q0 2 2 2h6q2 0 2-2v-6q0-3.5-3.5-4z" />',
+    '<path d="M9 15.5h6" />',
+  ],
+  trackForward: [
+    '<path d="M4 6h10" />',
+    '<path d="M4 12h13" />',
+    '<path d="M4 18h10" />',
+    '<path d="M17 8l4 4-4 4" />',
+  ],
+  trackBackward: [
+    '<path d="M10 6h10" />',
+    '<path d="M7 12h13" />',
+    '<path d="M10 18h10" />',
+    '<path d="M7 8l-4 4 4 4" />',
+  ],
+  range: [
+    '<rect x="5" y="5" width="14" height="14" rx="2" />',
+    '<path d="M9 5v14" />',
+    '<path d="M15 5v14" />',
+  ],
+  trim: [
+    '<path d="M7 5v14" />',
+    '<path d="M17 5v14" />',
+    '<path d="M10 8h4" />',
+    '<path d="M10 16h4" />',
+  ],
+  rippleTrim: [
+    '<path d="M6 5v14" />',
+    '<path d="M10 8h8" />',
+    '<path d="M10 16h8" />',
+    '<path d="M15 11l3 3-3 3" />',
+  ],
+  rolling: [
+    '<path d="M11 5v14" />',
+    '<path d="M13 5v14" />',
+    '<path d="M4 9h5" />',
+    '<path d="M15 9h5" />',
+    '<path d="M8 7l2 2-2 2" />',
+    '<path d="M16 7l-2 2 2 2" />',
+  ],
+  slip: [
+    '<path d="M5 7h14" />',
+    '<path d="M5 17h14" />',
+    '<path d="M9 12h6" />',
+    '<path d="M9 12l2-2" />',
+    '<path d="M9 12l2 2" />',
+    '<path d="M15 12l-2-2" />',
+    '<path d="M15 12l-2 2" />',
+  ],
+  slide: [
+    '<path d="M4 8h5" />',
+    '<path d="M15 8h5" />',
+    '<path d="M8 16h8" />',
+    '<path d="M8 16l2-2" />',
+    '<path d="M8 16l2 2" />',
+    '<path d="M16 16l-2-2" />',
+    '<path d="M16 16l-2 2" />',
+  ],
+  stretch: [
+    '<path d="M4 12h16" />',
+    '<path d="M8 8l-4 4 4 4" />',
+    '<path d="M16 8l4 4-4 4" />',
+    '<path d="M12 5v14" />',
+  ],
+  hand: [
+    '<path d="M8 12V7a2 2 0 0 1 4 0v5" />',
+    '<path d="M12 11V5a2 2 0 0 1 4 0v7" />',
+    '<path d="M16 12V8a2 2 0 0 1 4 0v6" />',
+    '<path d="M8 12l-1-1.5a2 2 0 0 0-3.4 2.1l4 6.2A5 5 0 0 0 12 21h4a5 5 0 0 0 5-5v-2" />',
+  ],
+  zoom: [
+    '<circle cx="10" cy="10" r="6" />',
+    '<path d="M14.5 14.5L21 21" />',
+    '<path d="M10 7v6" />',
+    '<path d="M7 10h6" />',
+  ],
+  marker: [
+    '<path d="M12 21s7-5.3 7-11a7 7 0 1 0-14 0c0 5.7 7 11 7 11z" />',
+    '<circle cx="12" cy="10" r="2" />',
+  ],
+  pen: [
+    '<path d="M4 20l4-1 11-11a2 2 0 0 0-3-3L5 16z" />',
+    '<path d="M13 6l5 5" />',
+  ],
+} satisfies Record<string, string[]>;
+
+const TIMELINE_TOOL_CURSOR_ICONS = {
+  select: undefined,
+  'track-select-forward': { paths: CURSOR_PATHS.trackForward, hotspotX: 19, hotspotY: 16 },
+  'track-select-backward': { paths: CURSOR_PATHS.trackBackward, hotspotX: 5, hotspotY: 16 },
+  'track-select-forward-all': { paths: CURSOR_PATHS.trackForward, hotspotX: 19, hotspotY: 16 },
+  'range-select': { paths: CURSOR_PATHS.range, hotspotX: 16, hotspotY: 16 },
+  blade: { paths: CURSOR_PATHS.blade, hotspotX: 12, hotspotY: 12 },
+  'blade-all-tracks': { paths: CURSOR_PATHS.bladeAllTracks, hotspotX: 12, hotspotY: 12 },
+  glue: { paths: CURSOR_PATHS.glue, hotspotX: 16, hotspotY: 7 },
+  'split-at-playhead': { paths: CURSOR_PATHS.blade, hotspotX: 12, hotspotY: 12 },
+  'split-all-at-playhead': { paths: CURSOR_PATHS.bladeAllTracks, hotspotX: 12, hotspotY: 12 },
+  'trim-start-to-playhead': { paths: CURSOR_PATHS.trim, hotspotX: 16, hotspotY: 16 },
+  'trim-end-to-playhead': { paths: CURSOR_PATHS.trim, hotspotX: 16, hotspotY: 16 },
+  'ripple-trim-start-to-playhead': { paths: CURSOR_PATHS.rippleTrim, hotspotX: 16, hotspotY: 16 },
+  'ripple-trim-end-to-playhead': { paths: CURSOR_PATHS.rippleTrim, hotspotX: 16, hotspotY: 16 },
+  'ripple-delete': undefined,
+  'delete-gap': undefined,
+  'lift-range': undefined,
+  'extract-range': undefined,
+  'edge-trim': { paths: CURSOR_PATHS.trim, hotspotX: 16, hotspotY: 16 },
+  'ripple-trim': { paths: CURSOR_PATHS.rippleTrim, hotspotX: 16, hotspotY: 16 },
+  'rolling-edit': { paths: CURSOR_PATHS.rolling, hotspotX: 16, hotspotY: 16 },
+  slip: { paths: CURSOR_PATHS.slip, hotspotX: 16, hotspotY: 16 },
+  slide: { paths: CURSOR_PATHS.slide, hotspotX: 16, hotspotY: 16 },
+  'rate-stretch': { paths: CURSOR_PATHS.stretch, hotspotX: 16, hotspotY: 16 },
+  'position-overwrite': { paths: CURSOR_PATHS.pointer, hotspotX: 6, hotspotY: 5 },
+  insert: undefined,
+  overwrite: undefined,
+  replace: undefined,
+  'fit-to-fill': undefined,
+  'append-at-end': undefined,
+  'place-on-top': undefined,
+  'ripple-overwrite': undefined,
+  hand: { paths: CURSOR_PATHS.hand, hotspotX: 12, hotspotY: 12 },
+  zoom: { paths: CURSOR_PATHS.zoom, hotspotX: 10, hotspotY: 10 },
+  marker: { paths: CURSOR_PATHS.marker, hotspotX: 12, hotspotY: 21 },
+  'in-point': { paths: CURSOR_PATHS.trim, hotspotX: 9, hotspotY: 16 },
+  'out-point': { paths: CURSOR_PATHS.trim, hotspotX: 19, hotspotY: 16 },
+  'pen-keyframe': { paths: CURSOR_PATHS.pen, hotspotX: 5, hotspotY: 20 },
+  'midi-draw': { paths: CURSOR_PATHS.pen, hotspotX: 5, hotspotY: 20 },
+} satisfies Record<TimelineToolId, TimelineToolCursorIconDefinition | undefined>;
+
+const TIMELINE_TOOL_ICON_CURSORS = {
+  select: undefined,
+  'track-select-forward': createIconCursor(CURSOR_PATHS.trackForward, 'e-resize', TIMELINE_TOOL_CURSOR_ICONS['track-select-forward'].hotspotX, TIMELINE_TOOL_CURSOR_ICONS['track-select-forward'].hotspotY),
+  'track-select-backward': createIconCursor(CURSOR_PATHS.trackBackward, 'w-resize', TIMELINE_TOOL_CURSOR_ICONS['track-select-backward'].hotspotX, TIMELINE_TOOL_CURSOR_ICONS['track-select-backward'].hotspotY),
+  'track-select-forward-all': createIconCursor(CURSOR_PATHS.trackForward, 'copy', TIMELINE_TOOL_CURSOR_ICONS['track-select-forward-all'].hotspotX, TIMELINE_TOOL_CURSOR_ICONS['track-select-forward-all'].hotspotY),
+  'range-select': createIconCursor(CURSOR_PATHS.range, 'crosshair', TIMELINE_TOOL_CURSOR_ICONS['range-select'].hotspotX, TIMELINE_TOOL_CURSOR_ICONS['range-select'].hotspotY),
+  blade: createIconCursor(CURSOR_PATHS.blade, 'crosshair', TIMELINE_TOOL_CURSOR_ICONS.blade.hotspotX, TIMELINE_TOOL_CURSOR_ICONS.blade.hotspotY),
+  'blade-all-tracks': createIconCursor(CURSOR_PATHS.bladeAllTracks, 'crosshair', TIMELINE_TOOL_CURSOR_ICONS['blade-all-tracks'].hotspotX, TIMELINE_TOOL_CURSOR_ICONS['blade-all-tracks'].hotspotY),
+  glue: createIconCursor(CURSOR_PATHS.glue, 'crosshair', TIMELINE_TOOL_CURSOR_ICONS.glue.hotspotX, TIMELINE_TOOL_CURSOR_ICONS.glue.hotspotY),
+  'split-at-playhead': createIconCursor(CURSOR_PATHS.blade, 'crosshair', TIMELINE_TOOL_CURSOR_ICONS['split-at-playhead'].hotspotX, TIMELINE_TOOL_CURSOR_ICONS['split-at-playhead'].hotspotY),
+  'split-all-at-playhead': createIconCursor(CURSOR_PATHS.bladeAllTracks, 'crosshair', TIMELINE_TOOL_CURSOR_ICONS['split-all-at-playhead'].hotspotX, TIMELINE_TOOL_CURSOR_ICONS['split-all-at-playhead'].hotspotY),
+  'trim-start-to-playhead': createIconCursor(CURSOR_PATHS.trim, 'ew-resize', TIMELINE_TOOL_CURSOR_ICONS['trim-start-to-playhead'].hotspotX, TIMELINE_TOOL_CURSOR_ICONS['trim-start-to-playhead'].hotspotY),
+  'trim-end-to-playhead': createIconCursor(CURSOR_PATHS.trim, 'ew-resize', TIMELINE_TOOL_CURSOR_ICONS['trim-end-to-playhead'].hotspotX, TIMELINE_TOOL_CURSOR_ICONS['trim-end-to-playhead'].hotspotY),
+  'ripple-trim-start-to-playhead': createIconCursor(CURSOR_PATHS.rippleTrim, 'ew-resize', TIMELINE_TOOL_CURSOR_ICONS['ripple-trim-start-to-playhead'].hotspotX, TIMELINE_TOOL_CURSOR_ICONS['ripple-trim-start-to-playhead'].hotspotY),
+  'ripple-trim-end-to-playhead': createIconCursor(CURSOR_PATHS.rippleTrim, 'ew-resize', TIMELINE_TOOL_CURSOR_ICONS['ripple-trim-end-to-playhead'].hotspotX, TIMELINE_TOOL_CURSOR_ICONS['ripple-trim-end-to-playhead'].hotspotY),
+  'ripple-delete': undefined,
+  'delete-gap': undefined,
+  'lift-range': undefined,
+  'extract-range': undefined,
+  'edge-trim': createIconCursor(CURSOR_PATHS.trim, 'ew-resize', 16, 16),
+  'ripple-trim': createIconCursor(CURSOR_PATHS.rippleTrim, 'ew-resize', 16, 16),
+  'rolling-edit': createIconCursor(CURSOR_PATHS.rolling, 'ew-resize', 16, 16),
+  slip: createIconCursor(CURSOR_PATHS.slip, 'move', 16, 16),
+  slide: createIconCursor(CURSOR_PATHS.slide, 'move', 16, 16),
+  'rate-stretch': createIconCursor(CURSOR_PATHS.stretch, 'ew-resize', 16, 16),
+  'position-overwrite': createIconCursor(CURSOR_PATHS.pointer, 'move', 6, 5),
+  insert: undefined,
+  overwrite: undefined,
+  replace: undefined,
+  'fit-to-fill': undefined,
+  'append-at-end': undefined,
+  'place-on-top': undefined,
+  'ripple-overwrite': undefined,
+  hand: createIconCursor(CURSOR_PATHS.hand, 'grab', 12, 12),
+  zoom: createIconCursor(CURSOR_PATHS.zoom, 'zoom-in', 10, 10),
+  marker: createIconCursor(CURSOR_PATHS.marker, 'copy', 12, 21),
+  'in-point': createIconCursor(CURSOR_PATHS.trim, 'crosshair', 9, 16),
+  'out-point': createIconCursor(CURSOR_PATHS.trim, 'crosshair', 19, 16),
+  'pen-keyframe': createIconCursor(CURSOR_PATHS.pen, 'crosshair', 5, 20),
+  'midi-draw': createIconCursor(CURSOR_PATHS.pen, 'crosshair', 5, 20),
+} satisfies Record<TimelineToolId, string | undefined>;
+
+export function getTimelineToolCursor(toolId: TimelineToolId): string | undefined {
+  return TIMELINE_TOOL_ICON_CURSORS[toolId];
+}
+
+export function getTimelineToolCursorIcon(toolId: TimelineToolId): TimelineToolCursorIconDefinition | undefined {
+  return TIMELINE_TOOL_CURSOR_ICONS[toolId];
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function getSnapTargets(clips: TimelineClip[], playheadPosition: number): number[] {
+  const targets = [playheadPosition];
+  for (const clip of clips) {
+    targets.push(clip.startTime, clip.startTime + clip.duration);
+  }
+  return targets;
+}
+
+export function resolveTimelineClipPointerTime(context: TimelineClipPointerContext): {
+  rawTime: number;
+  time: number;
+  snapped: boolean;
+} {
+  const width = Math.max(1, context.width);
+  const displayDuration = Math.max(0.001, context.displayDuration);
+  const localX = clamp(context.clientX - context.rectLeft, 0, width);
+  const rawTime = context.displayStartTime + (localX / width) * displayDuration;
+  const shouldSnap = isTimelineSnappingActive(context.snappingEnabled, context);
+
+  if (!shouldSnap) {
+    return { rawTime, time: rawTime, snapped: false };
+  }
+
+  const snapThresholdTime = (TIMELINE_TOOL_SNAP_THRESHOLD_PX / width) * displayDuration;
+  let nearestTarget = rawTime;
+  let nearestDistance = Infinity;
+
+  const targets = getSnapTargets(context.clips, context.playheadPosition);
+  if (context.barsLaneEnabled && context.tempoMap) {
+    targets.push(...collectBarsGridSnapTimes({
+      tempoMap: context.tempoMap,
+      zoom: width / displayDuration,
+      centerTime: rawTime,
+      radiusSeconds: snapThresholdTime,
+      subdivision: context.gridSubdivision,
+    }));
+  }
+
+  for (const target of targets) {
+    const distance = Math.abs(target - rawTime);
+    if (distance <= snapThresholdTime && distance < nearestDistance) {
+      nearestTarget = target;
+      nearestDistance = distance;
+    }
+  }
+
+  return {
+    rawTime,
+    time: nearestTarget,
+    snapped: nearestTarget !== rawTime,
+  };
+}
+
+export function dispatchTimelineClipPointerMove(
+  context: TimelineClipPointerContext,
+): TimelineClipPointerDispatchResult {
+  if (isTimelineTrackSelectTool(context.toolId)) {
+    const { rawTime } = resolveTimelineClipPointerTime({
+      ...context,
+      snappingEnabled: false,
+      altKey: false,
+      shiftKey: false,
+    });
+    return {
+      handled: true,
+      preview: {
+        toolId: context.toolId,
+        plane: context.toolId === 'track-select-forward-all' ? 'section-scrolled' : 'clip-local',
+        clipId: context.clip.id,
+        trackId: context.track.id,
+        time: rawTime,
+      },
+    };
+  }
+
+  if (!isTimelineBladeTool(context.toolId)) return { handled: false };
+
+  if (context.track.locked === true) {
+    return {
+      handled: true,
+      preview: {
+        toolId: context.toolId,
+        plane: 'clip-local',
+        clipId: context.clip.id,
+        trackId: context.track.id,
+        blocked: true,
+        message: 'Track is locked.',
+      },
+    };
+  }
+
+  const { time } = resolveTimelineClipPointerTime(context);
+  return {
+    handled: true,
+    preview: {
+      toolId: context.toolId,
+      plane: context.toolId === 'blade-all-tracks' ? 'section-scrolled' : 'clip-local',
+      clipId: context.clip.id,
+      trackId: context.track.id,
+      time,
+    },
+  };
+}
+
+export function dispatchTimelineClipPointerClick(
+  context: TimelineClipPointerContext,
+): TimelineClipPointerDispatchResult {
+  if (isTimelineTrackSelectTool(context.toolId)) {
+    const { rawTime } = resolveTimelineClipPointerTime({
+      ...context,
+      snappingEnabled: false,
+      altKey: false,
+      shiftKey: false,
+    });
+    return {
+      handled: true,
+      operation: {
+        id: `${context.toolId}:${context.track.id}:${rawTime}`,
+        type: 'select-clips-from-time',
+        time: rawTime,
+        direction: context.toolId === 'track-select-backward' ? 'backward' : 'forward',
+        trackIds: context.toolId === 'track-select-forward-all' ? undefined : [context.track.id],
+        includeLinked: true,
+      },
+    };
+  }
+
+  if (isTimelineGlueTool(context.toolId)) {
+    // Cubase-style glue: click any MIDI clip to merge its contiguous run of
+    // touching/overlapping clips (a gap breaks the run). Alt-click force-merges
+    // every following clip, gaps included. Non-MIDI/locked → no-op.
+    if (context.track.locked === true || context.clip.source?.type !== 'midi') {
+      return { handled: false };
+    }
+    return {
+      handled: true,
+      operation: {
+        id: `glue:${context.clip.id}:${context.altKey ? 'all' : 'run'}`,
+        type: 'merge-midi-clips',
+        clipId: context.clip.id,
+        allFollowing: context.altKey,
+      },
+    };
+  }
+
+  if (!isTimelineBladeTool(context.toolId)) return { handled: false };
+
+  if (context.track.locked === true) {
+    return dispatchTimelineClipPointerMove(context);
+  }
+
+  const { time } = resolveTimelineClipPointerTime(context);
+  const operation: TimelineEditOperation = context.toolId === 'blade-all-tracks'
+    ? {
+        id: `blade-all-tracks:${time}`,
+        type: 'split-all-at-time',
+        time,
+        includeLinked: true,
+      }
+    : {
+        id: `blade:${context.clip.id}:${time}`,
+        type: 'split-at-time',
+        clipIds: [context.clip.id],
+        time,
+        includeLinked: true,
+      };
+
+  return {
+    handled: true,
+    operation,
+  };
+}
