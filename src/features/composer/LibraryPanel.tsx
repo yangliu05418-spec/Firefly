@@ -11,10 +11,13 @@ import { usePendingAssetPreviews } from "../../use-pending-asset-previews";
 import { RecoveringThumbnail } from "../../recovering-image";
 import { persistPrivateMediaStorage } from "../../private-media-cache";
 
-export function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
+type AtlasProjectAsset = { id: string; kind: "image" | "video" | "audio"; fileName: string; size: number; status: string; mediaUrl?: string };
+
+export function LibraryPanel({ add, atlasProjectId }: { add: (asset: UploadAsset) => void; atlasProjectId?: string }) {
   const userId = useAssetCacheUserId();
   const [groups, setGroups] = useState<LibraryGroup[]>([defaultAssetLibraryGroup]);
   const [assets, setAssets] = useState<LibraryAsset[]>([]);
+  const [atlasAssets, setAtlasAssets] = useState<AtlasProjectAsset[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -32,13 +35,16 @@ export function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
       const freshRequest = Promise.allSettled([
         api.get<{ Items?: LibraryGroup[] }>("/api/assets/groups"),
         api.get<{ Items?: LibraryAsset[]; HasMore?: boolean }>("/api/assets?pageSize=100"),
+        ...(atlasProjectId ? [api.get<{ items: AtlasProjectAsset[] }>(`/api/atlas/projects/${encodeURIComponent(atlasProjectId)}/assets?limit=100`)] : []),
       ]);
       const cached = await assetMetadataCache.read(userId);
       if (active && cached.length) {
         setAssets(cached);
         setLoading(false);
       }
-      const [groupResult, assetResult] = await freshRequest;
+      const results = await freshRequest;
+      const groupResult = results[0]!;
+      const assetResult = results[1]!;
       if (!active) return;
       if (groupResult.status === "fulfilled") setGroups(assetLibraryGroupsOrDefault(groupResult.value.Items));
       if (assetResult.status === "fulfilled") {
@@ -46,13 +52,15 @@ export function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
         setAssets(fresh);
         void (assetResult.value.HasMore ? assetMetadataCache.merge(userId, fresh) : assetMetadataCache.replace(userId, fresh));
       }
+      const atlasResult = results[2] as PromiseSettledResult<{ items: AtlasProjectAsset[] }> | undefined;
+      if (atlasResult?.status === "fulfilled") setAtlasAssets(atlasResult.value.items.filter((asset) => asset.status === "ready"));
       if (groupResult.status === "rejected" && assetResult.status === "rejected") {
         setError(cached.length ? "素材同步暂时中断，已显示本地缓存" : "素材空间暂时不可用");
       }
       setLoading(false);
     })();
     return () => { active = false; };
-  }, [userId]);
+  }, [userId, atlasProjectId]);
 
   useEffect(() => () => {
     for (const controller of batchControllers.current) controller.abort();
@@ -150,6 +158,14 @@ export function LibraryPanel({ add }: { add: (asset: UploadAsset) => void }) {
   return <div className="popover library-pop" onClick={(event) => event.stopPropagation()}>
     <div className="popover-title"><span><Library /> 可信角色库</span><small>AI 角色素材</small></div>
     {loading ? <div className="panel-state"><LoaderCircle className="spin" /> 正在读取角色库</div> : error && !groups.length ? <div className="panel-state panel-state--error">{error}</div> : <>
+      {!!atlasAssets.length && <><div className="library-section-title">当前 Atlas 项目</div><div className="library-list">{atlasAssets.map((asset) => <button key={asset.id} onClick={() => add({
+        id: asset.id, atlasProjectAssetId: asset.id, name: asset.fileName, type: asset.kind, size: asset.size,
+        role: asset.kind === "image" ? "reference_image" : asset.kind === "video" ? "reference_video" : "reference_audio",
+        progress: 100, phase: "ready", preview: asset.mediaUrl, status: "Active",
+      })}>
+        {asset.mediaUrl && asset.kind === "image" ? <RecoveringThumbnail src={asset.mediaUrl} alt={asset.fileName} fallbackClassName="library-thumb" manualRecovery={false} loading="lazy" decoding="async" /> : <span className="library-thumb"><Sparkles /></span>}
+        <span><b>{asset.fileName}</b><small>Atlas 项目素材 · 可直接引用</small></span><i className="status-dot status-active" />
+      </button>)}</div></>}
       {assets.length ? <div className="library-list">{assets.map((asset) => {
         const preview = assetPreviewSource(asset, pendingPreviews.get(asset.Id));
         return <button key={asset.Id} disabled={asset.Status !== "Active"} title={asset.Error} onClick={() => add({ id: asset.Id, uploadId: asset.UploadId, assetId: asset.Id, name: asset.Name || asset.Id, type: asset.AssetType.toLowerCase() as UploadAsset["type"], size: 0, role: asset.AssetType === "Image" ? "reference_image" : asset.AssetType === "Video" ? "reference_video" : "reference_audio", progress: 100, preview: asset.URL, status: asset.Status })}>

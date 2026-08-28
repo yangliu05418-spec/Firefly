@@ -295,8 +295,11 @@ export function FireflyAtlasApp() {
 
   const embeddedContext = useMemo(() => bootstrap ? {
     user: bootstrap.user,
+    projectId: activeProject?.id ?? '',
+    capabilities: { agent: bootstrap.capabilities.agent, generate: bootstrap.capabilities.generate },
+    getLeaseToken: () => leaseControllerRef.current?.getSnapshot().lease?.token ?? null,
     onBackToProjects: returnToDashboard,
-  } : undefined, [bootstrap, returnToDashboard]);
+  } : undefined, [activeProject?.id, bootstrap, returnToDashboard]);
 
   const retryLostLease = useCallback(async () => {
     const controller = leaseControllerRef.current;

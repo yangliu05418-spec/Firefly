@@ -16,6 +16,8 @@ export interface ProjectMediaFile {
 
   // Path to original file (absolute or relative to Raw/)
   sourcePath: string;
+  fireflyProjectAssetId?: string;
+  remoteSourcePath?: string;
 
   // Path to copied file in project folder (e.g., "Raw/video.mp4")
   projectPath?: string;

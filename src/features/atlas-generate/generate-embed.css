@@ -1,0 +1,18 @@
+html:has(.atlas-generate-embed), body:has(.atlas-generate-embed), body:has(.atlas-generate-embed) #root { min-height: 100%; background: #0d1015; }
+.atlas-generate-embed { min-height: 100vh; padding: 24px; color: #eef2f4; background: radial-gradient(circle at 16% 0%, rgba(188,221,210,.1), transparent 38%), #0d1015; }
+.atlas-generate-embed header { display:flex; align-items:center; justify-content:space-between; margin:0 auto 22px; max-width:980px; }
+.atlas-generate-embed header div { display:grid; gap:4px; }
+.atlas-generate-embed header small { color:#91a19d; letter-spacing:.18em; font-size:10px; }
+.atlas-generate-embed header b { font-family:ui-serif, Georgia, serif; font-size:25px; font-weight:500; }
+.atlas-generate-embed header button { width:36px; height:36px; display:grid; place-items:center; border:1px solid #2b333c; border-radius:50%; color:#d9e1e4; background:transparent; }
+.atlas-generate-composer { max-width:980px; margin:auto; }
+.atlas-generate-deliveries { max-width:980px; margin:14px auto 0; display:grid; gap:8px; }
+.atlas-generate-delivery { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:42px; padding:9px 12px; border:1px solid rgba(255,255,255,.1); border-radius:12px; color:#b8c3c7; background:rgba(24,29,36,.78); font-size:12px; }
+.atlas-generate-delivery.is-pending { justify-content:flex-start; }
+.atlas-generate-delivery.is-pending svg { width:16px; flex:0 0 auto; }
+.atlas-generate-delivery.is-failed { border-color:rgba(224,150,126,.3); color:#e2c2b8; }
+.atlas-generate-delivery button { flex:0 0 auto; padding:7px 11px; border:1px solid rgba(187,222,211,.38); border-radius:9px; color:#cbe3db; background:transparent; font:inherit; cursor:pointer; }
+.atlas-generate-delivery button:hover:not(:disabled), .atlas-generate-delivery button:focus-visible { border-color:#b9ded3; outline:none; }
+.atlas-generate-delivery button:disabled { opacity:.55; cursor:wait; }
+.atlas-generate-embed footer { max-width:980px; margin:16px auto 0; color:#7f8b92; font-size:12px; text-align:center; }
+.atlas-generate-state { min-height:100vh; display:flex; align-items:center; justify-content:center; gap:10px; flex-direction:column; color:#cad3d6; background:#0d1015; }

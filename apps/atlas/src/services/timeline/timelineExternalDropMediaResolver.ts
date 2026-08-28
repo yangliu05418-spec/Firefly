@@ -8,6 +8,7 @@ import { useMediaStore } from '../../stores/mediaStore';
 import { NativeHelperClient } from '../nativeHelper/NativeHelperClient';
 import { createPrimaryMediaObjectUrl } from '../project/mediaObjectUrlManager';
 import { Logger } from '../logger';
+import { materializeFireflyRemoteMedia } from '../project/firefly/FireflyRemoteMediaCache';
 
 const log = Logger.create('TimelineExternalDropMediaResolver');
 const TIMELINE_DROP_IMPORT_PLACEHOLDER_TIMEOUT_MS = 750;
@@ -161,6 +162,52 @@ export async function resolveTimelineDropMediaFile(params: {
 export async function resolveMediaFileForTimelineDrop(mediaFile: MediaFile): Promise<File | null> {
   if (mediaFile.file) {
     return mediaFile.file;
+  }
+
+  if (mediaFile.fireflyProjectAssetId && mediaFile.remoteSourcePath) {
+    useMediaStore.setState((state) => ({
+      files: state.files.map((currentFile) => currentFile.id === mediaFile.id
+        ? { ...currentFile, remoteCacheStatus: 'downloading', remoteCacheProgress: 0 }
+        : currentFile),
+    }));
+    try {
+      const materialized = await materializeFireflyRemoteMedia(mediaFile, {
+        onProgress: (progress) => {
+          useMediaStore.setState((state) => ({
+            files: state.files.map((currentFile) => currentFile.id === mediaFile.id
+              ? { ...currentFile, remoteCacheProgress: progress }
+              : currentFile),
+          }));
+        },
+      });
+      const url = createPrimaryMediaObjectUrl(mediaFile.id, materialized.file, { revokeExisting: false });
+      useMediaStore.setState((state) => ({
+        files: state.files.map((currentFile) => currentFile.id === mediaFile.id
+          ? {
+              ...currentFile,
+              file: materialized.file,
+              url,
+              projectPath: materialized.relativePath,
+              hasFileHandle: true,
+              remoteCacheStatus: 'ready',
+              remoteCacheProgress: 100,
+            }
+          : currentFile),
+      }));
+      return materialized.file;
+    } catch (error) {
+      useMediaStore.setState((state) => ({
+        files: state.files.map((currentFile) => currentFile.id === mediaFile.id
+          ? { ...currentFile, remoteCacheStatus: 'error' }
+          : currentFile),
+      }));
+      log.warn('Could not materialize Firefly project asset for timeline drop', {
+        mediaFileId: mediaFile.id,
+        fireflyProjectAssetId: mediaFile.fireflyProjectAssetId,
+        error,
+      });
+      return null;
+    }
   }
 
   if (mediaFile.type === 'model' || mediaFile.type === 'gaussian-splat') {

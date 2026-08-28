@@ -17,7 +17,7 @@ if (!root) {
 // StrictMode remains disabled because the original WebGPU runtime owns external
 // texture lifetimes and is not safe under React's development double mount.
 createRoot(root).render(
-  <I18nProvider>
+  <I18nProvider locale="zh-CN">
     <FireflyAtlasApp />
   </I18nProvider>,
 );

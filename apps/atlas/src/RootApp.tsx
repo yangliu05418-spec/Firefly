@@ -1,14 +1,18 @@
 import { lazy, Suspense, type CSSProperties } from 'react';
-import { LegalDialog } from './components/common/LegalDialog';
 import type { FireflyEmbeddedToolbarContext } from './components/common/Toolbar';
 import type { EntryExperience } from './routing/entryExperience';
 
-const EditorApp = lazy(() => import('./App'));
-const AdminPage = lazy(() =>
+const IS_FIREFLY_VARIANT = import.meta.env.VITE_APP_VARIANT === 'firefly';
+const FireflyEditorApp = lazy(() => import('./FireflyEmbeddedEditor'));
+const EditorApp = IS_FIREFLY_VARIANT ? null : lazy(() => import('./App'));
+const AdminPage = IS_FIREFLY_VARIANT ? null : lazy(() =>
   import('./admin/AdminPage').then((module) => ({ default: module.AdminPage }))
 );
-const CreditClaimPage = lazy(() =>
+const CreditClaimPage = IS_FIREFLY_VARIANT ? null : lazy(() =>
   import('./creditClaims/CreditClaimPage').then((module) => ({ default: module.CreditClaimPage }))
+);
+const LegalDialog = IS_FIREFLY_VARIANT ? null : lazy(() =>
+  import('./components/common/LegalDialog').then((module) => ({ default: module.LegalDialog }))
 );
 
 export interface RootAppProps {
@@ -35,12 +39,12 @@ export function RootApp({ initialExperience, fireflyEmbedded }: RootAppProps) {
   if (fireflyEmbedded) {
     return (
       <Suspense fallback={<div style={loadingShellStyle}>正在打开 Atlas…</div>}>
-        <EditorApp fireflyEmbedded={fireflyEmbedded} />
+        <FireflyEditorApp fireflyEmbedded={fireflyEmbedded} />
       </Suspense>
     );
   }
 
-  if (initialExperience === 'admin') {
+  if (initialExperience === 'admin' && AdminPage) {
     return (
       <Suspense fallback={<div style={loadingShellStyle}>Opening secure operations...</div>}>
         <AdminPage />
@@ -48,7 +52,7 @@ export function RootApp({ initialExperience, fireflyEmbedded }: RootAppProps) {
     );
   }
 
-  if (initialExperience === 'imprint' || initialExperience === 'privacy') {
+  if ((initialExperience === 'imprint' || initialExperience === 'privacy') && LegalDialog) {
     const legalPath = window.location.pathname.replace(/\/$/, '');
     return (
       <LegalDialog
@@ -59,7 +63,7 @@ export function RootApp({ initialExperience, fireflyEmbedded }: RootAppProps) {
     );
   }
 
-  if (initialExperience === 'creditClaim') {
+  if (initialExperience === 'creditClaim' && CreditClaimPage) {
     return (
       <Suspense fallback={<div style={loadingShellStyle}>Opening credit claim...</div>}>
         <CreditClaimPage />
@@ -69,7 +73,7 @@ export function RootApp({ initialExperience, fireflyEmbedded }: RootAppProps) {
 
   return (
     <Suspense fallback={<div style={loadingShellStyle}>Opening MasterSelects...</div>}>
-      <EditorApp />
+      {EditorApp ? <EditorApp /> : <div style={loadingShellStyle}>Atlas 编辑器只能从 Firefly 项目打开。</div>}
     </Suspense>
   );
 }

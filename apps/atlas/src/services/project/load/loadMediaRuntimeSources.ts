@@ -280,7 +280,7 @@ export async function hydrateProjectMediaRuntimeSources(
   const nativeRepresentativeUrl =
     !hydrateFiles && representativeProjectPath ? resolveProjectRawFileUrl(representativeProjectPath) ?? '' : '';
   const representativeUrl =
-    url || modelSequence?.frames[0]?.modelUrl || gaussianSplatSequence?.frames[0]?.splatUrl || nativeRepresentativeUrl || '';
+    url || modelSequence?.frames[0]?.modelUrl || gaussianSplatSequence?.frames[0]?.splatUrl || nativeRepresentativeUrl || pm.remoteSourcePath || '';
   const representativeAbsolutePath =
     resolveProjectRawFilePath(representativeProjectPath) ??
     (isAbsoluteFilePath(pm.sourcePath) ? pm.sourcePath : undefined) ??
