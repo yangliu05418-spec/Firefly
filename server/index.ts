@@ -64,7 +64,7 @@ const verifyAtlasStaticBundle = async () => {
   await Promise.all(referencedAssets.map((asset) => fs.access(path.join(atlasDir, "assets", asset))));
   const assets = await fs.readdir(path.join(atlasDir, "assets"));
   const requiredRuntimeAssets = [
-    ["editor", /^App-[A-Za-z0-9._-]+\.js$/],
+    ["Firefly editor", /^FireflyEmbeddedEditor-[A-Za-z0-9._-]+\.js$/],
     ["project lifecycle", /^projectLifecycle-[A-Za-z0-9._-]+\.js$/],
     ["timeline worker", /^timelineClipCanvas\.worker-[A-Za-z0-9._-]+\.js$/],
     ["export panel", /^ExportPanel-[A-Za-z0-9._-]+\.js$/],

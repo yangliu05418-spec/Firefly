@@ -269,6 +269,8 @@ jobs:
       - run: npm run typecheck
       - run: npm run test:firefly-release
       - run: npm run build
+        env:
+          VITE_APP_VARIANT: firefly
       - name: Enforce the Atlas initial-route budget
         shell: bash
         run: |
@@ -295,8 +297,8 @@ jobs:
             return { path, bytes: gzipSync(readFileSync(path), { level: 9 }).byteLength };
           };
           const editorOpen = {
-            appJs: editorChunk(/^App-.*\.js$/),
-            appCss: editorChunk(/^App-.*\.css$/),
+            appJs: editorChunk(/^FireflyEmbeddedEditor-.*\.js$/),
+            appCss: editorChunk(/^FireflyEmbeddedEditor-.*\.css$/),
             projectLifecycle: editorChunk(/^projectLifecycle-.*\.js$/),
           };
           console.log(JSON.stringify({ initialGzipBytes, largestInitialChunkGzipBytes, chunks, editorOpen }, null, 2));
@@ -441,7 +443,7 @@ jobs:
 
           test "$(docker run --rm firefly-ci:${{ github.sha }} sh -c 'test -s /app/dist-atlas/index.html && echo ok')" = ok
           docker run --rm firefly-ci:${{ github.sha }} sh -c '
-            find /app/dist-atlas/assets -maxdepth 1 -type f -name "App-*.js" -size +100k | grep -q . &&
+            find /app/dist-atlas/assets -maxdepth 1 -type f -name "FireflyEmbeddedEditor-*.js" -size +100k | grep -q . &&
             find /app/dist-atlas/assets -maxdepth 1 -type f -name "projectLifecycle-*.js" -size +1M | grep -q . &&
             find /app/dist-atlas/assets -maxdepth 1 -type f -name "timelineClipCanvas.worker-*.js" | grep -q . &&
             find /app/dist-atlas/assets -maxdepth 1 -type f -name "ExportPanel-*.js" | grep -q .

@@ -31,6 +31,18 @@ if (forbiddenAssets.length > 0) {
   throw new Error(`Firefly Atlas contains disabled local-AI assets: ${forbiddenAssets.join(', ')}`);
 }
 
+const requiredRuntimeAssets = [
+  /^FireflyEmbeddedEditor-.*\.js$/,
+  /^projectLifecycle-.*\.js$/,
+  /^timelineClipCanvas\.worker-.*\.js$/,
+  /^ExportPanel-.*\.js$/,
+];
+for (const pattern of requiredRuntimeAssets) {
+  if (!assets.some((name) => pattern.test(name))) {
+    throw new Error(`Firefly Atlas runtime asset is missing: ${pattern}`);
+  }
+}
+
 const html = readFileSync(join(distDir, 'index.html'), 'utf8');
 if (!html.includes('/studio/atlas/')) {
   throw new Error('Atlas index was not built for the /studio/atlas/ base path.');
