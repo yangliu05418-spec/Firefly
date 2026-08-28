@@ -1,5 +1,6 @@
 import type { MouseEventHandler } from 'react';
 import type { TimelineTrackFocusMode } from '../../../stores/timeline/types';
+import { originalUi } from '../../../firefly/i18n/originalUi';
 
 interface TimelineSplitDividerProps {
   audioLayerAdvancedMode: boolean;
@@ -21,14 +22,14 @@ export function TimelineSplitDivider({
   return (
     <div
       className={`timeline-split-divider ${isDragging ? 'dragging' : ''}`}
-      aria-label="Timeline split controls"
+      aria-label={originalUi('original.timelineSplitControls', 'Timeline split controls')}
     >
       <div
         className="timeline-split-divider-hitbox"
         onMouseDown={onMouseDown}
         role="separator"
         aria-orientation="horizontal"
-        aria-label="Resize video and audio track sections"
+        aria-label={originalUi('original.resizeTrackSections', 'Resize video and audio track sections')}
       />
       <div className="timeline-split-divider-controls">
         <button
@@ -37,7 +38,7 @@ export function TimelineSplitDivider({
           onClick={() => onTrackFocusStep('up')}
           onMouseDown={(event) => event.stopPropagation()}
           disabled={trackFocusMode === 'audio'}
-          title={trackFocusMode === 'audio' ? 'Already in audio focus' : 'Move track focus up'}
+          title={originalUi('original.focusUp', trackFocusMode === 'audio' ? 'Already in audio focus' : 'Move track focus up')}
         >
           <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
             <path d="M4 10l4-4 4 4" />
@@ -49,7 +50,7 @@ export function TimelineSplitDivider({
           onClick={() => onTrackFocusStep('down')}
           onMouseDown={(event) => event.stopPropagation()}
           disabled={trackFocusMode === 'video'}
-          title={trackFocusMode === 'video' ? 'Already in video focus' : 'Move track focus down'}
+          title={originalUi('original.focusDown', trackFocusMode === 'video' ? 'Already in video focus' : 'Move track focus down')}
         >
           <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
             <path d="M4 6l4 4 4-4" />
@@ -64,7 +65,9 @@ export function TimelineSplitDivider({
           }}
           onMouseDown={(event) => event.stopPropagation()}
           aria-pressed={audioLayerAdvancedMode}
-          title={audioLayerAdvancedMode ? 'Hide advanced audio layer controls' : 'Show advanced audio layer controls'}
+          title={audioLayerAdvancedMode
+            ? originalUi('original.hideAdvancedAudio', 'Hide advanced audio layer controls')
+            : originalUi('original.showAdvancedAudio', 'Show advanced audio layer controls')}
         >
           <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
             <path d="M1.8 8s2.2-4 6.2-4 6.2 4 6.2 4-2.2 4-6.2 4-6.2-4-6.2-4z" />

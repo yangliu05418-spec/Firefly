@@ -15,6 +15,8 @@ describe('Firefly localization boundary for the original Atlas editor', () => {
     expect(originalUi('original.mediaDuration', 'Duration')).toBe('时长');
     expect(originalUi('original.timelineTools', 'Timeline tools')).toBe('时间线工具');
     expect(originalUi('original.previewComposition', 'Composition preview')).toBe('合成预览');
+    expect(originalUi('original.alpha', 'Alpha')).toBe('透明通道');
+    expect(originalUi('original.timelineSplitControls', 'Timeline split controls')).toBe('时间线分区控制');
   });
 
   it('preserves upstream labels outside the Firefly variant', async () => {

@@ -18,6 +18,7 @@ import type {
   ExportBasicsOptionState,
   ExportBasicsVideoState,
 } from './exportBasicsTypes';
+import { originalUi } from '../../../firefly/i18n/originalUi';
 
 const IS_FIREFLY_VARIANT = import.meta.env.VITE_APP_VARIANT === 'firefly';
 const ui = (zh: string, en: string) => IS_FIREFLY_VARIANT ? zh : en;
@@ -393,8 +394,12 @@ export function ExportVideoControls({
 
       <div className="export-field-card export-subcard" data-export-target="video-alpha">
         <div className="export-field-head">
-          <span>{mode.isGifMode ? ui('透明度', 'Transparency') : 'Alpha'}</span>
-          <strong>{mode.isGifMode ? (gif.gifTransparency ? `Threshold ${gif.gifAlphaThreshold}` : 'Opaque') : video.stackedAlpha ? 'Stacked' : 'Off'}</strong>
+          <span>{mode.isGifMode ? ui('透明度', 'Transparency') : originalUi('original.alpha', 'Alpha')}</span>
+          <strong>{mode.isGifMode
+            ? (gif.gifTransparency ? `Threshold ${gif.gifAlphaThreshold}` : 'Opaque')
+            : video.stackedAlpha
+              ? ui('堆叠', 'Stacked')
+              : originalUi('original.off', 'Off')}</strong>
         </div>
         <div className="export-chip-row">
           {!mode.isGifMode && (

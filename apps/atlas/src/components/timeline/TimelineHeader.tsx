@@ -213,7 +213,7 @@ function TimelineHeaderComponent({
               }`}
               title={isExpanded
                 ? originalUi('original.collapseProperties', 'Collapse properties')
-                : originalUi('original.collapseProperties', 'Expand properties')}
+                : originalUi('original.expandProperties', 'Expand properties')}
               onClick={(event) => {
                 event.stopPropagation();
                 onToggleExpand();
@@ -292,14 +292,14 @@ function TimelineHeaderComponent({
             <button
               className={`btn-icon ${!track.visible ? 'hidden' : ''}`}
               onClick={(e) => { e.stopPropagation(); onToggleVisible(); }}
-              title={track.visible ? 'Hide' : 'Show'}
+              title={track.visible ? originalUi('original.hideTrack', 'Hide') : originalUi('original.showTrack', 'Show')}
             >
               <TrackHeaderIcon name={track.visible ? 'eye' : 'eyeOff'} />
             </button>
             <button
               className={`btn-icon ${track.locked ? 'locked-active' : ''}`}
               onClick={(e) => { e.stopPropagation(); onToggleLocked?.(); }}
-              title={track.locked ? 'Unlock Track' : 'Lock Track'}
+              title={track.locked ? originalUi('original.unlockTrack', 'Unlock Track') : originalUi('original.lockTrack', 'Lock Track')}
             >
               <TrackHeaderIcon name={track.locked ? 'lock' : 'unlock'} />
             </button>
@@ -310,7 +310,7 @@ function TimelineHeaderComponent({
             className={`track-resize-handle ${isResizeActive ? 'active' : ''}`}
             role="separator"
             aria-orientation="horizontal"
-            title="Drag to resize track height"
+            title={originalUi('original.resizeTrackHeight', 'Drag to resize track height')}
             onPointerDown={(event) => onResizeStart(event, track.id)}
           />
         )}

@@ -1,4 +1,5 @@
 import type { CSSProperties, RefObject } from 'react';
+import { originalUi } from '../../../firefly/i18n/originalUi';
 
 interface TimelinePlayheadOverlayProps {
   inlineStyle: CSSProperties | undefined;
@@ -22,7 +23,7 @@ export function TimelinePlayheadOverlay({
       ref={playheadRef}
       className={`playhead ${switchMotionClass}`}
       data-ai-id="timeline-playhead"
-      aria-label="Timeline playhead"
+      aria-label={originalUi('original.playhead', 'Timeline playhead')}
       style={inlineStyle}
       onMouseDown={onMouseDown}
     >
