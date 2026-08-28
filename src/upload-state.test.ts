@@ -16,6 +16,18 @@ describe("attached upload readiness", () => {
     expect(areAttachedUploadsAdmissible([upload(), upload({ id: "asset-1", assetId: "asset-1", phase: undefined, status: "Active" })])).toBe(true);
   });
 
+  it("accepts a ready immutable snapshot reference without an upload id", () => {
+    expect(areAttachedUploadsAdmissible([upload({ uploadId: undefined, snapshotReferenceId: "snapshot-1" })])).toBe(true);
+  });
+
+  it("does not accept a snapshot reference before it is ready", () => {
+    expect(areAttachedUploadsAdmissible([upload({ uploadId: undefined, snapshotReferenceId: "snapshot-1", phase: "verifying" })])).toBe(false);
+  });
+
+  it("does not bypass a higher-priority snapshot reference with a lower-priority upload", () => {
+    expect(areAttachedUploadsAdmissible([upload({ snapshotReferenceId: "snapshot-1", phase: "verifying" })])).toBe(false);
+  });
+
   it("rejects provider assets that are still processing", () => {
     expect(areAttachedUploadsAdmissible([upload({ id: "asset-1", assetId: "asset-1", phase: undefined, status: "Processing" })])).toBe(false);
   });
