@@ -1,8 +1,8 @@
 [extend]
 useDefault = true
 
-# Atlas inherited two redaction tests that intentionally contain inert,
-# synthetic OpenAI-shaped strings. Limit the exception to those exact test
+# Atlas inherited three security tests that intentionally contain inert,
+# synthetic credential-shaped strings. Limit the exception to those exact test
 # files; all shipped source and every other fixture remains under the default
 # Gitleaks rules.
 # CI is pinned to Gitleaks 8.24.3, whose global allowlist syntax is singular.
