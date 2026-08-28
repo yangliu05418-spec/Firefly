@@ -8,7 +8,7 @@ import type {
 
 // Panel types that can be docked
 // Note: Effects, Transcript, Analysis are now integrated into Properties panel
-export type PanelType = 'start' | 'preview' | 'multi-preview' | 'timeline' | 'clip-properties' | 'history' | 'audio-mixer' | 'node-workspace' | 'media' | 'export' | 'midi-mapping' | 'capture' | 'ai-segment' | 'scene-description' | 'transitions' | 'scope-waveform' | 'scope-histogram' | 'scope-vectorscope';
+export type PanelType = 'start' | 'preview' | 'multi-preview' | 'timeline' | 'clip-properties' | 'history' | 'audio-mixer' | 'node-workspace' | 'media' | 'export' | 'midi-mapping' | 'capture' | 'atlas-agent' | 'ai-segment' | 'scene-description' | 'transitions' | 'scope-waveform' | 'scope-histogram' | 'scope-vectorscope';
 export type DockLayoutTransitionStaggerMode = 'puzzle' | 'sequence';
 export type DockLayoutStartTransitionDirection = 'to-start' | 'from-start';
 
@@ -24,10 +24,12 @@ export const WIP_PANEL_TYPES: PanelType[] = [];
 export const MULTI_INSTANCE_PANEL_TYPES: PanelType[] = ['preview'];
 
 // AI panel types for View menu grouping
-export const AI_PANEL_TYPES: PanelType[] = ['ai-segment', 'scene-description'];
+export const AI_PANEL_TYPES: PanelType[] = ['atlas-agent', 'ai-segment', 'scene-description'];
 
 // Registered for saved-layout compatibility, but intentionally absent from panel pickers.
-export const PANEL_PICKER_HIDDEN_TYPES: PanelType[] = ['start', 'scene-description'];
+export const PANEL_PICKER_HIDDEN_TYPES: PanelType[] = import.meta.env.VITE_APP_VARIANT === 'firefly'
+  ? ['start', 'multi-preview', 'node-workspace', 'midi-mapping', 'capture', 'ai-segment', 'scene-description', 'scope-waveform', 'scope-histogram', 'scope-vectorscope']
+  : ['start', 'atlas-agent', 'scene-description'];
 
 export type PreviewPanelSource =
   | RenderSourceActiveComp
@@ -274,6 +276,13 @@ export const PANEL_CONFIGS: Record<PanelType, PanelConfig> = {
     icon: 'Blend',
     minWidth: 200,
     minHeight: 200,
+    closable: false,
+  },
+  'atlas-agent': {
+    type: 'atlas-agent',
+    title: 'Atlas Agent',
+    minWidth: 320,
+    minHeight: 360,
     closable: false,
   },
   'ai-segment': {

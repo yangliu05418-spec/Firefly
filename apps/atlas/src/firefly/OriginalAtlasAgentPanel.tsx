@@ -1,0 +1,201 @@
+import { useEffect, useRef, useState } from 'react';
+import { saveCurrentProject } from '../services/projectSync';
+import { projectFileService } from '../services/projectFileService';
+import { useFireflyEmbedding } from './FireflyEmbeddingContext';
+import {
+  originalAtlasAgentApi,
+  type AtlasAgentPlan,
+  type AtlasAgentRun,
+} from './OriginalAtlasAgentClient';
+import {
+  applyOriginalAtlasAgentPlan,
+  createOriginalAtlasAgentSnapshot,
+  originalAtlasAgentSemanticFingerprint,
+  validateOriginalAtlasAgentPlan,
+} from './OriginalAtlasAgentRuntime';
+import './OriginalAtlasAgentPanel.css';
+
+type PanelStatus = 'idle' | 'saving' | 'planning' | 'ready' | 'applying' | 'reporting' | 'completed' | 'failed';
+
+const errorMessage = (code?: string) => ({
+  AGENT_PROVIDER_TIMEOUT: 'Agent 响应超时，请重试。',
+  AGENT_PROVIDER_RATE_LIMITED: 'Agent 当前请求较多，请稍后重试。',
+  AGENT_LEASE_LOST: '项目编辑权已失效，请重新接管。',
+  AGENT_REVISION_CONFLICT: '时间线已发生变化，请重新生成计划。',
+  OPERATION_REPLAY_CONFLICT: '操作回执冲突，已停止执行以保护项目。',
+} as Record<string, string>)[code ?? ''] ?? 'Atlas Agent 暂时无法完成该操作。';
+
+const wait = (delayMs: number) => new Promise((resolve) => window.setTimeout(resolve, delayMs));
+
+export default function OriginalAtlasAgentPanel() {
+  const embedding = useFireflyEmbedding();
+  const [instruction, setInstruction] = useState('');
+  const [status, setStatus] = useState<PanelStatus>('idle');
+  const [run, setRun] = useState<AtlasAgentRun | null>(null);
+  const [plan, setPlan] = useState<AtlasAgentPlan | null>(null);
+  const [error, setError] = useState('');
+  const [submittedFingerprint, setSubmittedFingerprint] = useState('');
+  const generationRef = useRef(0);
+  const appliedRef = useRef<{
+    planDigest: string;
+    historyNodeId: string;
+    nextReceiptIndex: number;
+    leaseToken: string;
+  } | null>(null);
+
+  useEffect(() => () => { generationRef.current += 1; }, []);
+
+  if (!embedding?.capabilities.agent) {
+    return <div className="original-atlas-agent original-atlas-agent--empty"><strong>Atlas Agent 尚未开放</strong><span>当前项目仍可正常剪辑和生成素材。</span></div>;
+  }
+
+  const poll = async (runId: string, generation: number) => {
+    const deadline = Date.now() + 8 * 60_000;
+    while (generation === generationRef.current && Date.now() < deadline) {
+      const current = await originalAtlasAgentApi.readRun(embedding.projectId, runId);
+      if (generation !== generationRef.current) return;
+      setRun(current);
+      if (current.plan) {
+        const validation = validateOriginalAtlasAgentPlan(current.plan);
+        if (validation) throw new Error(validation);
+        setPlan(current.plan);
+        setStatus('ready');
+        return;
+      }
+      if (current.status === 'failed' || current.status === 'cancelled') throw new Error(errorMessage(current.errorCode));
+      await wait(1_500);
+    }
+    throw new Error('Agent 规划超时，请重试。');
+  };
+
+  const submit = async () => {
+    const normalized = instruction.trim();
+    if (!normalized || ['saving', 'planning', 'applying', 'reporting'].includes(status)) return;
+    const generation = ++generationRef.current;
+    appliedRef.current = null;
+    setError(''); setPlan(null); setRun(null); setStatus('saving');
+    try {
+      const saved = await saveCurrentProject({ source: 'manual', label: 'Atlas Agent 规划前保存' });
+      if (!saved) throw new Error('项目未能保存到本机，请重试。');
+      const cloud = await projectFileService.flushFireflyCloudSave();
+      if (cloud.status === 'error') throw new Error(cloud.errorMessage ?? '云端检查点保存失败，请重试。');
+      const snapshot = createOriginalAtlasAgentSnapshot(cloud.revision);
+      setSubmittedFingerprint(originalAtlasAgentSemanticFingerprint(snapshot));
+      setStatus('planning');
+      const created = await originalAtlasAgentApi.createRun(embedding.projectId, {
+        instruction: normalized,
+        baseRevision: cloud.revision,
+        snapshot,
+        idempotencyKey: crypto.randomUUID(),
+      });
+      if (generation !== generationRef.current) return;
+      setRun(created);
+      if (created.plan) {
+        const validation = validateOriginalAtlasAgentPlan(created.plan);
+        if (validation) throw new Error(validation);
+        setPlan(created.plan); setStatus('ready');
+      } else await poll(created.id, generation);
+    } catch (caught) {
+      if (generation !== generationRef.current) return;
+      setError(caught instanceof Error ? caught.message : 'Atlas Agent 暂时不可用。');
+      setStatus('failed');
+    }
+  };
+
+  const cancel = async () => {
+    if (appliedRef.current) {
+      setError('剪辑已经应用，当前只能继续同步执行结果或使用撤销。');
+      return;
+    }
+    generationRef.current += 1;
+    if (run && ['queued', 'planning', 'ready', 'awaiting_confirmation'].includes(run.status)) {
+      await originalAtlasAgentApi.cancelRun(embedding.projectId, run.id).catch(() => undefined);
+    }
+    setRun(null); setPlan(null); setError(''); setStatus('idle');
+  };
+
+  const reportAppliedPlan = async (activePlan: AtlasAgentPlan, activeRun: AtlasAgentRun) => {
+    const applied = appliedRef.current;
+    if (!applied || applied.planDigest !== activePlan.planDigest) throw new Error('Agent 执行状态已失效，请撤销后重新规划。');
+    setStatus('reporting');
+    while (applied.nextReceiptIndex < activePlan.operations.length) {
+      const operation = activePlan.operations[applied.nextReceiptIndex]!;
+      const priorEditApplied = applied.nextReceiptIndex > 0;
+      await originalAtlasAgentApi.reportResult(embedding.projectId, activeRun.id, {
+        sequence: operation.sequence,
+        planDigest: activePlan.planDigest,
+        status: 'succeeded',
+        result: { changed: true, operationKey: operation.operationKey },
+        beforeRevision: activePlan.baseRevision + (priorEditApplied ? 1 : 0),
+        afterRevision: activePlan.baseRevision + 1,
+        historyNodeId: applied.historyNodeId,
+        leaseToken: applied.leaseToken,
+      });
+      applied.nextReceiptIndex += 1;
+    }
+    appliedRef.current = null;
+    setStatus('completed'); setInstruction(''); setPlan(null);
+  };
+
+  const apply = async () => {
+    if (!plan || !run) return;
+    if (appliedRef.current) {
+      setError('');
+      try { await reportAppliedPlan(plan, run); }
+      catch (caught) { setError(caught instanceof Error ? caught.message : '执行结果同步失败。'); setStatus('failed'); }
+      return;
+    }
+    const leaseToken = embedding.getLeaseToken?.();
+    if (!leaseToken) { setError('项目处于只读状态，请先接管编辑权。'); setStatus('failed'); return; }
+    setError(''); setStatus('applying');
+    try {
+      const cloud = projectFileService.getFireflyCloudSaveState();
+      if (!cloud || cloud.revision !== plan.baseRevision) throw new Error('项目版本已经变化，请重新生成计划。');
+      const currentSnapshot = createOriginalAtlasAgentSnapshot(cloud.revision);
+      if (originalAtlasAgentSemanticFingerprint(currentSnapshot) !== submittedFingerprint) {
+        throw new Error('规划期间时间线已被修改，请重新生成计划。');
+      }
+      if (plan.operations.some((operation) => operation.requiresConfirmation)) {
+        await originalAtlasAgentApi.confirmRun(embedding.projectId, run.id, true, leaseToken);
+      }
+      const transaction = applyOriginalAtlasAgentPlan(plan);
+      const saved = await saveCurrentProject({ source: 'manual', label: `Atlas Agent · ${plan.summary}` });
+      if (!saved) throw new Error('Agent 更改已保留在撤销记录中，但本地保存失败。请撤销或重试保存。');
+      const persisted = await projectFileService.flushFireflyCloudSave();
+      if (persisted.status === 'error') throw new Error(persisted.errorMessage ?? 'Agent 更改尚未同步到云端。');
+      appliedRef.current = {
+        planDigest: plan.planDigest,
+        historyNodeId: transaction.historyNodeId,
+        nextReceiptIndex: 0,
+        leaseToken,
+      };
+      await reportAppliedPlan(plan, run);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Agent 计划执行失败。');
+      setStatus('failed');
+    }
+  };
+
+  const busy = ['saving', 'planning', 'applying', 'reporting'].includes(status);
+  return <section className="original-atlas-agent" aria-busy={busy}>
+    <header><div><small>FIREFLY</small><strong>Atlas Agent</strong></div><span className={`original-atlas-agent__status is-${status}`}>{({
+      idle: '待命', saving: '保存中', planning: '规划中', ready: '待确认', applying: '执行中', reporting: '校验中', completed: '已完成', failed: '需要处理',
+    } as Record<PanelStatus, string>)[status]}</span></header>
+    <div className="original-atlas-agent__body">
+      <p>用自然语言安排剪辑。Agent 只会生成受限操作计划，确认后由 Atlas 原生撤销事务执行。</p>
+      <textarea value={instruction} maxLength={4_000} disabled={busy} onChange={(event) => setInstruction(event.target.value)} placeholder="例如：把第一个片段在 3 秒处切开，并将后半段移到下一条视频轨道" />
+      {plan && <article className="original-atlas-agent__plan">
+        <b>{plan.summary}</b>
+        <ol>{plan.operations.map((operation) => <li key={operation.operationKey}><span>{operation.sequence}</span><code>{operation.tool}</code>{operation.requiresConfirmation && <em>需要确认</em>}</li>)}</ol>
+        {plan.operations.some((operation) => operation.requiresConfirmation) && <div className="original-atlas-agent__warning">计划包含删除或其他高风险操作。应用前请核对每一步；执行后可一次撤销整个计划。</div>}
+      </article>}
+      {error && <div className="original-atlas-agent__error" role="alert">{error}</div>}
+    </div>
+    <footer>
+      {(plan || busy || status === 'completed') && <button type="button" className="agent-button agent-button--quiet" onClick={() => void cancel()} disabled={status === 'applying' || status === 'reporting' || Boolean(appliedRef.current)}>{busy ? '停止' : '清空'}</button>}
+      {plan
+        ? <button type="button" className="agent-button agent-button--primary" onClick={() => void apply()} disabled={busy}>{appliedRef.current ? '同步执行结果' : '确认并应用'}</button>
+        : <button type="button" className="agent-button agent-button--primary" onClick={() => void submit()} disabled={busy || !instruction.trim()}>{busy ? '正在处理…' : '生成操作计划'}</button>}
+    </footer>
+  </section>;
+}

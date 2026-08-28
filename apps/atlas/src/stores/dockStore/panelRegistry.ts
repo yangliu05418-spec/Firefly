@@ -14,6 +14,7 @@ export const BUILT_IN_PANEL_TYPES: PanelType[] = [
   'export',
   'midi-mapping',
   'capture',
+  'atlas-agent',
   'ai-segment',
   'scene-description',
   'transitions',
