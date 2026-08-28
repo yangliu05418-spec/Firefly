@@ -110,6 +110,10 @@ export interface MediaFile extends MediaItem {
   type: ImportedMediaType;
   file?: File;
   url: string;
+  fireflyProjectAssetId?: string;
+  remoteSourcePath?: string;
+  remoteCacheStatus?: 'idle' | 'downloading' | 'ready' | 'error';
+  remoteCacheProgress?: number;
   modelSequence?: ModelSequenceData;
   gaussianSplatSequence?: GaussianSplatSequenceData;
   importProgress?: number;

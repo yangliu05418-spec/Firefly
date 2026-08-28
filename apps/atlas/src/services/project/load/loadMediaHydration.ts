@@ -175,6 +175,8 @@ export async function convertProjectMediaToStore(
       createdAt: new Date(pm.importedAt).getTime(),
       file: runtimeSources.representativeFile,
       url: runtimeSources.representativeUrl,
+      fireflyProjectAssetId: pm.fireflyProjectAssetId,
+      remoteSourcePath: pm.remoteSourcePath,
       thumbnailUrl: runtimeSources.thumbnailUrl,
       duration: pm.duration,
       width: pm.width,

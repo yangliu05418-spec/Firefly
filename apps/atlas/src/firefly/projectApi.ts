@@ -28,6 +28,7 @@ export interface FireflyAtlasUser {
 
 export interface FireflyAtlasCapabilities {
   agent: boolean;
+  generate: boolean;
   maxUploadBytes: number;
   partSize: number;
   uploadConcurrency: number;
@@ -171,6 +172,9 @@ export function parseFireflyBootstrap(value: unknown): FireflyAtlasBootstrap {
     },
     capabilities: {
       agent: requiredBoolean(capabilities.agent, 'Agent能力'),
+      // Expand-only blue/green compatibility: the previous slot does not
+      // expose this capability yet. Only an explicit false disables Generate.
+      generate: capabilities.generate === undefined ? true : requiredBoolean(capabilities.generate, '生成能力'),
       maxUploadBytes: positiveInteger(capabilities.maxUploadBytes, '上传上限'),
       partSize: positiveInteger(capabilities.partSize, '分片大小'),
       uploadConcurrency: positiveInteger(capabilities.uploadConcurrency, '上传并发数'),

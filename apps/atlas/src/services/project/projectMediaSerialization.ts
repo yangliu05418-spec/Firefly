@@ -53,6 +53,8 @@ export function convertMediaFiles(files: MediaFile[]): ProjectMediaFile[] {
       name: file.name,
       type: file.type as 'video' | 'audio' | 'image' | 'model' | 'gaussian-splat' | 'lottie' | 'rive',
       sourcePath: file.liveInput ? `live:${file.id}` : file.filePath || file.name,
+      fireflyProjectAssetId: file.fireflyProjectAssetId,
+      remoteSourcePath: file.remoteSourcePath,
       projectPath: file.projectPath,
       fileHash: file.fileHash,
       duration: file.duration,
