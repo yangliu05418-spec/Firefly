@@ -5,9 +5,13 @@ useDefault = true
 # synthetic OpenAI-shaped strings. Limit the exception to those exact test
 # files; all shipped source and every other fixture remains under the default
 # Gitleaks rules.
-[[allowlists]]
+# CI is pinned to Gitleaks 8.24.3, whose global allowlist syntax is singular.
+# Gitleaks 8.25 replaces this table with [[allowlists]]; update both the action
+# and this syntax together when that pinned version is upgraded.
+[allowlist]
 description = "Synthetic credentials used by Atlas redaction tests"
 paths = [
+  '''^apps/atlas/tests/unit/creditClaims\.test\.ts$''',
   '''^apps/atlas/tests/unit/logRedaction\.test\.ts$''',
   '''^apps/atlas/tests/unit/redact\.test\.ts$''',
 ]
