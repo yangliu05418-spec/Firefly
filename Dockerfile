@@ -39,6 +39,11 @@ RUN apt-get update \
 COPY --from=build /app/dist-web ./dist-web
 COPY --from=build /app/dist-server ./dist-server
 COPY --from=atlas-build /atlas/dist ./dist-atlas
+# One-release bootstrap marker for hosts whose installed deploy gate still
+# expects the retired custom editor's export.worker filename. It is never
+# referenced by Atlas; a successful deploy replaces that host gate with the
+# upstream runtime asset contract shipped in ops/firefly-deploy.sh.
+RUN printf '%s\n' '// Firefly host deploy-gate compatibility marker.' > ./dist-atlas/assets/export.worker-host-bootstrap.js
 COPY ops ./ops
 EXPOSE 8090
 CMD ["node", "dist-server/index.js"]
