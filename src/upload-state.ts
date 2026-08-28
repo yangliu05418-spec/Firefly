@@ -1,8 +1,8 @@
 import type { UploadAsset } from "./types";
 
-/** A durable upload id is enough for admission; workers wait for authoritative validation before provider submission. */
-export const areAttachedUploadsAdmissible = (assets: UploadAsset[]) => assets.every((asset) =>
-  asset.assetId
-    ? asset.status === "Active"
-    : Boolean(asset.uploadId) && asset.progress === 100 && (asset.phase === "verifying" || asset.phase === "ready")
-);
+/** Any durable reference is enough for admission; the server remains authoritative. */
+export const areAttachedUploadsAdmissible = (assets: UploadAsset[]) => assets.every((asset) => {
+  if (asset.snapshotReferenceId) return asset.progress === 100 && asset.phase === "ready";
+  if (asset.assetId) return asset.status === "Active";
+  return Boolean(asset.uploadId) && asset.progress === 100 && (asset.phase === "verifying" || asset.phase === "ready");
+});

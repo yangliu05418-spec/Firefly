@@ -320,13 +320,46 @@ test("video text-mode re-edit keeps a long prompt full width in the dock and on 
   expect(mobile.editor).toBeGreaterThan(mobile.row * 0.9);
 });
 
-test("re-edit protects an unsent draft, supports undo, and reuses one fallback session without submitting", async ({ page }) => {
+test("re-edit protects a draft and submits nine immutable references without re-uploading", async ({ page }) => {
   const createdAt = Date.now() - 60_000;
+  const references = Array.from({ length: 9 }, (_, index) => {
+    const ordinal = index + 1;
+    const bindingId = `reedit-reference-${ordinal}`;
+    const snapshotReferenceId = ordinal.toString(16).padStart(64, "0");
+    return {
+      id: bindingId, bindingId, snapshotReferenceId, name: `角色参考 ${ordinal}.png`, type: "image" as const,
+      size: 128 + ordinal, role: "reference_image" as const, progress: 100 as const, phase: "ready" as const,
+      preview: `/api/creation-references/${snapshotReferenceId}/source?variant=thumbnail`,
+    };
+  });
+  const editorPrompt = `依次使用 ${references.map((item) => `[[firefly-ref:${item.bindingId}]]`).join("、")} 完成群像镜头`;
+  const providerPrompt = `依次使用 ${references.map((_, index) => `Image ${index + 1}`).join("、")} 完成群像镜头`;
+  const uploadRequests: string[] = [];
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (path.startsWith("/api/uploads")) uploadRequests.push(`${request.method()} ${path}`);
+  });
   const mock = await mockAuthenticatedApi(page, { videoHistory: [{
     id: "video-reedit-conflict", sessionId: "session-e2e", caseId: "video-reedit-conflict", visibility: "private",
     status: "failed", mediaStatus: "none", prompt: "原始雨夜镜头", model: videoModels[0].id,
     mode: "omni", ratio: "16:9", resolution: "1080p", duration: 8, error: "上游暂时繁忙", createdAt, updatedAt: createdAt,
   }] });
+  await page.route("**/api/generations/video-reedit-conflict/reedit", (route) => json(route, {
+    sourceId: "video-reedit-conflict", sourceType: "video", sessionId: "session-e2e", snapshotVersion: 1,
+    recoveryQuality: "exact", sourceSessionStatus: "active", omittedAssets: 0, warnings: [], adjustments: [],
+    state: {
+      engine: "video", prompt: editorPrompt, modelId: videoModels[0].id, mode: "omni", ratio: "16:9", resolution: "1080p", duration: 8,
+      generateAudio: false, cameraFixed: true, watermark: false, seed: 42, imageModelId: "", imageRatio: "1:1", imageResolution: "", imageCount: 1, assets: references,
+    },
+  }));
+  await page.route("**/api/creation-references/**", (route) => {
+    const parts = new URL(route.request().url()).pathname.split("/");
+    const id = decodeURIComponent(parts[3] ?? "");
+    const reference = references.find((item) => item.snapshotReferenceId === id);
+    if (!reference) return json(route, { error: "任务素材不存在" }, 404);
+    if (parts[4] === "source") return route.fulfill({ status: 200, contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><path fill="#b8d9cf" d="M0 0h8v8H0z"/></svg>' });
+    return json(route, { id, bindingId: reference.bindingId, name: reference.name, type: reference.type, size: reference.size, state: "ready", preview: reference.preview });
+  });
   await page.goto("/studio/sessions/session-e2e");
   const editor = page.getByRole("textbox", { name: "创作提示词" });
   await expect(editor).toBeVisible();
@@ -341,19 +374,39 @@ test("re-edit protects an unsent draft, supports undo, and reuses one fallback s
 
   await page.getByRole("button", { name: "重新编辑" }).click();
   await page.getByRole("dialog", { name: "这里有尚未发送的内容" }).getByRole("button", { name: "替换当前草稿" }).click();
-  await expect(editor).toContainText("原始雨夜镜头");
+  await expect(page.locator(".asset-chip")).toHaveCount(9);
+  await expect(page.locator(".asset-chip").first()).toContainText("引用已恢复，可直接生成");
+  await expect(page.locator(".prompt-asset-token")).toHaveCount(9);
+  await expect(page.getByRole("button", { name: "生成视频" })).toBeEnabled();
+  await expect(page.locator("#composer-submit-hint")).toHaveCount(0);
   await page.getByRole("button", { name: "撤销替换" }).click();
   await expect(editor).toContainText("用户尚未发送的草稿");
+  await expect(page.locator(".asset-chip")).toHaveCount(0);
 
   await page.getByRole("button", { name: "重新编辑" }).click();
   await page.getByRole("dialog", { name: "这里有尚未发送的内容" }).getByRole("button", { name: "在新会话打开" }).click();
   await expect(page).toHaveURL(/\/studio\/sessions\/reedit-video-video-reedit-conflict$/);
-  await expect(editor).toContainText("原始雨夜镜头");
+  await expect(page.locator(".asset-chip")).toHaveCount(9);
+  await expect(page.getByRole("button", { name: "生成视频" })).toBeEnabled();
   await page.reload();
-  await expect(page.getByRole("textbox", { name: "创作提示词" })).toContainText("原始雨夜镜头");
+  await expect(page.getByRole("textbox", { name: "创作提示词" })).toContainText("完成群像镜头");
+  await expect(page.locator(".asset-chip")).toHaveCount(9);
+  await expect(page.locator(".prompt-asset-token")).toHaveCount(9);
+  await expect(page.getByRole("button", { name: "生成视频" })).toBeEnabled();
+  await expect(page.locator("#composer-submit-hint")).toHaveCount(0);
   expect(mock.creationSessions().filter((session) => session.id === "reedit-video-video-reedit-conflict")).toHaveLength(1);
   expect(mock.fallbackSessionSources()).toEqual(["video:video-reedit-conflict"]);
   expect(mock.postedGenerations()).toHaveLength(0);
+  await page.getByRole("button", { name: "生成视频" }).click();
+  await expect.poll(() => mock.postedGenerations()).toHaveLength(1);
+  const posted = mock.postedGenerations()[0]!;
+  const postedAssets = posted.assets as Array<{ bindingId?: string; snapshotReferenceId?: string; uploadId?: string; assetId?: string }>;
+  expect(postedAssets.map((item) => item.bindingId)).toEqual(references.map((item) => item.bindingId));
+  expect(postedAssets.map((item) => item.snapshotReferenceId)).toEqual(references.map((item) => item.snapshotReferenceId));
+  expect(postedAssets.every((item) => !item.uploadId && !item.assetId)).toBe(true);
+  expect(posted.editorPrompt).toBe(editorPrompt);
+  expect(posted.prompt).toBe(providerPrompt);
+  expect(uploadRequests).toEqual([]);
 });
 
 test("composer keeps uploaded assets available through the inline mention picker", async ({ page }) => {
