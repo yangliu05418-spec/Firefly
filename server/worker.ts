@@ -18,8 +18,11 @@ import { canKeepPreparingReference, UploadReferencePendingError } from "./asset-
 import { requeueExhaustedAsyncJob } from "./async-job-outbox.js";
 import { AssetApiError } from "./asset-api.js";
 import { resolveCreationSnapshotReferences } from "./creation-reference-media.js";
+import { AtlasStore } from "./atlas-store.js";
+import { signedProviderObjectUrl } from "./tos.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
+const atlasStore = new AtlasStore(config.databasePath);
 const archiveRecoveryBucketMs = 15 * 60 * 1000;
 const outputFormatFor = (task: { request?: unknown }) => (task.request as { outputFormat?: unknown } | undefined)?.outputFormat === "mov" ? "mov" as const : "mp4" as const;
 const enqueueArchiveHandoff = async (task: StoredTask) => {
@@ -50,9 +53,21 @@ const processGenerationJob = async (job: Job<{ input: unknown }>) => {
       return;
     }
     if (!task.ownerId) throw new UnrecoverableError("任务缺少素材所有者信息");
-    input = resolveCreationSnapshotReferences(input, task.ownerId);
-    input = resolveCanvasGenerationReferences(input, task.ownerId);
-    try { input = await prepareProviderAssets(input, task.ownerId); }
+    const ownerId = task.ownerId;
+    input = resolveCreationSnapshotReferences(input, ownerId);
+    input = resolveCanvasGenerationReferences(input, ownerId);
+    input = {
+      ...input,
+      assets: input.assets.map((asset) => {
+        if (!asset.atlasProjectAssetId) return asset;
+        const projectAsset = atlasStore.readAsset(asset.atlasProjectAssetId, ownerId);
+        if (!projectAsset || projectAsset.status !== "ready" || projectAsset.kind !== asset.type) {
+          throw new UnrecoverableError("Atlas项目素材不存在、尚未就绪或类型不匹配");
+        }
+        return { ...asset, url: signedProviderObjectUrl(projectAsset.objectKey) };
+      }),
+    };
+    try { input = await prepareProviderAssets(input, ownerId); }
     catch (error) {
       console.warn(JSON.stringify({
         type: "generation_reference_prepare_failed",
@@ -186,7 +201,7 @@ const shutdown = async () => {
   await heartbeat.stop();
   const graceful = await closeWorkersWithin([worker], config.shutdownGraceMs);
   console.info(JSON.stringify({ type: "worker_shutdown", at: new Date().toISOString(), worker: "generation", graceful }));
-  await connection.quit(); users.close(); process.exit(0);
+  await connection.quit(); atlasStore.close(); users.close(); process.exit(0);
 };
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);

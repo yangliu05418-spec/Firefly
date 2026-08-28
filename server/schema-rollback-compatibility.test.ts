@@ -28,10 +28,7 @@ describe("schema 12 compatibility release rollback gate", () => {
     expect(ROLLBACK_MAX_SUPPORTED_SCHEMA_VERSION).toBe(13);
 
     const databasePath = createDatabasePath();
-    expect(migrateDatabase(databasePath)).toBe(12);
-    const featureDatabase = new Database(databasePath);
-    featureDatabase.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (13, 'add-atlas-generation-bridge', ?)").run(Date.now());
-    featureDatabase.close();
+    expect(migrateDatabase(databasePath)).toBe(13);
 
     const compatibilityProcessDatabase = new Database(databasePath, { readonly: true, fileMustExist: true });
     expect(assertRollbackSchemaCompatibility(compatibilityProcessDatabase)).toBe(13);

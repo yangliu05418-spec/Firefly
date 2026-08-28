@@ -52,6 +52,8 @@ import { assertPromptLength, EDITOR_PROMPT_STORAGE_MAX_CHARS, IMAGE_PROVIDER_PRO
 import { journeyNames, recordJourneyEvent } from "./journey-observability.js";
 import { createAtlasRuntime } from "./atlas-runtime.js";
 
+let atlasRuntime: ReturnType<typeof createAtlasRuntime>;
+
 const app = express();
 const webDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist-web");
 const atlasDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist-atlas");
@@ -88,10 +90,13 @@ app.use((req, res, next) => {
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
   res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
   const atlasDocument = req.path === "/studio/atlas" || req.path.startsWith("/studio/atlas/");
+  const atlasGenerateEmbed = req.path === "/studio/generate-embed" || req.path.startsWith("/studio/generate-embed/");
   res.setHeader("Content-Security-Policy", atlasDocument
     ? "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob: https:; connect-src 'self' https://*.bytepluses.com.cn"
-    : "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob: https:; connect-src 'self' https://*.bytepluses.com.cn");
-  if (atlasDocument) {
+    : atlasGenerateEmbed
+      ? "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'self'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob: https:; connect-src 'self' https://*.bytepluses.com.cn"
+      : "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob: https:; connect-src 'self' https://*.bytepluses.com.cn");
+  if (atlasDocument || atlasGenerateEmbed) {
     res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
     res.setHeader("Cross-Origin-Embedder-Policy", "credentialless");
     res.setHeader("Origin-Agent-Cluster", "?1");
@@ -158,7 +163,9 @@ const creationSnapshotDependencies = {
   readUploadState: (uploadId: string) => users.readUploadState(uploadId),
   readUserAsset: (assetId: string) => users.readUserAsset(assetId),
   readSnapshotReference: (id: string) => users.readCreationSnapshotReference(id),
+  readAtlasProjectAsset: (id: string, ownerId: string) => atlasRuntime.projectStore.readAsset(id, ownerId),
 };
+const atlasDestinationSchema = z.object({ kind: z.literal("atlas_project"), projectId: z.string().min(1).max(180) });
 const enqueueSnapshotPromotions = (bundle: CreationSnapshotBundle) => {
   if (!config.taskReferenceArchiveEnabled) return;
   for (const reference of bundle.references) {
@@ -628,22 +635,43 @@ app.post("/api/generations", requireAuth, async (req, res) => {
   try {
     const requestedTaskId = z.string().uuid().optional().parse(req.body?.requestId);
     const owner = res.locals.user as SessionUser;
+    const destination = atlasDestinationSchema.optional().parse(req.body?.destination);
+    if (destination && !config.atlasGenerateEnabled) return rejectGeneration(res, 404, "ATLAS_GENERATE_DISABLED", "Atlas生成能力尚未开放", requestContext);
+    const atlasSession = destination ? atlasRuntime.projectStore.readGenerationSession(destination.projectId, owner.id) : undefined;
+    if (destination && !atlasRuntime.projectStore.readProject(destination.projectId, owner.id)) return rejectGeneration(res, 404, "ATLAS_PROJECT_NOT_FOUND", "Atlas项目不存在", requestContext);
+    if (destination && !atlasSession) return rejectGeneration(res, 409, "ATLAS_GENERATION_SESSION_REQUIRED", "请重新打开Atlas生成面板", requestContext);
     if (requestedTaskId) {
       const existing = await readTask(requestedTaskId, true);
       if (existing) {
         if (existing.ownerId !== owner.id || existing.deletedAt) return rejectGeneration(res, 409, "REQUEST_ID_CONFLICT", "请求标识已被使用", requestContext);
+        if (destination) {
+          if (existing.sessionId !== atlasSession!.sessionId) return rejectGeneration(res, 409, "ATLAS_SESSION_MISMATCH", "Atlas生成会话已变化，请刷新后重试", requestContext);
+          atlasRuntime.projectStore.createGenerationDestinations({
+            ownerId: owner.id, projectId: destination.projectId, sessionId: atlasSession!.sessionId,
+            sourceType: "video", sourceId: existing.id,
+            outputs: [{ id: crypto.randomUUID(), outputKey: "video" }], now: Date.now(),
+          });
+        }
         const active = ["queued", "submitting", "running"].includes(existing.status) || existing.mediaStatus === "archiving";
         return res.status(active ? 202 : 200).json(publicGenerationTask(existing));
       }
     }
     const requestedSessionId = z.string().min(1).max(200).optional().parse(req.body?.sessionId);
     const requestedInput = validateGeneration(req.body);
-    const session = requestedSessionId ? users.readCreationSession(requestedSessionId) : null;
-    if (requestedSessionId && (!session || session.ownerId !== owner.id)) return rejectGeneration(res, 404, "SESSION_NOT_FOUND", "创作会话不存在", requestContext);
+    if (destination && requestedSessionId && requestedSessionId !== atlasSession?.sessionId) return rejectGeneration(res, 409, "ATLAS_SESSION_MISMATCH", "Atlas生成会话已变化，请刷新后重试", requestContext);
+    const effectiveSessionId = atlasSession?.sessionId ?? requestedSessionId;
+    const session = effectiveSessionId ? users.readCreationSession(effectiveSessionId) : null;
+    if (effectiveSessionId && (!session || session.ownerId !== owner.id)) return rejectGeneration(res, 404, "SESSION_NOT_FOUND", "创作会话不存在", requestContext);
     const activeSession = session ?? createCreationSession(owner.id);
     const assets = [];
     for (const asset of requestedInput.assets) {
       if (asset.canvasProjectAssetId) return rejectGeneration(res, 404, "REFERENCE_NOT_FOUND", "引用素材不存在或无权访问", requestContext);
+      if (asset.atlasProjectAssetId) {
+        const media = atlasRuntime.projectStore.readAsset(asset.atlasProjectAssetId, owner.id);
+        if (!media || media.status !== "ready" || media.projectId !== destination?.projectId || media.kind !== asset.type) return rejectGeneration(res, 404, "REFERENCE_NOT_FOUND", "Atlas项目素材不存在、尚未就绪或类型不匹配", requestContext);
+        assets.push(asset);
+        continue;
+      }
       if (asset.uploadId) {
         const media = users.readUploadState(asset.uploadId);
         if (!canCreatePendingAsset(media, owner.id, config.tosInputRetentionDays)) return rejectGeneration(res, 404, "REFERENCE_EXPIRED", "引用素材不存在或已过期", requestContext);
@@ -690,10 +718,20 @@ app.post("/api/generations", requireAuth, async (req, res) => {
     const persistedRequest = { ...input, assets };
     const task: StoredTask = { id, sessionId: activeSession.id, ownerId: owner.id, visibility: "private", status: "queued", mediaStatus: "none", mediaRevision: 0, prompt: input.prompt, model: input.model, mode: input.mode, ratio: input.ratio, resolution: input.resolution, duration: input.duration, request: persistedRequest, createdAt: now, updatedAt: now };
     const intent = { queueName: "generation" as const, jobId: id, jobName: "generate", payload: { input } };
-    const admission = users.admitTaskWithinLimit(task, config.maxActiveGenerationsPerUser, intent, snapshot);
+    const destinationAdmission = destination ? {
+      ownerId: owner.id, projectId: destination.projectId, sessionId: activeSession.id,
+      sourceType: "video" as const, sourceId: id,
+      outputs: [{ id: crypto.randomUUID(), outputKey: "video" }], now,
+    } : undefined;
+    const admission = users.admitTaskWithinLimit(task, config.maxActiveGenerationsPerUser, intent, snapshot, destinationAdmission);
     if (admission.status === "limit") return rejectGeneration(res, 429, "GENERATION_LIMIT_REACHED", `你已有 ${config.maxActiveGenerationsPerUser} 个任务正在生成，请等待其中一个完成`, { ...requestContext, activeCount: users.countActiveTasksForUser(owner.id), limit: config.maxActiveGenerationsPerUser });
     if (admission.status === "existing") {
       if (admission.task.ownerId !== owner.id || admission.task.deletedAt) return rejectGeneration(res, 409, "REQUEST_ID_CONFLICT", "请求标识已被使用", requestContext);
+      if (destination) atlasRuntime.projectStore.createGenerationDestinations({
+        ownerId: owner.id, projectId: destination.projectId, sessionId: activeSession.id,
+        sourceType: "video", sourceId: admission.task.id,
+        outputs: [{ id: crypto.randomUUID(), outputKey: "video" }], now,
+      });
       const active = ["queued", "submitting", "running"].includes(admission.task.status) || admission.task.mediaStatus === "archiving";
       return res.status(active ? 202 : 200).json(publicGenerationTask(admission.task));
     }
@@ -1092,10 +1130,11 @@ const imageReferenceSchema = z.union([
     uploadId: z.string().min(20).max(200).optional(),
     assetId: z.string().min(1).max(200).optional(),
     snapshotReferenceId: z.string().min(32).max(128).optional(),
+    atlasProjectAssetId: z.string().min(1).max(180).optional(),
     name: z.string().min(1).max(180),
     type: z.literal("image").default("image"),
     role: z.literal("reference_image").default("reference_image"),
-  }).refine((reference) => Boolean(reference.uploadId || reference.assetId || reference.snapshotReferenceId), "参考图缺少可用来源"),
+  }).refine((reference) => Boolean(reference.uploadId || reference.assetId || reference.snapshotReferenceId || reference.atlasProjectAssetId), "参考图缺少可用来源"),
 ]);
 const imageGenerationSchema = z.object({
   requestId: z.string().uuid().optional(),
@@ -1107,6 +1146,7 @@ const imageGenerationSchema = z.object({
   prompt: z.string().trim().min(1),
   editorPrompt: z.string().optional(),
   references: z.array(imageReferenceSchema).max(4).default([]),
+  destination: atlasDestinationSchema.optional(),
 });
 
 app.get("/api/image-models", requireAuth, async (_req, res) => {
@@ -1183,13 +1223,27 @@ app.delete("/api/image-generations/:id", requireAuth, (req, res) => {
 app.post("/api/image-generation", requireAuth, async (req, res) => {
   try {
     const body = imageGenerationSchema.parse(req.body);
+    if (body.destination && !config.atlasGenerateEnabled) return res.status(404).json({ error: "Atlas生成能力尚未开放", code: "ATLAS_GENERATE_DISABLED" });
     assertPromptLength(body.prompt, "prompt", IMAGE_PROVIDER_PROMPT_MAX_CHARS);
     if (body.editorPrompt !== undefined) assertPromptLength(body.editorPrompt, "editorPrompt", EDITOR_PROMPT_STORAGE_MAX_CHARS);
     const user = res.locals.user as SessionUser;
+    const atlasSession = body.destination ? atlasRuntime.projectStore.readGenerationSession(body.destination.projectId, user.id) : undefined;
+    if (body.destination && !atlasRuntime.projectStore.readProject(body.destination.projectId, user.id)) return res.status(404).json({ error: "Atlas项目不存在", code: "ATLAS_PROJECT_NOT_FOUND" });
+    if (body.destination && !atlasSession) return res.status(409).json({ error: "请重新打开Atlas生成面板", code: "ATLAS_GENERATION_SESSION_REQUIRED" });
+    if (body.destination && body.sessionId && body.sessionId !== atlasSession?.sessionId) return res.status(409).json({ error: "Atlas生成会话已变化，请刷新后重试", code: "ATLAS_SESSION_MISMATCH" });
     const requestId = body.requestId ?? crypto.randomUUID();
     const existing = users.readImageGeneration(requestId);
     if (existing) {
       if (existing.ownerId !== user.id) return res.status(409).json({ error: "请求标识已被使用" });
+      if (body.destination) {
+        if (existing.sessionId !== atlasSession!.sessionId) return res.status(409).json({ error: "Atlas生成会话已变化，请刷新后重试", code: "ATLAS_SESSION_MISMATCH" });
+        atlasRuntime.projectStore.createGenerationDestinations({
+          ownerId: user.id, projectId: body.destination.projectId, sessionId: atlasSession!.sessionId,
+          sourceType: "image", sourceId: existing.id,
+          outputs: Array.from({ length: existing.requestedCount }, (_, index) => ({ id: crypto.randomUUID(), outputKey: `image:${index}` })),
+          now: Date.now(),
+        });
+      }
       if (existing.status === "succeeded") return res.json({ Id: existing.id, Items: existing.items, Model: existing.model, Ratio: existing.ratio, Resolution: existing.resolution, Failed: existing.failures });
       if (existing.status === "running") return res.status(202).json({ Id: existing.id, Items: existing.items, Model: existing.model, Ratio: existing.ratio, Resolution: existing.resolution, Failed: existing.failures, Status: "generating" });
       return res.status(409).json({ error: existing.error ?? "该请求未生成成功" });
@@ -1199,14 +1253,21 @@ app.post("/api/image-generation", requireAuth, async (req, res) => {
     if (body.count > spec.maxCount) return res.status(400).json({ error: "该模型单次最多生成 " + spec.maxCount + " 张" });
     if (body.references.length > spec.maxReferences) return res.status(400).json({ error: "该模型单次最多引用 " + spec.maxReferences + " 张图片" });
     if (!spec.resolutions.includes(body.resolution)) return res.status(400).json({ error: "该模型不支持此分辨率档位" });
-    const session = body.sessionId ? users.readCreationSession(body.sessionId) : null;
-    if (body.sessionId && (!session || session.ownerId !== user.id)) return res.status(404).json({ error: "创作会话不存在" });
+    const effectiveSessionId = atlasSession?.sessionId ?? body.sessionId;
+    const session = effectiveSessionId ? users.readCreationSession(effectiveSessionId) : null;
+    if (effectiveSessionId && (!session || session.ownerId !== user.id)) return res.status(404).json({ error: "创作会话不存在" });
     const activeSession = session ?? createCreationSession(user.id);
     const references: CreationReferenceInput[] = body.references.map((reference, index) => typeof reference === "string"
       ? { id: reference, bindingId: reference, uploadId: reference, name: `参考图 ${index + 1}`, type: "image", role: "reference_image" }
       : reference);
-    const queueReferences: { uploadId?: string; snapshotReferenceId?: string }[] = [];
+    const queueReferences: { uploadId?: string; snapshotReferenceId?: string; atlasProjectAssetId?: string }[] = [];
     for (const reference of references) {
+      if (reference.atlasProjectAssetId) {
+        const media = atlasRuntime.projectStore.readAsset(reference.atlasProjectAssetId, user.id);
+        if (!media || media.projectId !== body.destination?.projectId || media.status !== "ready" || media.kind !== "image") return res.status(404).json({ error: "Atlas项目图片不存在或尚未就绪" });
+        queueReferences.push({ atlasProjectAssetId: media.id });
+        continue;
+      }
       if (reference.snapshotReferenceId) {
         const stored = users.readCreationSnapshotReference(reference.snapshotReferenceId);
         if (!stored || stored.ownerId !== user.id || stored.status !== "ready" || stored.mediaType !== "image") return res.status(404).json({ error: "参考素材不存在或尚未归档完成" });
@@ -1246,11 +1307,23 @@ app.post("/api/image-generation", requireAuth, async (req, res) => {
       resolution: body.resolution, count: body.count, references: queueReferences,
     };
     const intent = { queueName: "image-generation" as const, jobId: requestId, jobName: "generate-image", payload };
-    const admission = users.admitImageGenerationWithinLimit(activeTask, 2, intent, snapshot);
+    const destinationAdmission = body.destination ? {
+      ownerId: user.id, projectId: body.destination.projectId, sessionId: activeSession.id,
+      sourceType: "image" as const, sourceId: requestId,
+      outputs: Array.from({ length: body.count }, (_, index) => ({ id: crypto.randomUUID(), outputKey: `image:${index}` })),
+      now: startedAt,
+    } : undefined;
+    const admission = users.admitImageGenerationWithinLimit(activeTask, 2, intent, snapshot, destinationAdmission);
     if (admission.status === "limit") return res.status(429).json({ error: "图片生成繁忙，请等当前生成完成后再试（每用户同时最多 2 组）" });
     if (admission.status === "existing") {
       const admitted = admission.task;
       if (admitted.ownerId !== user.id || admitted.deletedAt) return res.status(409).json({ error: "请求标识已被使用" });
+      if (body.destination) atlasRuntime.projectStore.createGenerationDestinations({
+        ownerId: user.id, projectId: body.destination.projectId, sessionId: activeSession.id,
+        sourceType: "image", sourceId: admitted.id,
+        outputs: Array.from({ length: admitted.requestedCount }, (_, index) => ({ id: crypto.randomUUID(), outputKey: `image:${index}` })),
+        now: Date.now(),
+      });
       if (admitted.status === "succeeded") return res.json({ Id: admitted.id, Items: admitted.items, Model: admitted.model, Ratio: admitted.ratio, Resolution: admitted.resolution, Failed: admitted.failures });
       if (admitted.status === "running") return res.status(202).json({ Id: admitted.id, Items: admitted.items, Model: admitted.model, Ratio: admitted.ratio, Resolution: admitted.resolution, Failed: admitted.failures, Status: "generating" });
       return res.status(409).json({ error: admitted.error ?? "该请求未生成成功" });
@@ -1875,7 +1948,7 @@ app.get("/api/canvas-media/:assetId", requireAuth, createCanvasMediaHandler({
   cacheControl: previewRedirectCacheHeader
 }));
 
-const atlasRuntime = createAtlasRuntime({
+atlasRuntime = createAtlasRuntime({
   requireAuth,
   agentQueue: atlasAgentQueue,
   enqueueMediaDelete: async (objectKey, jobId) => {

@@ -56,6 +56,24 @@ export type AtlasProjectAsset = {
   deletedAt?: number;
 };
 
+export type AtlasGenerationDestination = {
+  id: string;
+  ownerId: string;
+  projectId: string;
+  sessionId: string;
+  sourceType: "image" | "video";
+  sourceId: string;
+  outputKey: string;
+  outputMediaId?: string;
+  atlasAssetId?: string;
+  status: "pending" | "copying" | "ready" | "failed" | "skipped";
+  attemptCount: number;
+  lastErrorCode?: string;
+  createdAt: number;
+  updatedAt: number;
+  completedAt?: number;
+};
+
 export type AtlasGlobalAssetRegistration = {
   assetId: string;
   ownerId: string;
@@ -123,6 +141,12 @@ type TransferRow = {
   media_kind: AtlasTransfer["mediaKind"]; content_type: string; size: number; part_size: number; part_count: number;
   parts_json: string; status: AtlasTransfer["status"]; error: string | null; created_at: number; updated_at: number; expires_at: number;
 };
+type DestinationRow = {
+  id: string; owner_id: string; project_id: string; session_id: string;
+  source_type: AtlasGenerationDestination["sourceType"]; source_id: string; output_key: string;
+  output_media_id: string | null; atlas_asset_id: string | null; status: AtlasGenerationDestination["status"];
+  attempt_count: number; last_error_code: string | null; created_at: number; updated_at: number; completed_at: number | null;
+};
 
 const projectFromRow = (row?: ProjectRow): AtlasProject | null => row ? ({
   id: row.id, ownerId: row.owner_id, title: row.title, revision: row.revision,
@@ -156,6 +180,13 @@ const transferFromRow = (row?: TransferRow): AtlasTransfer | null => row ? ({
   contentType: row.content_type, size: row.size, partSize: row.part_size, partCount: row.part_count,
   parts: JSON.parse(row.parts_json) as AtlasTransferPart[], status: row.status, error: row.error ?? undefined,
   createdAt: row.created_at, updatedAt: row.updated_at, expiresAt: row.expires_at,
+}) : null;
+const destinationFromRow = (row?: DestinationRow): AtlasGenerationDestination | null => row ? ({
+  id: row.id, ownerId: row.owner_id, projectId: row.project_id, sessionId: row.session_id,
+  sourceType: row.source_type, sourceId: row.source_id, outputKey: row.output_key,
+  outputMediaId: row.output_media_id ?? undefined, atlasAssetId: row.atlas_asset_id ?? undefined,
+  status: row.status, attemptCount: row.attempt_count, lastErrorCode: row.last_error_code ?? undefined,
+  createdAt: row.created_at, updatedAt: row.updated_at, completedAt: row.completed_at ?? undefined,
 }) : null;
 
 export type AtlasWriteResult = { status: "ok"; project: AtlasProject } | { status: "conflict"; currentRevision: number } | { status: "missing" };
@@ -191,6 +222,129 @@ export class AtlasStore {
       SELECT * FROM atlas_projects WHERE owner_id = ? AND deleted_at IS NULL
       ORDER BY updated_at DESC, id ASC LIMIT ? OFFSET ?
     `).all(ownerId, limit, offset) as ProjectRow[]).map((row) => projectFromRow(row)!);
+  }
+
+  readGenerationSession(projectId: string, ownerId: string) {
+    return this.database.prepare(`
+      SELECT session_id AS sessionId FROM atlas_project_generation_sessions
+      WHERE project_id = ? AND owner_id = ?
+    `).get(projectId, ownerId) as { sessionId: string } | undefined;
+  }
+
+  admitGenerationSession(input: { projectId: string; ownerId: string; sessionId: string; title: string; now: number }) {
+    return this.database.transaction(() => {
+      if (!this.readProject(input.projectId, input.ownerId)) return { status: "missing" } as const;
+      const existing = this.readGenerationSession(input.projectId, input.ownerId);
+      if (existing) return { status: "existing", sessionId: existing.sessionId } as const;
+      this.database.prepare(`
+        INSERT INTO creation_sessions (id, owner_id, title, created_at, updated_at, deleted_at)
+        VALUES (?, ?, ?, ?, ?, NULL)
+      `).run(input.sessionId, input.ownerId, input.title, input.now, input.now);
+      this.database.prepare(`
+        INSERT INTO atlas_project_generation_sessions (owner_id, project_id, session_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(input.ownerId, input.projectId, input.sessionId, input.now, input.now);
+      return { status: "created", sessionId: input.sessionId } as const;
+    }).immediate();
+  }
+
+  createGenerationDestinations(input: {
+    ownerId: string; projectId: string; sessionId: string; sourceType: "image" | "video";
+    sourceId: string; outputs: Array<{ id: string; outputKey: string }>; now: number;
+  }) {
+    return this.database.transaction(() => {
+      const project = this.readProject(input.projectId, input.ownerId);
+      const session = this.readGenerationSession(input.projectId, input.ownerId);
+      if (!project || session?.sessionId !== input.sessionId) return { status: "missing" } as const;
+      for (const output of input.outputs) this.database.prepare(`
+        INSERT INTO generation_destinations
+          (id, owner_id, project_id, session_id, source_type, source_id, output_key, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+        ON CONFLICT(owner_id, project_id, source_type, source_id, output_key) DO NOTHING
+      `).run(output.id, input.ownerId, input.projectId, input.sessionId, input.sourceType, input.sourceId, output.outputKey, input.now, input.now);
+      return { status: "ok", destinations: this.listGenerationDestinations(input.projectId, input.ownerId, 200) } as const;
+    }).immediate();
+  }
+
+  readGenerationDestination(id: string, ownerId: string) {
+    return destinationFromRow(this.database.prepare(`SELECT * FROM generation_destinations WHERE id = ? AND owner_id = ?`).get(id, ownerId) as DestinationRow | undefined);
+  }
+
+  readGenerationDestinationById(id: string) {
+    return destinationFromRow(this.database.prepare(`SELECT * FROM generation_destinations WHERE id = ?`).get(id) as DestinationRow | undefined);
+  }
+
+  listGenerationDestinations(projectId: string, ownerId: string, limit = 100) {
+    if (!this.readProject(projectId, ownerId)) return null;
+    return (this.database.prepare(`
+      SELECT * FROM generation_destinations WHERE project_id = ? AND owner_id = ?
+      ORDER BY created_at DESC, output_key ASC LIMIT ?
+    `).all(projectId, ownerId, Math.max(1, Math.min(500, limit))) as DestinationRow[]).map((row) => destinationFromRow(row)!);
+  }
+
+  listGenerationDestinationsForSource(sourceType: "image" | "video", sourceId: string) {
+    return (this.database.prepare(`
+      SELECT * FROM generation_destinations WHERE source_type = ? AND source_id = ?
+      ORDER BY output_key ASC
+    `).all(sourceType, sourceId) as DestinationRow[]).map((row) => destinationFromRow(row)!);
+  }
+
+  bindGenerationDestinationOutput(sourceId: string, outputKey: string, outputMediaId: string, now: number) {
+    this.database.prepare(`
+      UPDATE generation_destinations SET output_media_id = ?, updated_at = ?
+      WHERE source_type = 'image' AND source_id = ? AND output_key = ? AND status IN ('pending', 'failed')
+    `).run(outputMediaId, now, sourceId, outputKey);
+    return this.listGenerationDestinationsForSource("image", sourceId).find((item) => item.outputKey === outputKey) ?? null;
+  }
+
+  listRecoverableGenerationDestinations(limit = 100) {
+    return (this.database.prepare(`
+      SELECT d.* FROM generation_destinations d
+      JOIN atlas_projects p ON p.id = d.project_id AND p.owner_id = d.owner_id
+      WHERE d.status IN ('pending', 'failed') AND d.attempt_count < 12 AND p.deleted_at IS NULL
+      ORDER BY d.updated_at ASC, d.id ASC LIMIT ?
+    `).all(Math.max(1, Math.min(500, limit))) as DestinationRow[]).map((row) => destinationFromRow(row)!);
+  }
+
+  claimGenerationDestination(id: string, now: number) {
+    const changed = this.database.prepare(`
+      UPDATE generation_destinations
+      SET status = 'copying', attempt_count = attempt_count + 1, last_error_code = NULL, updated_at = ?
+      WHERE id = ? AND status IN ('pending', 'failed')
+    `).run(now, id).changes;
+    return changed ? destinationFromRow(this.database.prepare("SELECT * FROM generation_destinations WHERE id = ?").get(id) as DestinationRow | undefined) : null;
+  }
+
+  releaseGenerationDestination(id: string, outputMediaId: string | undefined, errorCode: string, now: number) {
+    this.database.prepare(`
+      UPDATE generation_destinations SET status = 'failed', output_media_id = COALESCE(?, output_media_id),
+        last_error_code = ?, updated_at = ? WHERE id = ? AND status = 'copying'
+    `).run(outputMediaId ?? null, errorCode.slice(0, 120), now, id);
+    return destinationFromRow(this.database.prepare("SELECT * FROM generation_destinations WHERE id = ?").get(id) as DestinationRow | undefined);
+  }
+
+  completeGenerationDestination(id: string, outputMediaId: string | undefined, atlasAssetId: string, now: number) {
+    this.database.prepare(`
+      UPDATE generation_destinations SET status = 'ready', output_media_id = ?, atlas_asset_id = ?,
+        last_error_code = NULL, updated_at = ?, completed_at = ? WHERE id = ? AND status IN ('copying', 'ready')
+    `).run(outputMediaId ?? null, atlasAssetId, now, now, id);
+    return destinationFromRow(this.database.prepare("SELECT * FROM generation_destinations WHERE id = ?").get(id) as DestinationRow | undefined);
+  }
+
+  skipGenerationDestination(id: string, errorCode: string, now: number) {
+    this.database.prepare(`
+      UPDATE generation_destinations SET status = 'skipped', last_error_code = ?, updated_at = ?, completed_at = ?
+      WHERE id = ? AND status IN ('pending', 'copying', 'failed')
+    `).run(errorCode.slice(0, 120), now, now, id);
+    return destinationFromRow(this.database.prepare("SELECT * FROM generation_destinations WHERE id = ?").get(id) as DestinationRow | undefined);
+  }
+
+  retryGenerationDestination(id: string, ownerId: string, projectId: string, now: number) {
+    const changed = this.database.prepare(`
+      UPDATE generation_destinations SET status = 'pending', last_error_code = NULL, updated_at = ?
+      WHERE id = ? AND owner_id = ? AND project_id = ? AND status = 'failed'
+    `).run(now, id, ownerId, projectId).changes;
+    return changed ? this.readGenerationDestination(id, ownerId) : null;
   }
 
   updateProject(id: string, ownerId: string, expectedRevision: number, title: string, now: number): AtlasWriteResult {

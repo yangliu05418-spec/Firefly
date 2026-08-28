@@ -25,10 +25,11 @@ export const GenerationSchema = z.object({
     uploadId: z.string().min(20).max(100).optional(),
     assetId: z.string().regex(/^asset-/).optional(),
     canvasProjectAssetId: z.string().min(1).max(180).optional(),
+    atlasProjectAssetId: z.string().min(1).max(180).optional(),
     snapshotReferenceId: z.string().min(32).max(128).optional(),
     name: z.string()
   })
-    .refine((asset) => Boolean(asset.url || asset.uploadId || asset.assetId || asset.canvasProjectAssetId || asset.snapshotReferenceId), "素材缺少可用地址")
+    .refine((asset) => Boolean(asset.url || asset.uploadId || asset.assetId || asset.canvasProjectAssetId || asset.atlasProjectAssetId || asset.snapshotReferenceId), "素材缺少可用地址")
     .refine((asset) => asset.type === "image"
       ? ["reference_image", "first_frame", "last_frame"].includes(asset.role)
       : asset.role === `reference_${asset.type}`, "素材类型与引用角色不一致"))
