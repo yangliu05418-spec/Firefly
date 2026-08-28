@@ -1,0 +1,174 @@
+// Audio clip addition - extracted from addClip
+// Handles audio file loading and waveform generation
+
+import type { TimelineClip } from '../../../types';
+import { DEFAULT_TRANSFORM } from '../constants';
+import { useMediaStore } from '../../mediaStore';
+import { createAudioElement, releaseTemporaryMediaElement } from '../helpers/webCodecsHelpers';
+import { AUDIO_WAVEFORM_THRESHOLD } from '../helpers/waveformHelpers';
+import { generateClipId } from '../helpers/idGenerator';
+import { Logger } from '../../../services/logger';
+import {
+  SOURCE_WAVEFORM_MAX_PREVIEW_SAMPLES,
+  SOURCE_WAVEFORM_PREVIEW_SAMPLES_PER_SECOND,
+  generateTimelineWaveformAnalysisForFile,
+  mapSourceWaveformPreviewProgress,
+  mapSourceWaveformPyramidProgress,
+} from '../../../services/audio/timelineWaveformPyramidCache';
+
+const log = Logger.create('AddAudioClip');
+
+function getCachedMediaWaveform(mediaFileId: string | undefined): Pick<TimelineClip, 'audioState' | 'waveform' | 'waveformChannels' | 'waveformGenerating' | 'waveformProgress'> | null {
+  if (!mediaFileId) return null;
+  const mediaFile = useMediaStore.getState().files.find((file) => file.id === mediaFileId);
+  if (mediaFile?.waveformStatus === 'generating') return null;
+  if (!mediaFile?.waveform?.length && !mediaFile?.audioAnalysisRefs?.waveformPyramidId) return null;
+
+  return {
+    ...(mediaFile.waveform?.length ? { waveform: mediaFile.waveform } : {}),
+    ...(mediaFile.waveformChannels ? { waveformChannels: mediaFile.waveformChannels } : {}),
+    ...(mediaFile.audioAnalysisRefs
+      ? { audioState: { sourceAnalysisRefs: mediaFile.audioAnalysisRefs } }
+      : {}),
+    waveformGenerating: false,
+    waveformProgress: 100,
+  };
+}
+
+export interface AddAudioClipParams {
+  trackId: string;
+  file: File;
+  startTime: number;
+  estimatedDuration: number;
+  mediaFileId?: string;
+}
+
+/**
+ * Create placeholder audio clip immediately.
+ * Returns clip ready to be added to state while media loads in background.
+ */
+export function createAudioClipPlaceholder(params: AddAudioClipParams): TimelineClip {
+  const { trackId, file, startTime, estimatedDuration, mediaFileId } = params;
+  const clipId = generateClipId('clip-audio');
+  const cachedWaveform = getCachedMediaWaveform(mediaFileId);
+
+  return {
+    id: clipId,
+    trackId,
+    name: file.name,
+    file,
+    startTime,
+    duration: estimatedDuration,
+    inPoint: 0,
+    outPoint: estimatedDuration,
+    source: { type: 'audio', naturalDuration: estimatedDuration, mediaFileId },
+    transform: { ...DEFAULT_TRANSFORM },
+    effects: [],
+    isLoading: true,
+    ...(cachedWaveform ?? {}),
+  };
+}
+
+export interface LoadAudioMediaParams {
+  clip: TimelineClip;
+  file: File;
+  mediaFileId?: string;
+  waveformsEnabled: boolean;
+  updateClip: (id: string, updates: Partial<TimelineClip>) => void;
+}
+
+/**
+ * Load audio media in background - handles metadata and waveform generation.
+ */
+export async function loadAudioMedia(params: LoadAudioMediaParams): Promise<void> {
+  const { clip, file, mediaFileId, waveformsEnabled, updateClip } = params;
+
+  // Create and load audio element
+  const audio = createAudioElement(file);
+
+  // Wait for metadata
+  await new Promise<void>((resolve) => {
+    audio.onloadedmetadata = () => resolve();
+    audio.onerror = () => resolve();
+  });
+
+  const naturalDuration = audio.duration || clip.duration;
+
+  // Check if this is a large file (audio-only has higher threshold)
+  const isLargeFile = file.size > AUDIO_WAVEFORM_THRESHOLD;
+  const cachedWaveform = getCachedMediaWaveform(mediaFileId);
+
+  // Mark clip as ready first (waveform will load in background)
+  updateClip(clip.id, {
+    duration: naturalDuration,
+    outPoint: naturalDuration,
+    source: { type: 'audio', naturalDuration, mediaFileId },
+    isLoading: false,
+    ...(cachedWaveform ?? {
+      waveformGenerating: waveformsEnabled && !isLargeFile,
+      waveformProgress: 0,
+    }),
+  });
+  releaseTemporaryMediaElement(audio);
+
+  // Generate waveform in background - only if enabled and not very large
+  if (isLargeFile) {
+    log.debug('Skipping waveform for very large file', { sizeMB: (file.size / 1024 / 1024).toFixed(0), file: file.name });
+  }
+
+  if (waveformsEnabled && !isLargeFile && !cachedWaveform) {
+    // Run waveform generation async (don't await)
+    generateWaveformAsync(clip.id, file, mediaFileId, updateClip);
+  }
+
+  // Sync to media store
+  const mediaStore = useMediaStore.getState();
+  if (!mediaStore.getFileByName(file.name)) {
+    mediaStore.importFile(file);
+  }
+}
+
+/**
+ * Generate waveform asynchronously without blocking.
+ */
+async function generateWaveformAsync(
+  clipId: string,
+  file: File,
+  mediaFileId: string | undefined,
+  updateClip: (id: string, updates: Partial<TimelineClip>) => void
+): Promise<void> {
+  try {
+    log.debug('Starting waveform generation', { file: file.name });
+    const analysis = await generateTimelineWaveformAnalysisForFile(file, {
+      mediaFileId,
+      includePyramid: true,
+      samplesPerSecond: SOURCE_WAVEFORM_PREVIEW_SAMPLES_PER_SECOND,
+      maxPreviewSamples: SOURCE_WAVEFORM_MAX_PREVIEW_SAMPLES,
+      onProgress: (progress, partialWaveform) => {
+        updateClip(clipId, {
+          waveformProgress: mapSourceWaveformPreviewProgress(progress),
+          waveform: partialWaveform,
+        });
+      },
+      onPyramidProgress: (progress) => {
+        updateClip(clipId, {
+          waveformProgress: mapSourceWaveformPyramidProgress(progress),
+        });
+      },
+    });
+    log.debug('Waveform complete', { samples: analysis.waveform.length, file: file.name });
+
+    updateClip(clipId, {
+      waveform: analysis.waveform,
+      waveformChannels: analysis.waveformChannels,
+      ...(analysis.audioAnalysisRefs
+        ? { audioState: { sourceAnalysisRefs: analysis.audioAnalysisRefs } }
+        : {}),
+      waveformGenerating: false,
+      waveformProgress: 100,
+    });
+  } catch (e) {
+    log.warn('Waveform generation failed', e);
+    updateClip(clipId, { waveformGenerating: false });
+  }
+}

@@ -1,0 +1,1056 @@
+import { describe, expect, it } from 'vitest';
+import {
+  addClipCustomNodeDefinition,
+  buildAINodeAuthoringContext,
+  buildClipNodeGraph,
+  cloneClipNodeGraph,
+  connectClipNodeGraphPorts,
+  createClipAICustomNodeDefinition,
+  createClipNodeGraphState,
+  disconnectClipNodeGraphEdge,
+  remapClipNodeGraphEffectIds,
+  showClipBuiltInNode,
+  updateClipCustomNodeDefinition,
+  updateClipNodeGraphLayout,
+} from '../../src/services/nodeGraph';
+import { DEFAULT_TEXT_PROPERTIES, DEFAULT_TRANSFORM } from '../../src/stores/timeline/constants';
+import { createDefaultColorCorrectionState, type ClipMask, type Effect, type TimelineClip, type TimelineTrack } from '../../src/types';
+import { primeTimelineLoudnessEnvelopeCache } from '../../src/services/audio/timelineLoudnessEnvelopeCache';
+import {
+  primeTimelineFrequencySummaryCache,
+  primeTimelinePhaseCorrelationCache,
+} from '../../src/services/audio/timelineFrequencyPhaseCache';
+
+function createClip(overrides: Partial<TimelineClip> = {}): TimelineClip {
+  return {
+    id: 'clip-1',
+    trackId: 'video-1',
+    name: 'Clip',
+    file: new File([], 'clip.mp4', { type: 'video/mp4' }),
+    startTime: 0,
+    duration: 5,
+    inPoint: 0,
+    outPoint: 5,
+    source: { type: 'video' },
+    transform: structuredClone(DEFAULT_TRANSFORM),
+    effects: [],
+    ...overrides,
+  };
+}
+
+function createTrack(overrides: Partial<TimelineTrack> = {}): TimelineTrack {
+  return {
+    id: 'video-1',
+    name: 'Video 1',
+    type: 'video',
+    height: 60,
+    muted: false,
+    visible: true,
+    solo: false,
+    ...overrides,
+  };
+}
+
+function createMask(overrides: Partial<ClipMask> = {}): ClipMask {
+  return {
+    id: 'mask-1',
+    name: 'Mask 1',
+    vertices: [
+      { id: 'v1', x: 0.2, y: 0.2, handleIn: { x: 0, y: 0 }, handleOut: { x: 0, y: 0 } },
+      { id: 'v2', x: 0.8, y: 0.2, handleIn: { x: 0, y: 0 }, handleOut: { x: 0, y: 0 } },
+      { id: 'v3', x: 0.8, y: 0.8, handleIn: { x: 0, y: 0 }, handleOut: { x: 0, y: 0 } },
+    ],
+    closed: true,
+    opacity: 1,
+    feather: 0,
+    featherQuality: 1,
+    inverted: false,
+    mode: 'add',
+    expanded: false,
+    position: { x: 0, y: 0 },
+    enabled: true,
+    visible: true,
+    ...overrides,
+  };
+}
+
+describe('buildClipNodeGraph', () => {
+  it('projects a basic video clip as Source into Clip Output', () => {
+    const graph = buildClipNodeGraph(createClip(), createTrack());
+
+    expect(graph.id).toBe('clip-graph:clip-1');
+    expect(graph.owner).toEqual({ kind: 'clip', id: 'clip-1', name: 'Clip' });
+    expect(graph.nodes.map((node) => [node.id, node.kind, node.label])).toEqual([
+      ['source', 'source', 'video Source'],
+      ['output', 'output', 'Clip Output'],
+    ]);
+    expect(graph.nodes.find((node) => node.id === 'source')?.outputs.map((port) => port.id)).toEqual([
+      'texture',
+      'time',
+      'metadata',
+      'audio',
+      'waveform',
+      'spectrum',
+      'loudness',
+      'beats',
+      'onsets',
+      'phase-correlation',
+      'transcript-timing',
+      'frequency-bands',
+      'frequency-summary',
+      'audio-metadata',
+    ]);
+    expect(graph.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        fromNodeId: 'source',
+        fromPortId: 'texture',
+        toNodeId: 'output',
+        toPortId: 'input',
+        type: 'texture',
+      }),
+      expect.objectContaining({
+        fromNodeId: 'source',
+        fromPortId: 'time',
+        toNodeId: 'output',
+        toPortId: 'time',
+        type: 'time',
+      }),
+      expect.objectContaining({
+        fromNodeId: 'source',
+        fromPortId: 'metadata',
+        toNodeId: 'output',
+        toPortId: 'metadata',
+        type: 'metadata',
+      }),
+    ]));
+    expect(graph.nodes.find((node) => node.id === 'audio-output')).toBeUndefined();
+  });
+
+  it('inserts Transform for non-default transforms', () => {
+    const transform = structuredClone(DEFAULT_TRANSFORM);
+    transform.position.x = 24;
+    transform.scale.y = 0.75;
+    const graph = buildClipNodeGraph(createClip({ transform }), createTrack());
+
+    expect(graph.nodes.map((node) => node.id)).toEqual(['source', 'transform', 'output']);
+    expect(graph.nodes.find((node) => node.id === 'transform')).toMatchObject({
+      kind: 'transform',
+      label: 'Transform',
+      params: {
+        x: 24,
+        y: 0,
+        scaleX: 1,
+        scaleY: 0.75,
+        speed: 1,
+        reversed: false,
+      },
+    });
+    expect(graph.edges.filter((edge) => edge.type === 'texture' && edge.toPortId === 'input').map((edge) => [
+      edge.fromNodeId,
+      edge.fromPortId,
+      edge.toNodeId,
+      edge.toPortId,
+    ])).toEqual([
+      ['source', 'texture', 'transform', 'input'],
+      ['transform', 'output', 'output', 'input'],
+    ]);
+  });
+
+  it('projects masks, color, and visual effects in order', () => {
+    const blur: Effect = {
+      id: 'blur',
+      name: 'Blur',
+      type: 'blur',
+      enabled: true,
+      params: { radius: 12 },
+    };
+    const contrast: Effect = {
+      id: 'contrast',
+      name: 'Contrast',
+      type: 'contrast',
+      enabled: false,
+      params: {},
+    };
+    const colorCorrection = createDefaultColorCorrectionState();
+    const graph = buildClipNodeGraph(createClip({
+      masks: [
+        createMask({ id: 'active-mask' }),
+        createMask({ id: 'disabled-mask', enabled: false }),
+      ],
+      colorCorrection,
+      effects: [blur, contrast],
+    }), createTrack());
+
+    expect(graph.nodes.map((node) => node.id)).toEqual([
+      'source',
+      'mask',
+      'color',
+      'effect-blur',
+      'effect-contrast',
+      'output',
+    ]);
+    expect(graph.nodes.map((node) => node.kind)).toEqual([
+      'source',
+      'mask',
+      'color',
+      'effect',
+      'effect',
+      'output',
+    ]);
+    expect(graph.nodes.find((node) => node.id === 'mask')?.params).toEqual({ masks: 1 });
+    expect(graph.nodes.find((node) => node.id === 'color')?.params).toEqual({ nodes: 3, version: 'A' });
+    expect(graph.nodes.find((node) => node.id === 'effect-blur')?.params).toEqual({ enabled: true, params: 1 });
+    expect(graph.nodes.find((node) => node.id === 'effect-contrast')?.params).toEqual({ enabled: false, params: 0 });
+    expect(graph.edges.filter((edge) => edge.type === 'texture' && edge.toPortId === 'input').map((edge) => [
+      edge.fromNodeId,
+      edge.toNodeId,
+    ])).toEqual([
+      ['source', 'mask'],
+      ['mask', 'color'],
+      ['color', 'effect-blur'],
+      ['effect-blur', 'effect-contrast'],
+      ['effect-contrast', 'output'],
+    ]);
+  });
+
+  it('projects audio effects into an audio lane feeding the combined output', () => {
+    const audioVolume: Effect = {
+      id: 'volume',
+      name: 'Volume',
+      type: 'audio-volume',
+      enabled: true,
+      params: { gain: 0.8 },
+    };
+    const audioEq: Effect = {
+      id: 'eq',
+      name: 'EQ',
+      type: 'audio-eq',
+      enabled: true,
+      params: { low: -2, high: 3 },
+    };
+    const graph = buildClipNodeGraph(createClip({ effects: [audioVolume, audioEq] }), createTrack());
+    const visualOutput = graph.nodes.find((node) => node.id === 'output');
+    const audioEffectNodes = graph.nodes.filter((node) => node.id === 'effect-volume' || node.id === 'effect-eq');
+
+    expect(graph.nodes.map((node) => node.id)).toEqual([
+      'source',
+      'output',
+      'effect-volume',
+      'effect-eq',
+    ]);
+    expect(visualOutput).toMatchObject({
+      kind: 'output',
+      label: 'Clip Output',
+      inputs: expect.arrayContaining([expect.objectContaining({ id: 'audio', type: 'audio' })]),
+    });
+    expect(audioEffectNodes.map((node) => node.layout.y)).toEqual([252, 252]);
+    expect(audioEffectNodes.every((node) => node.layout.y !== visualOutput?.layout.y)).toBe(true);
+    expect(graph.edges.filter((edge) => edge.type === 'audio').map((edge) => [
+      edge.fromNodeId,
+      edge.fromPortId,
+      edge.toNodeId,
+      edge.toPortId,
+    ])).toEqual([
+      ['source', 'audio', 'effect-volume', 'input'],
+      ['effect-volume', 'output', 'effect-eq', 'input'],
+      ['effect-eq', 'output', 'output', 'audio'],
+    ]);
+  });
+
+  it('projects registry audio effect stacks before legacy audio effects', () => {
+    const audioVolume: Effect = {
+      id: 'volume',
+      name: 'Volume',
+      type: 'audio-volume',
+      enabled: true,
+      params: { volume: 0.8 },
+    };
+    const graph = buildClipNodeGraph(createClip({
+      source: { type: 'audio', mediaFileId: 'media-a' },
+      audioState: {
+        effectStack: [{
+          id: 'hp',
+          descriptorId: 'audio-high-pass',
+          enabled: true,
+          params: { frequencyHz: 120, q: 0.7 },
+          automationMode: 'clip',
+        }],
+      },
+      effects: [audioVolume],
+    }), createTrack({ type: 'audio' }));
+
+    expect(graph.nodes.map((node) => node.id)).toEqual([
+      'source',
+      'audio-effect-hp',
+      'effect-volume',
+      'output',
+    ]);
+    expect(graph.nodes.find((node) => node.id === 'audio-effect-hp')).toMatchObject({
+      kind: 'effect',
+      label: 'High Pass Filter',
+      params: {
+        enabled: true,
+        descriptorId: 'audio-high-pass',
+        automationMode: 'clip',
+      },
+    });
+    expect(graph.edges.filter((edge) => edge.type === 'audio' && edge.toPortId === 'input').map((edge) => [
+      edge.fromNodeId,
+      edge.toNodeId,
+    ])).toEqual([
+      ['source', 'audio-effect-hp'],
+      ['audio-effect-hp', 'effect-volume'],
+      ['effect-volume', 'output'],
+    ]);
+  });
+
+  it('exposes audio analysis ports with artifact metadata for AI nodes', () => {
+    const graph = buildClipNodeGraph(createClip({
+      source: { type: 'audio', mediaFileId: 'media-a' },
+      waveform: [0, 0.5, 1],
+      audioState: {
+        sourceAudioRevisionId: 'audio-rev-1',
+        sourceAnalysisRefs: {
+          waveformPyramidId: 'waveform-artifact',
+          spectrogramTileSetIds: ['spectrum-artifact'],
+          loudnessEnvelopeId: 'loudness-artifact',
+          beatGridId: 'beat-artifact',
+          onsetMapId: 'onset-artifact',
+          phaseCorrelationId: 'phase-artifact',
+          transcriptTimingId: 'transcript-artifact',
+          frequencySummaryId: 'frequency-artifact',
+        },
+        processedAnalysisRefs: {
+          processedWaveformPyramidId: 'processed-waveform-artifact',
+          spectrogramTileSetIds: ['processed-spectrum-a', 'processed-spectrum-b'],
+          loudnessEnvelopeId: 'processed-loudness-artifact',
+        },
+      },
+    }), createTrack({ type: 'audio' }));
+    const source = graph.nodes.find((node) => node.id === 'source');
+    const outputsById = new Map(source?.outputs.map((port) => [port.id, port]) ?? []);
+
+    expect(graph.nodes.find((node) => node.id === 'audio-analysis')).toBeUndefined();
+    expect(source).toMatchObject({
+      kind: 'source',
+      runtime: 'builtin',
+      params: {
+        sourceRefs: true,
+        processedRefs: true,
+        status: 'ready',
+        artifactPorts: 10,
+        availableArtifacts: 10,
+        missingArtifacts: 0,
+        staleArtifacts: 0,
+        processedArtifacts: 4,
+        sourceArtifacts: 6,
+        progressPercent: 100,
+      },
+    });
+    expect(graph.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        fromNodeId: 'source',
+        fromPortId: 'audio',
+        toNodeId: 'output',
+        toPortId: 'input',
+        type: 'audio',
+      }),
+    ]));
+    expect(source?.outputs.map((port) => [port.id, port.type, port.metadata?.semanticKind, port.metadata?.artifactId])).toEqual([
+      ['audio', 'audio', 'audio-source', undefined],
+      ['time', 'time', undefined, undefined],
+      ['metadata', 'metadata', undefined, undefined],
+      ['waveform', 'curve', 'waveform', 'processed-waveform-artifact'],
+      ['spectrum', 'texture', 'spectrum', 'processed-spectrum-a'],
+      ['spectrum-2', 'texture', 'spectrum', 'processed-spectrum-b'],
+      ['loudness', 'curve', 'loudness', 'processed-loudness-artifact'],
+      ['beats', 'event', 'beats', 'beat-artifact'],
+      ['onsets', 'event', 'onsets', 'onset-artifact'],
+      ['phase-correlation', 'curve', 'phase-correlation', 'phase-artifact'],
+      ['transcript-timing', 'text', 'transcript', 'transcript-artifact'],
+      ['frequency-bands', 'table', 'frequency-bands', 'frequency-artifact'],
+      ['frequency-summary', 'table', 'frequency-summary', 'frequency-artifact'],
+      ['audio-metadata', 'metadata', 'audio-metadata', undefined],
+    ]);
+    expect(outputsById.get('waveform')?.metadata).toMatchObject({
+      targetClipId: 'clip-1',
+      artifactProvenance: 'processed',
+      available: true,
+      stale: false,
+      generateAction: {
+        type: 'generate-audio-analysis',
+        artifactKind: 'processed-waveform-pyramid',
+      },
+    });
+    expect(outputsById.get('spectrum-2')?.metadata).toMatchObject({
+      targetClipId: 'clip-1',
+      artifactProvenance: 'processed',
+      artifactIndex: 1,
+      generateAction: {
+        artifactKind: 'spectrogram-tiles',
+      },
+    });
+    expect(outputsById.get('frequency-bands')?.metadata).toMatchObject({
+      artifactId: 'frequency-artifact',
+      semanticKind: 'frequency-bands',
+      generateAction: {
+        artifactKind: 'frequency-summary',
+      },
+    });
+    expect(outputsById.get('audio-metadata')?.metadata).toMatchObject({
+      semanticKind: 'audio-metadata',
+      signalRefId: 'audio-rev-1',
+      available: true,
+      previewable: false,
+    });
+  });
+
+  it('keeps missing audio analysis ports artifact-free and bounds repeated spectrum ports', () => {
+    const graph = buildClipNodeGraph(createClip({
+      source: { type: 'audio', mediaFileId: 'media-a' },
+      waveform: [0],
+      audioState: {
+        sourceAnalysisRefs: {
+          spectrogramTileSetIds: Array.from({ length: 20 }, (_, index) => `source-spectrum-${index + 1}`),
+        },
+      },
+    }), createTrack({ type: 'audio' }));
+    const source = graph.nodes.find((node) => node.id === 'source');
+    const outputsById = new Map(source?.outputs.map((port) => [port.id, port]) ?? []);
+    const spectrumPorts = source?.outputs.filter((port) => port.metadata?.semanticKind === 'spectrum') ?? [];
+
+    expect(spectrumPorts).toHaveLength(16);
+    expect(outputsById.get('spectrum')?.metadata).toMatchObject({
+      artifactId: 'source-spectrum-1',
+      artifactIndex: 0,
+      artifactProvenance: 'source',
+      available: true,
+      stale: false,
+    });
+    expect(outputsById.get('spectrum-16')?.metadata).toMatchObject({
+      artifactId: 'source-spectrum-16',
+      artifactIndex: 15,
+      artifactProvenance: 'source',
+      available: true,
+    });
+    expect(outputsById.get('spectrum-17')).toBeUndefined();
+    expect(outputsById.get('waveform')?.metadata).toMatchObject({
+      artifactId: undefined,
+      signalRefId: undefined,
+      available: false,
+      stale: false,
+      generateAction: {
+        artifactKind: 'waveform-pyramid',
+      },
+    });
+    expect(outputsById.get('loudness')?.metadata).toMatchObject({
+      artifactId: undefined,
+      available: false,
+      generateAction: {
+        artifactKind: 'loudness-envelope',
+      },
+    });
+    expect(graph.nodes.find((node) => node.id === 'audio-analysis')).toBeUndefined();
+    expect(source?.params).toMatchObject({
+      status: 'partial',
+      artifactPorts: 24,
+      availableArtifacts: 16,
+      missingArtifacts: 8,
+      progressPercent: 67,
+    });
+  });
+
+  it('projects linked video and audio clips as one combined source and output graph', () => {
+    const videoClip = createClip({
+      id: 'video-clip',
+      name: 'Linked Video',
+      linkedClipId: 'audio-clip',
+      source: { type: 'video', mediaFileId: 'media-video' },
+    });
+    const audioClip = createClip({
+      id: 'audio-clip',
+      trackId: 'audio-1',
+      name: 'Linked Audio',
+      linkedClipId: 'video-clip',
+      file: new File([], 'linked.wav', { type: 'audio/wav' }),
+      source: { type: 'audio', mediaFileId: 'media-audio' },
+      waveform: [0.2, 0.6],
+      audioState: {
+        sourceAudioRevisionId: 'linked-audio-rev',
+        sourceAnalysisRefs: {
+          frequencySummaryId: 'linked-frequency',
+        },
+      },
+    });
+    const graph = buildClipNodeGraph(videoClip, createTrack(), {
+      linkedClip: audioClip,
+      linkedTrack: createTrack({ id: 'audio-1', name: 'Audio 1', type: 'audio' }),
+    });
+    const source = graph.nodes.find((node) => node.id === 'source');
+    const output = graph.nodes.find((node) => node.id === 'output');
+    const outputsById = new Map(source?.outputs.map((port) => [port.id, port]) ?? []);
+
+    expect(graph.id).toBe('clip-graph:video-clip');
+    expect(graph.nodes.find((node) => node.id === 'audio-analysis')).toBeUndefined();
+    expect(graph.nodes.find((node) => node.id === 'audio-output')).toBeUndefined();
+    expect(source).toMatchObject({
+      label: 'video + audio Source',
+      params: {
+        linkedAudioClipId: 'audio-clip',
+        sourceRefs: true,
+        status: 'partial',
+      },
+    });
+    expect(output?.inputs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'input', type: 'texture' }),
+      expect.objectContaining({ id: 'audio', type: 'audio' }),
+    ]));
+    expect(outputsById.get('audio')?.metadata).toMatchObject({
+      semanticKind: 'audio-source',
+      targetClipId: 'audio-clip',
+    });
+    expect(outputsById.get('frequency-bands')?.metadata).toMatchObject({
+      artifactId: 'linked-frequency',
+      semanticKind: 'frequency-bands',
+      targetClipId: 'audio-clip',
+    });
+    expect(graph.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        fromNodeId: 'source',
+        fromPortId: 'texture',
+        toNodeId: 'output',
+        toPortId: 'input',
+        type: 'texture',
+      }),
+      expect.objectContaining({
+        fromNodeId: 'source',
+        fromPortId: 'audio',
+        toNodeId: 'output',
+        toPortId: 'audio',
+        type: 'audio',
+      }),
+    ]));
+  });
+
+  it('applies persisted node layout from clip graph state', () => {
+    const clip = createClip();
+    const nodeGraph = updateClipNodeGraphLayout(clip, 'source', { x: 44, y: 55 }, createTrack());
+    const graph = buildClipNodeGraph({ ...clip, nodeGraph }, createTrack());
+
+    expect(graph.nodes.find((node) => node.id === 'source')?.layout).toEqual({ x: 44, y: 55 });
+    expect(graph.nodes.find((node) => node.id === 'output')?.layout).toEqual({ x: 230, y: 88 });
+  });
+
+  it('reconciles saved layout when graph shape changes', () => {
+    const clip = createClip();
+    const nodeGraph = updateClipNodeGraphLayout(clip, 'source', { x: 12, y: 34 }, createTrack());
+    const transform = structuredClone(DEFAULT_TRANSFORM);
+    transform.position.x = 10;
+    const graph = buildClipNodeGraph({ ...clip, transform, nodeGraph }, createTrack());
+
+    expect(graph.nodes.map((node) => node.id)).toEqual(['source', 'transform', 'output']);
+    expect(graph.nodes.find((node) => node.id === 'source')?.layout).toEqual({ x: 12, y: 34 });
+    expect(graph.nodes.find((node) => node.id === 'transform')?.layout).toEqual({ x: 230, y: 88 });
+  });
+
+  it('stores field-backed node states without duplicating clip params', () => {
+    const blur: Effect = {
+      id: 'blur',
+      name: 'Blur',
+      type: 'blur',
+      enabled: true,
+      params: { radius: 12 },
+    };
+    const state = createClipNodeGraphState(createClip({ effects: [blur] }), createTrack());
+
+    expect(state.nodes.map((node) => [node.id, node.backing.kind])).toEqual([
+      ['source', 'clip-source'],
+      ['effect-blur', 'clip-effect'],
+      ['output', 'clip-output'],
+    ]);
+    expect(state.nodes.find((node) => node.id === 'effect-blur')?.backing).toEqual({
+      kind: 'clip-effect',
+      effectId: 'blur',
+    });
+  });
+
+  it('clones and remaps persisted effect node ids for pasted clips', () => {
+    const blur: Effect = {
+      id: 'blur',
+      name: 'Blur',
+      type: 'blur',
+      enabled: true,
+      params: { radius: 12 },
+    };
+    const state = updateClipNodeGraphLayout(
+      createClip({ effects: [blur] }),
+      'effect-blur',
+      { x: 500, y: 99 },
+      createTrack(),
+    );
+    const cloned = cloneClipNodeGraph(state);
+    const remapped = remapClipNodeGraphEffectIds(cloned, new Map([['blur', 'new-blur']]));
+
+    expect(cloned).not.toBe(state);
+    expect(remapped?.nodes.find((node) => node.id === 'effect-new-blur')).toMatchObject({
+      backing: { kind: 'clip-effect', effectId: 'new-blur' },
+      layout: { x: 500, y: 99 },
+    });
+  });
+
+  it('projects AI custom nodes from clip graph state into the main signal chain', () => {
+    const clip = createClip();
+    const track = createTrack();
+    const definition = createClipAICustomNodeDefinition('custom-ai', clip, 'AI Node');
+    const nodeGraph = addClipCustomNodeDefinition(clip, definition, track);
+    const graph = buildClipNodeGraph({ ...clip, nodeGraph }, track);
+
+    expect(graph.nodes.map((node) => [node.id, node.kind, node.runtime])).toEqual([
+      ['source', 'source', 'builtin'],
+      ['custom-ai', 'custom', 'typescript'],
+      ['output', 'output', 'builtin'],
+    ]);
+    expect(graph.nodes.find((node) => node.id === 'custom-ai')).toMatchObject({
+      label: 'AI Node',
+      params: { status: 'draft', prompt: 'empty', bypassed: false },
+    });
+    expect(nodeGraph.nodes.find((node) => node.id === 'custom-ai')?.backing).toEqual({
+      kind: 'clip-custom-node',
+      nodeId: 'custom-ai',
+    });
+    expect(graph.edges.filter((edge) => edge.type === 'texture' && edge.toPortId === 'input').map((edge) => [
+      edge.fromNodeId,
+      edge.toNodeId,
+    ])).toEqual([
+      ['source', 'custom-ai'],
+      ['custom-ai', 'output'],
+    ]);
+  });
+
+  it('keeps source audio-analysis seeded AI custom nodes off the main signal chain', () => {
+    const clip = createClip({
+      source: { type: 'audio', mediaFileId: 'media-a' },
+      file: new File([], 'voice.wav', { type: 'audio/wav' }),
+      waveform: [0.2, 0.8],
+      audioState: {
+        sourceAnalysisRefs: {
+          frequencySummaryId: 'frequency-artifact',
+        },
+      },
+    });
+    const track = createTrack({ type: 'audio' });
+    const baseGraph = buildClipNodeGraph(clip, track);
+    const frequencyPort = baseGraph.nodes
+      .find((node) => node.id === 'source')
+      ?.outputs.find((port) => port.id === 'frequency-bands');
+
+    expect(frequencyPort).toMatchObject({
+      type: 'table',
+      metadata: {
+        semanticKind: 'frequency-bands',
+        artifactId: 'frequency-artifact',
+      },
+    });
+
+    const definition = createClipAICustomNodeDefinition('custom-frequency-ai', clip, 'Frequency AI', {
+      primaryInput: {
+        id: 'input',
+        label: frequencyPort!.label,
+        type: frequencyPort!.type,
+        metadata: frequencyPort!.metadata,
+      },
+      outputType: frequencyPort!.type,
+      description: 'Analyze frequency bands.',
+      prompt: 'Use the connected frequency bands.',
+    });
+    const nodeGraph = addClipCustomNodeDefinition(clip, definition, track);
+    const graph = buildClipNodeGraph({ ...clip, nodeGraph }, track);
+
+    const frequencyNode = graph.nodes.find((node) => node.id === 'custom-frequency-ai');
+    expect(frequencyNode?.inputs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'input', type: 'table', metadata: expect.objectContaining({ semanticKind: 'frequency-bands' }) }),
+    ]));
+    expect(frequencyNode?.outputs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'output', type: 'table' }),
+    ]));
+    expect(graph.edges.some((edge) => edge.toNodeId === 'custom-frequency-ai')).toBe(false);
+    expect(graph.edges).toContainEqual(expect.objectContaining({
+      fromNodeId: 'source',
+      fromPortId: 'audio',
+      toNodeId: 'output',
+      toPortId: 'input',
+      type: 'audio',
+    }));
+
+    const connected = connectClipNodeGraphPorts(
+      { ...clip, nodeGraph },
+      {
+        fromNodeId: 'source',
+        fromPortId: 'frequency-bands',
+        toNodeId: 'custom-frequency-ai',
+        toPortId: 'input',
+      },
+      track,
+    );
+    const connectedGraph = buildClipNodeGraph({ ...clip, nodeGraph: connected }, track);
+
+    expect(connectedGraph.edges).toContainEqual(expect.objectContaining({
+      fromNodeId: 'source',
+      fromPortId: 'frequency-bands',
+      toNodeId: 'custom-frequency-ai',
+      toPortId: 'input',
+      type: 'table',
+    }));
+  });
+
+  it('persists manual node graph links and disconnections', () => {
+    const clip = createClip();
+    const track = createTrack();
+    const definition = createClipAICustomNodeDefinition('custom-ai', clip, 'AI Node');
+    const nodeGraph = addClipCustomNodeDefinition(clip, definition, track);
+    const bypassed = connectClipNodeGraphPorts(
+      { ...clip, nodeGraph },
+      {
+        fromNodeId: 'source',
+        fromPortId: 'texture',
+        toNodeId: 'output',
+        toPortId: 'input',
+      },
+      track,
+    );
+    const disconnected = disconnectClipNodeGraphEdge(
+      { ...clip, nodeGraph: bypassed },
+      'source:texture->custom-ai:input',
+      track,
+    );
+    const graph = buildClipNodeGraph({ ...clip, nodeGraph: disconnected }, track);
+
+    expect(graph.edges.filter((edge) => edge.type === 'texture').map((edge) => [
+      edge.fromNodeId,
+      edge.fromPortId,
+      edge.toNodeId,
+      edge.toPortId,
+    ])).toEqual([
+      ['source', 'texture', 'output', 'input'],
+    ]);
+    expect(disconnected.manualEdges).toEqual(graph.edges);
+    expect(cloneClipNodeGraph(disconnected)?.manualEdges).toEqual(graph.edges);
+  });
+
+  it('builds AI node authoring context with graph and timeline signals', () => {
+    const clip = createClip();
+    const track = createTrack();
+    const definition = createClipAICustomNodeDefinition('custom-ai', clip, 'AI Node');
+    const nodeGraph = addClipCustomNodeDefinition(clip, definition, track);
+    const context = buildAINodeAuthoringContext(
+      { ...clip, nodeGraph },
+      definition,
+      { clips: [{ ...clip, nodeGraph }], tracks: [track] },
+    );
+
+    expect(context).toContain('MASTERSELECTS AI NODE AUTHORING CONTEXT');
+    expect(context).toContain('Current node:');
+    expect(context).toContain('source.texture -> custom-ai.input (texture)');
+    expect(context).toContain('custom-ai.output -> output.input (texture)');
+    expect(context).toContain('Timeline clips:');
+  });
+
+  it('includes text clip details in AI node authoring context', () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1920;
+    canvas.height = 1080;
+    const clip = createClip({
+      source: { type: 'text', textCanvas: canvas },
+      textProperties: {
+        ...structuredClone(DEFAULT_TEXT_PROPERTIES),
+        text: 'Animate this sentence like it writes itself.',
+        fontFamily: 'Inter',
+        fontSize: 96,
+        fontWeight: 700,
+      },
+    });
+    const track = createTrack();
+    const definition = createClipAICustomNodeDefinition('custom-ai', clip, 'AI Node');
+    const nodeGraph = addClipCustomNodeDefinition(clip, definition, track);
+    const context = buildAINodeAuthoringContext(
+      { ...clip, nodeGraph },
+      definition,
+      { clips: [{ ...clip, nodeGraph }], tracks: [track] },
+    );
+
+    expect(context).toContain('Text source:');
+    expect(context).toContain('text="Animate this sentence like it writes itself."');
+    expect(context).toContain('canvas=1920x1080');
+    expect(context).toContain('fontFamily=Inter');
+    expect(context).toContain('fontSize=96');
+    expect(context).toContain('layout:');
+    expect(context).toContain('contentBounds=');
+    expect(context).toContain('chars=');
+    expect(context).toContain('layout.characters');
+  });
+
+  it('includes audio artifacts and graph ports in AI node authoring context', () => {
+    const clip = createClip({
+      source: { type: 'audio', mediaFileId: 'media-a' },
+      waveform: [0.25, 1],
+      audioState: {
+        sourceAudioRevisionId: 'audio-rev-1',
+        sourceAnalysisRefs: {
+          waveformPyramidId: 'source-waveform-artifact',
+          spectrogramTileSetIds: ['source-spectrum-artifact'],
+          loudnessEnvelopeId: 'source-loudness-artifact',
+        },
+        processedAnalysisRefs: {
+          processedWaveformPyramidId: 'processed-waveform-artifact',
+          spectrogramTileSetIds: ['processed-spectrum-artifact'],
+          loudnessEnvelopeId: 'processed-loudness-artifact',
+          frequencySummaryId: 'processed-frequency-artifact',
+          phaseCorrelationId: 'processed-phase-artifact',
+        },
+      },
+    });
+    primeTimelineLoudnessEnvelopeCache(['processed-loudness-artifact'], {
+      sampleRate: 48_000,
+      duration: 5,
+      curves: [],
+      summary: {
+        integratedLufs: -31,
+        truePeakDbtp: -0.2,
+        samplePeakDbfs: -0.4,
+        rmsDbfs: -28,
+      },
+    });
+    primeTimelineFrequencySummaryCache(['processed-frequency-artifact'], {
+      sampleRate: 48_000,
+      duration: 5,
+      fftSize: 2048,
+      hopSize: 512,
+      summary: {
+        spectralCentroidHz: 240,
+        lowEnergyShare: 0.62,
+        midEnergyShare: 0.32,
+        highEnergyShare: 0.06,
+        dominantBandId: 'mains',
+      },
+      bands: [{
+        bandId: 'mains',
+        label: '50 Hz',
+        minFrequency: 45,
+        maxFrequency: 55,
+        rmsDb: -21,
+        peakDb: -12,
+        energyShare: 0.24,
+        centroidHz: 50,
+      }],
+    });
+    primeTimelinePhaseCorrelationCache(['processed-phase-artifact'], {
+      sampleRate: 48_000,
+      duration: 5,
+      windowDuration: 0.4,
+      hopDuration: 0.1,
+      points: [],
+      summary: {
+        averageCorrelation: 0.12,
+        minimumCorrelation: -0.58,
+        maximumCorrelation: 0.8,
+        negativeCorrelationPercent: 22,
+        averageMidSideRatioDb: 5,
+        stereoWidth: 1.5,
+        monoCompatible: false,
+      },
+    });
+    const track = createTrack({
+      type: 'audio',
+      audioState: {
+        volumeDb: -3,
+        pan: 0.25,
+        muted: false,
+        solo: false,
+        recordArm: false,
+        inputMonitor: false,
+        meterMode: 'lufs',
+        effectStack: [{
+          id: 'track-comp',
+          descriptorId: 'audio-compressor',
+          enabled: true,
+          params: { thresholdDb: -18, ratio: 3 },
+          automationMode: 'track',
+        }],
+      },
+    });
+    const definition = createClipAICustomNodeDefinition('custom-ai', clip, 'AI Node');
+    const nodeGraph = addClipCustomNodeDefinition(clip, definition, track);
+    const context = buildAINodeAuthoringContext(
+      { ...clip, nodeGraph },
+      definition,
+      {
+        clips: [{ ...clip, nodeGraph }],
+        tracks: [track],
+        masterAudioState: {
+          volumeDb: -1,
+          limiterEnabled: true,
+          truePeakCeilingDb: -1,
+          targetLufs: -14,
+          effectStack: [{
+            id: 'master-limit',
+            descriptorId: 'audio-limiter',
+            enabled: true,
+            params: { ceilingDb: -1, inputGainDb: 0 },
+            automationMode: 'track',
+          }],
+        },
+      },
+    );
+
+    expect(context).toContain('Audio source:');
+    expect(context).toContain('sourceAudioRevision=audio-rev-1');
+    expect(context).toContain('sourceAnalysisRefs=waveform=source-waveform-artifact spectrograms=source-spectrum-artifact loudness=source-loudness-artifact');
+    expect(context).toContain('processedAnalysisRefs=processedWaveform=processed-waveform-artifact spectrograms=processed-spectrum-artifact loudness=processed-loudness-artifact');
+    expect(context).toContain('effectiveAnalysisRefs=waveform=processed-waveform-artifact processedWaveform=processed-waveform-artifact spectrograms=processed-spectrum-artifact loudness=processed-loudness-artifact');
+    expect(context).toContain('trackAudio=id=video-1 name="Video 1" muted=false solo=false volumeDb=-3 pan=0.25 meter=lufs sends=0');
+    expect(context).toContain('trackEffectStack=1:track-comp name="Compressor" descriptor=audio-compressor enabled=true automation=track params=[thresholdDb=-18,ratio=3]');
+    expect(context).toContain('masterAudio=volumeDb=-1 limiter=true truePeakCeilingDb=-1 targetLufs=-14');
+    expect(context).toContain('masterEffectStack=1:master-limit name="Limiter" descriptor=audio-limiter enabled=true automation=track params=[ceilingDb=-1,inputGainDb=0]');
+    expect(context).toContain('effectiveRepairSuggestions=');
+    expect(context).toContain('hum-notch severity=warning');
+    expect(context).toContain('mono-compatibility severity=warning');
+    expect(context).toContain('waveform:curve semantic=waveform available=true stale=false provenance=processed artifact=processed-waveform-artifact action=processed-waveform-pyramid');
+    expect(context).toContain('spectrum:texture semantic=spectrum available=true stale=false provenance=processed artifact=processed-spectrum-artifact action=spectrogram-tiles');
+    expect(context).toContain('frequency-bands:table semantic=frequency-bands available=true stale=false provenance=processed artifact=processed-frequency-artifact action=frequency-summary');
+    expect(context).toContain('audio-metadata:metadata semantic=audio-metadata available=true stale=false provenance=none artifact=none action=none');
+    expect(context).not.toContain('0.25,1');
+    expect(context).not.toContain('Float32Array');
+  });
+
+  it('updates and clones AI custom node authoring state', () => {
+    const clip = createClip();
+    const track = createTrack();
+    const definition = createClipAICustomNodeDefinition('custom-ai', clip, 'AI Node');
+    const nodeGraph = addClipCustomNodeDefinition(clip, definition, track);
+    const updated = updateClipCustomNodeDefinition(
+      { ...clip, nodeGraph },
+      'custom-ai',
+      {
+        label: 'Motion Curve Builder',
+        bypassed: true,
+        status: 'ready',
+        parameterSchema: [
+          { id: 'amount', label: 'Amount', type: 'number', default: 0.5, min: 0, max: 1 },
+        ],
+        params: { amount: 0.75 },
+        ai: {
+          prompt: 'Create a motion curve from the incoming video.',
+          plan: 'Read the incoming texture and remap pixels into a motion curve texture.',
+          generatedCode: 'defineNode({ /* generated */ })',
+          conversation: [
+            {
+              id: 'message-1',
+              role: 'assistant',
+              kind: 'plan',
+              content: 'Read the incoming texture and remap pixels into a motion curve texture.',
+              createdAt: 10,
+            },
+          ],
+          conversationSummary: 'plan: remap texture into motion curve',
+        },
+      },
+      track,
+    );
+    const cloned = cloneClipNodeGraph(updated);
+
+    expect(updated.customNodes?.[0]).toMatchObject({
+      id: 'custom-ai',
+      label: 'Motion Curve Builder',
+      bypassed: true,
+      status: 'ready',
+      parameterSchema: [
+        { id: 'amount', label: 'Amount', type: 'number', default: 0.5, min: 0, max: 1 },
+      ],
+      params: { amount: 0.75 },
+      ai: {
+        prompt: 'Create a motion curve from the incoming video.',
+        plan: 'Read the incoming texture and remap pixels into a motion curve texture.',
+        generatedCode: 'defineNode({ /* generated */ })',
+        conversation: [
+          {
+            id: 'message-1',
+            role: 'assistant',
+            kind: 'plan',
+            content: 'Read the incoming texture and remap pixels into a motion curve texture.',
+            createdAt: 10,
+          },
+        ],
+        conversationSummary: 'plan: remap texture into motion curve',
+      },
+    });
+    expect(cloned).not.toBe(updated);
+    expect(cloned?.customNodes?.[0]).not.toBe(updated.customNodes?.[0]);
+    expect(cloned?.customNodes?.[0]?.ai).toEqual(updated.customNodes?.[0]?.ai);
+    expect(cloned?.customNodes?.[0]?.ai.conversation).not.toBe(updated.customNodes?.[0]?.ai.conversation);
+    expect(cloned?.customNodes?.[0]?.parameterSchema).toEqual(updated.customNodes?.[0]?.parameterSchema);
+    expect(cloned?.customNodes?.[0]?.parameterSchema).not.toBe(updated.customNodes?.[0]?.parameterSchema);
+  });
+
+  it('repairs missing generated code from the last stored code conversation while cloning', () => {
+    const clip = createClip();
+    const track = createTrack();
+    const definition = {
+      ...createClipAICustomNodeDefinition('custom-ai', clip, 'AI Node'),
+      ai: {
+        prompt: 'make it brighter',
+        conversation: [
+          {
+            id: 'message-1',
+            role: 'assistant' as const,
+            kind: 'code' as const,
+            content: '```js\ndefineNode({ process(input) { return { output: input.input }; } })\n```',
+            createdAt: 10,
+          },
+        ],
+      },
+    };
+
+    const nodeGraph = addClipCustomNodeDefinition(clip, definition, track);
+
+    expect(nodeGraph.customNodes?.[0].ai.generatedCode).toBe(
+      'defineNode({ process(input) { return { output: input.input }; } })',
+    );
+  });
+
+  it('does not repair generated code when the user explicitly cleared it', () => {
+    const clip = createClip();
+    const track = createTrack();
+    const definition = {
+      ...createClipAICustomNodeDefinition('custom-ai', clip, 'AI Node'),
+      ai: {
+        prompt: 'make it brighter',
+        generatedCode: '',
+        conversation: [
+          {
+            id: 'message-1',
+            role: 'assistant' as const,
+            kind: 'code' as const,
+            content: 'defineNode({ process(input) { return { output: input.input }; } })',
+            createdAt: 10,
+          },
+        ],
+      },
+    };
+
+    const nodeGraph = addClipCustomNodeDefinition(clip, definition, track);
+
+    expect(nodeGraph.customNodes?.[0].ai.generatedCode).toBe('');
+  });
+
+  it('can force field-backed built-in nodes to stay visible from graph authoring', () => {
+    const clip = createClip();
+    const track = createTrack();
+    const withTransform = showClipBuiltInNode(clip, 'transform', track);
+    const withColor = showClipBuiltInNode({ ...clip, nodeGraph: withTransform }, 'color', track);
+    const graph = buildClipNodeGraph({ ...clip, nodeGraph: withColor }, track);
+
+    expect(graph.nodes.map((node) => node.id)).toEqual(['source', 'transform', 'color', 'output']);
+    expect(withColor.forcedBuiltIns).toEqual(['transform', 'color']);
+    expect(cloneClipNodeGraph(withColor)?.forcedBuiltIns).toEqual(['transform', 'color']);
+  });
+});

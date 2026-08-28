@@ -1,0 +1,723 @@
+@import './TimelineClipRegionControls.css';
+
+@layer features {
+/* Stem shell controls */
+.stem-fill-badge {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  border-radius: 2px;
+  overflow: hidden;
+  font-size: 9px;
+  font-weight: bold;
+  line-height: 14px;
+  text-align: center;
+}
+
+.stem-fill-bg {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(56, 189, 248, 0.2);
+  color: rgba(56, 189, 248, 0.45);
+}
+
+.stem-fill-progress {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  color: var(--text-inverse);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  overflow: hidden;
+  transition: height 0.3s ease-out;
+  background: #38bdf8;
+}
+
+.clip-stem-generating {
+  position: absolute;
+  left: 16px;
+  bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 3px 0;
+  z-index: 12;
+  pointer-events: none;
+}
+
+.clip-stem-generating .stem-fill-badge {
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  font-size: 14px;
+  line-height: 24px;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.35);
+}
+
+.clip-stem-generating .stem-percent,
+.clip-stem-generating .stem-status-text {
+  font-size: 11px;
+  color: #7dd3fc;
+  font-weight: 800;
+  line-height: 1;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+}
+
+.clip-stem-generating .stem-status-text {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  max-width: min(180px, calc(100% - 30px));
+  padding: 0 8px;
+  border-radius: 4px;
+  background: rgba(8, 47, 73, 0.72);
+  color: #e0f2fe;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.clip-stem-switcher {
+  position: absolute;
+  left: 16px;
+  bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  z-index: 13;
+}
+
+.clip-stem-switcher.open {
+  margin: -12px -18px -14px -10px;
+  padding: 12px 18px 14px 10px;
+}
+
+.clip-stem-ready-badge,
+.clip-stem-choice-button {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--text-inverse);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.35);
+}
+
+.clip-stem-ready-badge {
+  background: #38bdf8;
+  font-size: 14px;
+  line-height: 24px;
+  font-weight: 800;
+  opacity: 0.5;
+  cursor: pointer;
+  transition: opacity 0.12s ease, transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.clip-stem-ready-badge:hover,
+.clip-stem-switcher.open .clip-stem-ready-badge {
+  opacity: 1;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(56, 189, 248, 0.45), 0 1px 5px rgba(0, 0, 0, 0.35);
+}
+
+.clip-stem-menu {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 10px;
+  animation: clip-stem-menu-out 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.clip-stem-choice-button {
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(125, 211, 252, 0.55);
+  cursor: pointer;
+  opacity: 0;
+  transform: translateX(-10px) scale(0.82);
+  animation: clip-stem-button-out 150ms cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+}
+
+.clip-stem-choice-button:nth-child(2) {
+  animation-delay: 18ms;
+}
+
+.clip-stem-choice-button:nth-child(3) {
+  animation-delay: 36ms;
+}
+
+.clip-stem-choice-button:nth-child(4) {
+  animation-delay: 54ms;
+}
+
+.clip-stem-choice-button:nth-child(5) {
+  animation-delay: 72ms;
+}
+
+.clip-stem-choice-button:hover,
+.clip-stem-choice-button.active {
+  background: #0ea5e9;
+  border-color: #bae6fd;
+}
+
+.clip-stem-choice-icon {
+  display: block;
+}
+
+@keyframes clip-stem-menu-out {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes clip-stem-button-out {
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+/* Parent-child link connection lines */
+.parent-child-link-shadow {
+  stroke: rgba(0, 0, 0, 0.4);
+  stroke-width: 5;
+  stroke-linecap: round;
+  filter: blur(2px);
+  transform: translate(1px, 2px);
+}
+
+.parent-child-link {
+  stroke: var(--expr-color);
+  stroke-width: 3;
+  stroke-linecap: round;
+  fill: none;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.3));
+}
+
+.parent-child-link-endpoint {
+  fill: var(--expr-color-dark);
+  stroke: var(--expr-color-stroke);
+  stroke-width: 1.5;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4));
+}
+
+.parent-child-link-start {
+  fill: var(--expr-color-dark);
+  stroke: var(--expr-color-stroke);
+  stroke-width: 1.5;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4));
+}
+
+.parent-child-link-group:hover .parent-child-link {
+  stroke: var(--expr-color-light);
+  stroke-width: 3.5;
+}
+
+.parent-child-link-group:hover .parent-child-link-shadow {
+  stroke-width: 6;
+}
+
+.parent-child-link-group:hover .parent-child-link-endpoint,
+.parent-child-link-group:hover .parent-child-link-start {
+  fill: var(--expr-color-light);
+  stroke: var(--expr-color-dark);
+  r: 6;
+}
+
+/* Lightweight drag previews */
+.clip-content {
+  position: relative;
+  z-index: 5;
+  padding: 2px 6px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.5) 0%, rgba(0, 0, 0, 0.2) 50%, transparent 100%);
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.clip-name {
+  font-size: 10px;
+  line-height: 1.2;
+  font-weight: 600;
+  color: var(--text-on-accent);
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+}
+
+.timeline-clip-chrome-layer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 8;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.timeline-clip-chrome {
+  position: absolute;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.timeline-clip-chrome-title {
+  position: absolute;
+  left: 6px;
+  top: 3px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  line-height: 12px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.94);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+}
+
+.timeline-clip-type-icon {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  display: grid;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.88);
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.8));
+  transform: translate(-50%, -50%);
+}
+
+.timeline-clip-chrome-badge {
+  position: absolute;
+  top: 4px;
+  flex: 0 0 auto;
+  height: 14px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 9px;
+  line-height: 12px;
+  font-weight: 700;
+  text-align: center;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.72);
+  box-sizing: border-box;
+}
+
+/* Trim shell controls */
+.trim-handle {
+  position: absolute;
+  top: var(--clip-trim-handle-top, 0);
+  bottom: 0;
+  width: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  cursor: ew-resize !important;
+  background: rgba(255, 255, 255, 0.2);
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s;
+  z-index: 32;
+}
+
+.trim-handle::before {
+  display: none;
+}
+
+.trim-handle:hover {
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.clip-interaction-shell .shell-trim-handle {
+  opacity: 1;
+  pointer-events: auto;
+  background: var(--warning);
+}
+
+.clip-interaction-shell .shell-trim-handle:not(.active) {
+  background: rgba(255, 255, 255, 0.32);
+}
+
+.clip-interaction-shell .shell-trim-handle .trim-handle-arrows {
+  opacity: 1;
+}
+
+.trim-handle.left {
+  left: 0;
+  border-radius: 4px 0 0 4px;
+}
+
+.trim-handle.right {
+  right: 0;
+  border-radius: 0 4px 4px 0;
+}
+
+.trim-handle-arrows {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s, transform 0.15s;
+}
+
+.trim-handle-arrow {
+  width: 0;
+  height: 0;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.55));
+}
+
+.trim-handle-arrow.left {
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-right: 4px solid rgba(255, 255, 255, 0.94);
+}
+
+.trim-handle-arrow.right {
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 4px solid rgba(255, 255, 255, 0.94);
+}
+
+.trim-handle.arrows-1 .trim-handle-arrows {
+  gap: 0;
+}
+
+.timeline-body-content[class*="timeline-tool-active-"] .trim-handle,
+.timeline-body-content[class*="timeline-tool-active-"] .fade-handle {
+  cursor: inherit;
+}
+
+.timeline-body-content[class*="timeline-tool-active-"] .trim-handle {
+  cursor: ew-resize !important;
+}
+
+.timeline-body-content.timeline-tool-active-select .trim-handle,
+.timeline-body-content.timeline-tool-active-edge-trim .trim-handle,
+.timeline-body-content.timeline-tool-active-ripple-trim .trim-handle,
+.timeline-body-content.timeline-tool-active-rolling-edit .trim-handle,
+.timeline-body-content.timeline-tool-active-rate-stretch .trim-handle {
+  cursor: ew-resize !important;
+}
+
+.timeline-body-content.timeline-tool-active-select .trim-handle {
+  --clip-trim-handle-top: min(14px, 38%);
+}
+
+.timeline-body-content:not(.timeline-tool-active-select) .fade-handle {
+  pointer-events: none;
+}
+
+.timeline-body-content.timeline-tool-active-select .fade-handle {
+  pointer-events: auto;
+  cursor: ew-resize !important;
+}
+
+/* Fade shell controls */
+.clip-interaction-shell .shell-fade-handle {
+  opacity: 1;
+  pointer-events: auto;
+  background: var(--warning);
+}
+
+.clip-interaction-shell .shell-fade-handle:not(.active) {
+  background: rgba(251, 191, 36, 0.72);
+}
+
+.fade-handle {
+  position: absolute;
+  top: 0;
+  width: 12px;
+  height: 12px;
+  cursor: ew-resize !important;
+  background: rgba(251, 191, 36, 0.8);
+  border-radius: 0 0 4px 0;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s, transform 0.15s;
+  z-index: 36;
+}
+
+.fade-handle:hover {
+  background: rgba(251, 191, 36, 1);
+  transform: scale(1.1);
+}
+
+.fade-handle.left {
+  left: 0;
+  border-radius: 0 0 4px 0;
+}
+
+.fade-handle.right {
+  right: 0;
+  left: auto;
+  border-radius: 0 0 0 4px;
+}
+
+.fade-handle.left.active,
+.fade-handle.right.active {
+  border-radius: 2px;
+}
+
+.fade-curve-container {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+  z-index: 5;
+  overflow: hidden;
+}
+
+.fade-curve-svg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.audio-automation-curve-container {
+  z-index: 16;
+  mix-blend-mode: screen;
+}
+
+.audio-automation-curve-container .fade-curve-svg path:first-of-type {
+  fill: rgba(51, 197, 255, 0.13);
+}
+
+.audio-automation-curve-container .fade-curve-svg path:nth-of-type(2) {
+  stroke: rgba(96, 217, 255, 0.86);
+  stroke-width: 1.6;
+}
+
+.audio-automation-curve-container .fade-curve-svg circle {
+  fill: rgba(96, 217, 255, 0.95);
+}
+
+/* Keyframe shell controls */
+.clip-keyframe-ticks {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 8px;
+  pointer-events: none;
+  z-index: 6;
+}
+
+.keyframe-tick {
+  position: absolute;
+  bottom: -4px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  appearance: none;
+  transform: translateX(-50%);
+  pointer-events: auto;
+  cursor: grab;
+  z-index: 1;
+}
+
+.keyframe-tick::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: 5px;
+  width: 4px;
+  height: 4px;
+  background: var(--warning);
+  transform: translateX(-50%) rotate(45deg);
+  opacity: 0.7;
+  transition: opacity 0.12s ease, transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.keyframe-tick.state-change::after {
+  background: var(--cyan-500);
+}
+
+.keyframe-tick:hover::after,
+.keyframe-tick:focus-visible::after,
+.keyframe-tick.dragging::after {
+  transform: translateX(-50%) rotate(45deg) scale(2.15);
+  opacity: 1;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+
+.keyframe-tick:active,
+.keyframe-tick.dragging {
+  cursor: grabbing;
+}
+
+.timeline-canvas-dom-overlay .clip-interaction-shell .clip-keyframe-ticks {
+  opacity: 1;
+  pointer-events: none;
+}
+
+.timeline-canvas-dom-overlay .clip-interaction-shell .keyframe-tick {
+  pointer-events: auto;
+}
+
+/* Motion parenting controls live in the lightweight canvas interaction shell. */
+.clip-interaction-shell .shell-parenting-module {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  border-radius: 3px;
+  pointer-events: none;
+  transition: box-shadow 100ms ease, background-color 100ms ease;
+}
+
+.clip-interaction-shell .shell-parenting-module.drag-active {
+  pointer-events: auto;
+}
+
+.clip-interaction-shell .shell-parenting-module.target-valid {
+  background: color-mix(in srgb, #4fcf82 12%, transparent);
+  box-shadow: inset 0 0 0 2px #4fcf82;
+}
+
+.clip-interaction-shell .shell-parenting-module.target-blocked {
+  background: color-mix(in srgb, #ff6363 12%, transparent);
+  box-shadow: inset 0 0 0 2px #ff6363;
+}
+
+.clip-parenting-actions {
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 18px;
+  padding: 1px 2px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 4px;
+  background: rgba(18, 20, 24, 0.82);
+  color: rgba(235, 240, 248, 0.82);
+  opacity: 0.45;
+  pointer-events: auto;
+  transition: opacity 100ms ease, border-color 100ms ease, color 100ms ease;
+}
+
+.clip-interaction-shell:hover .clip-parenting-actions,
+.clip-parenting-actions:focus-within,
+.clip-parenting-actions.has-parent,
+.clip-parenting-actions.dragging {
+  opacity: 1;
+}
+
+.clip-parenting-actions.dragging {
+  color: #66b9ff;
+  border-color: rgba(102, 185, 255, 0.75);
+}
+
+.clip-parenting-actions button {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  line-height: 1;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.clip-parenting-actions button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+.clip-parenting-actions button:focus-visible {
+  outline: 2px solid #66b9ff;
+  outline-offset: 1px;
+}
+
+.clip-parenting-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.clip-parenting-actions .pick-whip-clear {
+  width: 15px;
+  color: rgba(255, 255, 255, 0.62);
+  cursor: pointer;
+  font-size: 15px;
+}
+
+.pick-whip-drag-overlay.valid path,
+.pick-whip-drag-overlay.valid circle {
+  stroke: #4fcf82;
+}
+
+.pick-whip-drag-overlay.blocked path,
+.pick-whip-drag-overlay.blocked circle {
+  stroke: #ff6363;
+}
+
+.pick-whip-diagnostic {
+  position: fixed;
+  z-index: 10000;
+  max-width: 280px;
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  background: rgba(18, 20, 24, 0.94);
+  color: #d8dde5;
+  font-size: 11px;
+  line-height: 1.3;
+  pointer-events: none;
+}
+
+.pick-whip-diagnostic.valid {
+  border-color: #4fcf82;
+  color: #b9f4ce;
+}
+
+.pick-whip-diagnostic.blocked {
+  border-color: #ff6363;
+  color: #ffc0c0;
+}
+
+.timeline-canvas-clip-name-input {
+  position: absolute;
+  z-index: 40;
+  min-width: 24px;
+  max-width: calc(100% - 8px);
+  padding: 1px 4px;
+  border: 1px solid rgba(255, 255, 255, 0.62);
+  border-radius: 2px;
+  outline: none;
+  background: rgba(0, 0, 0, 0.68);
+  color: var(--text-primary);
+  font: 600 10px/1.2 ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+  pointer-events: auto;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.35);
+}
+}

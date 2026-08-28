@@ -1,0 +1,345 @@
+@layer features {
+.audio-level-meter {
+  position: relative;
+  width: 10px;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  contain: layout paint style;
+  isolation: isolate;
+  border-radius: 4px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent 18%),
+    rgba(4, 12, 16, 0.88);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.11),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.65);
+}
+
+.audio-level-meter-scale,
+.audio-level-meter-peak-fill,
+.audio-level-meter-rms,
+.audio-level-meter-phase,
+.audio-level-meter-peak {
+  position: absolute;
+  transform-origin: left center;
+  pointer-events: none;
+}
+
+.audio-level-meter-scale,
+.audio-level-meter-peak-fill,
+.audio-level-meter-rms {
+  inset: 0;
+}
+
+.audio-level-meter.vertical .audio-level-meter-peak-fill,
+.audio-level-meter.vertical .audio-level-meter-rms {
+  inset: auto 0 0 0;
+  height: 100%;
+  transform-origin: center bottom;
+}
+
+.audio-level-meter-scale {
+  background:
+    linear-gradient(90deg, transparent 0 66%, rgba(255, 198, 92, 0.24) 66% 87%, rgba(255, 87, 72, 0.28) 87%),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.13) 0 1px, transparent 1px 25%);
+  opacity: 0.42;
+}
+
+.audio-level-meter.vertical .audio-level-meter-scale {
+  background:
+    linear-gradient(0deg, rgba(67, 205, 139, 0.24) 0 58%, rgba(255, 219, 92, 0.26) 69% 86%, rgba(255, 87, 72, 0.36) 88%),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.22) 0 1px, transparent 1px 8px);
+}
+
+.audio-level-meter-peak-fill,
+.audio-level-meter-rms {
+  will-change: transform, opacity;
+  transition: transform 70ms linear, opacity 120ms ease;
+}
+
+.audio-level-meter-peak-fill {
+  background: linear-gradient(90deg, #31d681 0%, #77dd72 58%, #ffd052 76%, #ff6354 100%);
+  opacity: 0.62;
+}
+
+.audio-level-meter-rms {
+  background: linear-gradient(90deg, rgba(174, 255, 211, 0.72), rgba(255, 233, 149, 0.74) 76%, rgba(255, 133, 116, 0.8));
+  opacity: 0.9;
+}
+
+.audio-level-meter.vertical .audio-level-meter-peak-fill {
+  background: linear-gradient(0deg, #31d681 0%, #77dd72 58%, #ffd052 76%, #ff6354 100%);
+}
+
+.audio-level-meter.vertical .audio-level-meter-rms {
+  background: linear-gradient(0deg, rgba(174, 255, 211, 0.76), rgba(255, 233, 149, 0.78) 76%, rgba(255, 133, 116, 0.84));
+}
+
+.audio-level-meter-phase {
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(139, 208, 255, 0.92);
+  box-shadow: 0 0 3px rgba(139, 208, 255, 0.34);
+  transition: left 80ms linear, bottom 80ms linear, opacity 120ms ease;
+}
+
+.audio-level-meter.vertical .audio-level-meter-phase {
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 1px;
+  top: auto;
+}
+
+.audio-level-meter-peak {
+  left: 0;
+  width: 2px;
+  height: 2px;
+  top: 0;
+  background: linear-gradient(90deg, #5af0a2, #ffe082 72%, #ff5f56);
+  transition: left 55ms linear, bottom 55ms linear;
+}
+
+.audio-level-meter.vertical .audio-level-meter-peak {
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 1px;
+  top: auto;
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.audio-level-meter.stereo {
+  display: grid;
+  gap: 1px;
+  padding: 1px;
+}
+
+.audio-level-meter.stereo.vertical {
+  grid-template-columns: 1fr 1fr;
+}
+
+.audio-level-meter.stereo.horizontal {
+  grid-template-rows: 1fr 1fr;
+}
+
+.audio-level-meter.stereo .audio-level-meter-stereo-channel {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(4, 12, 16, 0.9);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.09);
+}
+
+.audio-level-meter.stereo .audio-level-meter-scale {
+  inset: 0;
+  height: auto;
+  transform: none;
+}
+
+.audio-level-meter.stereo .audio-level-meter-peak-fill,
+.audio-level-meter.stereo .audio-level-meter-rms {
+  will-change: transform, opacity;
+  transition: transform 55ms linear, opacity 100ms linear;
+}
+
+.audio-level-meter.stereo.vertical .audio-level-meter-peak-fill,
+.audio-level-meter.stereo.vertical .audio-level-meter-rms {
+  inset: auto 0 0 0;
+  height: 100%;
+  transform-origin: center bottom;
+}
+
+.audio-level-meter.stereo.vertical .audio-level-meter-scale {
+  background:
+    linear-gradient(0deg, rgba(67, 205, 139, 0.24) 0 58%, rgba(255, 219, 92, 0.26) 69% 86%, rgba(255, 87, 72, 0.36) 88%),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.18) 0 1px, transparent 1px 8px);
+}
+
+.audio-level-meter.stereo.vertical .audio-level-meter-peak-fill {
+  background: linear-gradient(0deg, #31d681 0%, #77dd72 58%, #ffd052 76%, #ff6354 100%);
+}
+
+.audio-level-meter.stereo.vertical .audio-level-meter-rms {
+  background: linear-gradient(0deg, rgba(230, 242, 235, 0.34), rgba(255, 238, 176, 0.42) 76%, rgba(255, 133, 116, 0.48));
+}
+
+.audio-level-meter.stereo.vertical .audio-level-meter-peak {
+  left: -1px;
+  right: -1px;
+  width: auto;
+  height: 1px;
+  top: auto;
+  bottom: 0;
+  transform: translateY(50%);
+  background: rgba(255, 77, 66, 0.95);
+  transition: opacity 100ms linear;
+}
+
+.audio-level-meter.stereo.horizontal .audio-level-meter-scale {
+  background:
+    linear-gradient(90deg, rgba(67, 205, 139, 0.24) 0 58%, rgba(255, 219, 92, 0.26) 69% 86%, rgba(255, 87, 72, 0.36) 88%),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.18) 0 1px, transparent 1px 8px);
+}
+
+.audio-level-meter.stereo.horizontal .audio-level-meter-peak-fill {
+  inset: 0 auto 0 0;
+  width: 100%;
+  background: linear-gradient(90deg, #31d681 0%, #77dd72 58%, #ffd052 76%, #ff6354 100%);
+  transform-origin: left center;
+}
+
+.audio-level-meter.stereo.horizontal .audio-level-meter-rms {
+  inset: 0 auto 0 0;
+  width: 100%;
+  height: auto;
+  background: linear-gradient(90deg, rgba(230, 242, 235, 0.34), rgba(255, 238, 176, 0.42) 76%, rgba(255, 133, 116, 0.48));
+  transform-origin: left center;
+}
+
+.audio-level-meter.stereo.horizontal .audio-level-meter-peak {
+  top: -1px;
+  bottom: -1px;
+  left: 0;
+  width: 1px;
+  height: auto;
+  transform: translateX(-50%);
+  background: rgba(255, 77, 66, 0.95);
+  transition: opacity 100ms linear;
+}
+
+.audio-level-meter.clipping {
+  box-shadow: inset 0 0 0 1px rgba(255, 77, 66, 0.95), 0 0 5px rgba(255, 77, 66, 0.35);
+}
+
+.audio-track-popover {
+  position: absolute;
+  top: 4px;
+  left: calc(100% + 6px);
+  width: min(360px, calc(100vw - 190px));
+  max-height: 420px;
+  overflow: hidden;
+  padding: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.42);
+  z-index: 240;
+}
+
+.audio-track-sends-popover {
+  width: min(430px, calc(100vw - 190px));
+}
+
+.audio-send-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.audio-send-stack-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.audio-send-stack-header button,
+.audio-send-remove,
+.audio-send-enable {
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.audio-send-stack-header button {
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.audio-send-empty {
+  padding: 8px;
+  border: 1px dashed var(--border-color);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-align: center;
+}
+
+.audio-send-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.audio-send-row {
+  display: grid;
+  grid-template-columns: 22px minmax(72px, 1fr) minmax(88px, 1.4fr) 38px 48px 22px;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.audio-send-enable,
+.audio-send-remove {
+  height: 22px;
+  padding: 0;
+  font-size: 10px;
+}
+
+.audio-send-enable.active {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 50%, var(--border-color));
+}
+
+.audio-send-target {
+  min-width: 0;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 11px;
+}
+
+.audio-send-gain {
+  width: 100%;
+  min-width: 0;
+  accent-color: var(--success);
+}
+
+.audio-send-gain-value {
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.audio-send-prefader {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.audio-send-prefader input {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+}
+
+}

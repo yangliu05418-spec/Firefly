@@ -1,0 +1,645 @@
+/* Flex EQ hardware skin: graph display on top, one brass "control module"
+   panel with photographed knobs below, and a compact utility strip. The knob
+   face photo never rotates; the pointer overlay (.flex-eq-knob-pointer) is the
+   indication layer. */
+
+.flex-eq-hw {
+  --eq-brass-light: #cdbd8f;
+  --eq-brass: #a8946a;
+  --eq-brass-dark: #6f5c3c;
+  --eq-plate-ink: #2c2417;
+  --eq-cream: #efe6cf;
+  --eq-led-amber: #ffb13d;
+  --eq-led-bg: #190e03;
+}
+
+/* ── Wood rack + display ─────────────────────────────────────────────── */
+
+/* Fill the host panel: the rack stretches with the EQ root, the display
+   flexes inside it, and the stage takes the remaining height. A viewport
+   clamp keeps a usable display when the host gives no height. */
+.flex-eq-hw {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+  /* Pull the rack to the edges of the hosting FX card (8px padding, 6px in
+     compact stacks) so the wood frame is the only visible border. */
+  margin: -8px;
+}
+
+.flex-eq-hw.compact {
+  margin: -6px;
+}
+
+.flex-eq-hw .flex-eq-rack {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.flex-eq-hw .flex-eq-display {
+  flex: 1 1 auto;
+  min-height: 0;
+  /* Width container for the floating module's responsive steps. */
+  container-type: inline-size;
+  container-name: eq-display;
+}
+
+/* The root height comes from useFitVisiblePanelHeight (visible scroll-
+   viewport area); these minima only guard hosts without a scroll parent. */
+.flex-eq-hw .flex-eq-stage {
+  width: 100%;
+  height: 100%;
+  min-height: 300px;
+}
+
+.flex-eq-hw.compact .flex-eq-stage {
+  min-height: 240px;
+}
+
+/* The rack frame is a 9-slice of a photographed wood recess: only the thin
+   photo edges render as the border, so the display reaches almost edge to
+   edge. The slice covers the wood lip plus the inner corner rounding. */
+.flex-eq-hw .flex-eq-rack {
+  padding: 0;
+  border: 10px solid transparent;
+  border-image: url('./assets/rack-frame.jpg') 72 fill / 10px stretch;
+  background: none;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.55);
+}
+
+.flex-eq-hw .flex-eq-display {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid #05070c;
+  border-radius: 5px;
+  box-shadow:
+    inset 0 0 0 1px rgba(120, 138, 170, 0.08),
+    inset 0 2px 10px rgba(0, 0, 0, 0.65);
+}
+
+.flex-eq-hw .flex-eq-display .flex-eq-stage {
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/* ── Floating leather control module on the display ──────────────────── */
+
+.flex-eq-hw .flex-eq-control-module {
+  position: absolute;
+  /* Center with inset+auto margins: with left:50% + translate, an absolutely
+     positioned fit-content box only gets half the containing block as
+     available width and squeezes its content into overlap. */
+  left: 0;
+  right: 0;
+  bottom: 8px;
+  margin-inline: auto;
+  width: fit-content;
+  max-width: min(96%, 680px);
+  display: grid;
+  gap: 4px;
+  padding: 6px 8px 7px;
+  border: 1px solid rgba(8, 5, 2, 0.9);
+  border-radius: 9px;
+  background:
+    linear-gradient(180deg, rgba(26, 18, 10, 0.42) 0%, rgba(8, 5, 2, 0.55) 100%),
+    url('../../audio-mixer/wood-theme/dark-leather.webp') center / 300px auto repeat;
+  box-shadow:
+    inset 0 0 0 1px rgba(214, 178, 124, 0.14),
+    inset 0 1px 0 rgba(255, 226, 178, 0.1),
+    0 8px 22px rgba(0, 0, 0, 0.65);
+}
+
+/* Stitched leather seam. */
+.flex-eq-hw .flex-eq-control-module::before {
+  content: '';
+  position: absolute;
+  inset: 4px;
+  border: 1px dashed rgba(206, 168, 112, 0.28);
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+/* ── Main row: side fields | knobs | toggles ─────────────────────────── */
+
+/* Symmetric layout: equal-width outer columns, knobs centered on GAIN.
+   Below ~600cqw the knobs shrink; below ~470cqw the layout restacks into
+   "knobs on top, band type + toggles below" instead of overlapping. */
+.flex-eq-hw .flex-eq-module-main {
+  display: grid;
+  grid-template-areas: 'side knobs toggles';
+  grid-template-columns: 112px auto 112px;
+  align-items: center;
+  gap: 10px;
+}
+
+.flex-eq-hw .flex-eq-module-side {
+  grid-area: side;
+  display: grid;
+  gap: 5px;
+  justify-items: stretch;
+  justify-self: start;
+  width: 100%;
+}
+
+.flex-eq-hw .flex-eq-module-field {
+  display: grid;
+  gap: 3px;
+  justify-items: center;
+}
+
+.flex-eq-hw .flex-eq-module-field select {
+  width: 100%;
+  min-height: 24px;
+  padding: 2px 6px;
+  border: 1px solid rgba(43, 32, 14, 0.7);
+  border-radius: 5px;
+  background: linear-gradient(180deg, #f7efdb 0%, var(--eq-cream) 55%, #d9cdab 100%);
+  color: #322914;
+  font-size: 11px;
+  font-weight: 600;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75), 0 1px 2px rgba(24, 16, 4, 0.45);
+}
+
+.flex-eq-hw .flex-eq-module-field label {
+  color: #d8c49a;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75);
+}
+
+.flex-eq-hw .flex-eq-band-glyph {
+  width: 30px;
+  height: 20px;
+}
+
+.flex-eq-hw .flex-eq-band-glyph path {
+  fill: none;
+  stroke: #d8c49a;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.flex-eq-hw .flex-eq-module-keyframes {
+  justify-items: center;
+}
+
+/* ── Knobs ───────────────────────────────────────────────────────────── */
+
+.flex-eq-hw .flex-eq-module-knobs {
+  grid-area: knobs;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: end;
+  justify-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.flex-eq-hw .flex-eq-knob-block {
+  display: grid;
+  gap: 2px;
+  justify-items: center;
+  width: 96px;
+}
+
+.flex-eq-hw .flex-eq-knob-block.primary {
+  width: 124px;
+}
+
+.flex-eq-knob {
+  display: grid;
+  gap: 3px;
+  justify-items: center;
+  user-select: none;
+  width: 100%;
+}
+
+.flex-eq-knob.disabled {
+  opacity: 0.45;
+  filter: saturate(0.6);
+}
+
+.flex-eq-knob-dial {
+  position: relative;
+  width: 54px;
+  height: 54px;
+  cursor: ns-resize;
+  touch-action: none;
+  outline: none;
+}
+
+.flex-eq-knob.lg .flex-eq-knob-dial {
+  width: 78px;
+  height: 78px;
+}
+
+.flex-eq-knob-dial:focus-visible {
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(255, 209, 122, 0.65);
+}
+
+.flex-eq-knob-ticks {
+  position: absolute;
+  inset: -7%;
+  border-radius: 50%;
+  background: repeating-conic-gradient(
+    from -135deg,
+    rgba(226, 196, 142, 0.55) 0deg 2.2deg,
+    transparent 2.2deg 27deg
+  );
+  -webkit-mask: radial-gradient(circle, transparent 0 46%, #000 47% 52%, transparent 53%);
+  mask: radial-gradient(circle, transparent 0 46%, #000 47% 52%, transparent 53%);
+}
+
+.flex-eq-knob-body {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  /* CSS flange replacing the photo's cropped outer ring. */
+  background:
+    radial-gradient(circle at 32% 26%, rgba(255, 255, 255, 0.5), transparent 42%),
+    conic-gradient(from 160deg, #b9b5ac, #7c786f 24%, #d6d2c8 38%, #8d8980 55%, #c9c5bb 72%, #6f6b62 88%, #b9b5ac),
+    #8d8980;
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.55),
+    inset 0 -2px 4px rgba(12, 8, 2, 0.55),
+    3px 5px 8px rgba(8, 5, 1, 0.55);
+}
+
+.flex-eq-knob-face {
+  position: absolute;
+  inset: 9%;
+  border-radius: 50%;
+  /* Crop the photo to just inside the brass ring so its baked-in marker and
+     flange stay hidden; the pointer overlay provides the real indication. */
+  background-position: center;
+  background-size: 127%;
+  background-repeat: no-repeat;
+  box-shadow:
+    inset 0 1px 3px rgba(255, 255, 255, 0.25),
+    inset 0 -2px 4px rgba(10, 6, 1, 0.5),
+    0 1px 2px rgba(8, 5, 1, 0.5);
+}
+
+.flex-eq-knob-pointer {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.flex-eq-knob-pointer-mark {
+  position: absolute;
+  top: 1.5%;
+  left: 50%;
+  width: 0;
+  height: 0;
+  transform: translateX(-50%);
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 7px solid #241a09;
+  filter: drop-shadow(0 1px 1px rgba(255, 244, 210, 0.35));
+}
+
+.flex-eq-knob.lg .flex-eq-knob-pointer-mark {
+  border-left-width: 5px;
+  border-right-width: 5px;
+  border-top-width: 9px;
+}
+
+.flex-eq-knob-legend {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 5px;
+  width: 100%;
+}
+
+.flex-eq-knob-legend span {
+  color: rgba(216, 196, 154, 0.72);
+  font-size: 8px;
+  font-family: var(--font-mono);
+}
+
+.flex-eq-knob-legend strong {
+  color: #d8c49a;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75);
+}
+
+/* ── LED readouts ────────────────────────────────────────────────────── */
+
+.flex-eq-hw .flex-eq-led-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.flex-eq-hw .flex-eq-led {
+  width: 64px;
+  padding: 1px 6px;
+  box-sizing: border-box;
+  border: 1px solid rgba(20, 12, 3, 0.85);
+  border-radius: 4px;
+  background: linear-gradient(180deg, #100801 0%, var(--eq-led-bg) 60%, #221204 100%);
+  box-shadow:
+    inset 0 2px 4px rgba(0, 0, 0, 0.8),
+    0 1px 0 rgba(255, 244, 210, 0.35);
+  text-align: center;
+}
+
+.flex-eq-hw .flex-eq-led * {
+  color: var(--eq-led-amber) !important;
+  font-family: var(--font-mono) !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  text-shadow: 0 0 6px rgba(255, 156, 36, 0.55);
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+/* ── Toggle column ───────────────────────────────────────────────────── */
+
+.flex-eq-hw .flex-eq-module-toggles {
+  grid-area: toggles;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+  justify-self: end;
+  width: 100%;
+}
+
+.flex-eq-hw .flex-eq-module-toggles button.danger {
+  grid-column: 1 / -1;
+}
+
+.flex-eq-hw .flex-eq-module-toggles button {
+  min-width: 0;
+  min-height: 19px;
+  padding: 1px 7px;
+  border: 1px solid rgba(43, 32, 14, 0.7);
+  border-radius: 5px;
+  background: linear-gradient(180deg, #f7efdb 0%, var(--eq-cream) 55%, #d9cdab 100%);
+  color: #322914;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75), 0 1px 2px rgba(24, 16, 4, 0.45);
+  cursor: pointer;
+}
+
+.flex-eq-hw .flex-eq-module-toggles button.active {
+  background: linear-gradient(180deg, #2a1b08 0%, #1c1205 100%);
+  color: var(--eq-led-amber);
+  text-shadow: 0 0 5px rgba(255, 156, 36, 0.6);
+  box-shadow: inset 0 2px 3px rgba(0, 0, 0, 0.7);
+}
+
+.flex-eq-hw .flex-eq-module-toggles button.danger {
+  color: #7e1f12;
+}
+
+.flex-eq-hw .flex-eq-module-toggles button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ── Utility rail (recessed top row inside the leather module) ───────── */
+
+.flex-eq-hw .flex-eq-utility-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 2px 6px;
+  padding: 3px 5px;
+  border: 1px solid rgba(8, 5, 2, 0.7);
+  border-radius: 5px;
+  background: linear-gradient(180deg, rgba(14, 9, 4, 0.55), rgba(22, 15, 7, 0.4));
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.6), 0 1px 0 rgba(214, 178, 124, 0.1);
+}
+
+.flex-eq-hw .flex-eq-utility-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.flex-eq-hw .flex-eq-utility-group + .flex-eq-utility-group {
+  padding-left: 6px;
+  border-left: 1px solid rgba(214, 178, 124, 0.16);
+}
+
+.flex-eq-hw .flex-eq-utility-strip button,
+.flex-eq-hw .flex-eq-utility-strip select {
+  min-height: 16px;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: rgba(222, 200, 160, 0.8);
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.flex-eq-hw .flex-eq-utility-strip select {
+  background: rgba(12, 8, 3, 0.7);
+  border-color: rgba(214, 178, 124, 0.18);
+}
+
+.flex-eq-hw .flex-eq-utility-strip button:hover:not(:disabled) {
+  background: rgba(214, 178, 124, 0.14);
+  color: #f3e3c2;
+}
+
+.flex-eq-hw .flex-eq-utility-strip button.active {
+  background: linear-gradient(180deg, #2a1b08 0%, #1c1205 100%);
+  border-color: rgba(255, 177, 61, 0.4);
+  color: var(--eq-led-amber);
+  text-shadow: 0 0 5px rgba(255, 156, 36, 0.55);
+}
+
+.flex-eq-hw .flex-eq-utility-strip button:disabled,
+.flex-eq-hw .flex-eq-utility-strip select:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* ── Preset browser inside the module ────────────────────────────────── */
+
+.flex-eq-hw .flex-eq-control-module .flex-eq-preset-browser {
+  padding: 5px;
+  border: 1px solid rgba(8, 5, 2, 0.7);
+  border-radius: 5px;
+  background: rgba(12, 8, 3, 0.72);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.55);
+}
+
+/* ── Compact mode (mixer FX window) ──────────────────────────────────── */
+
+.flex-eq-hw.compact .flex-eq-rack {
+  border-width: 7px;
+  border-image-width: 7px;
+}
+
+.flex-eq-hw.compact .flex-eq-control-module {
+  gap: 3px;
+  padding: 5px 7px 6px;
+  bottom: 5px;
+  max-width: 97%;
+}
+
+.flex-eq-hw.compact .flex-eq-module-main {
+  grid-template-columns: 94px auto 94px;
+  gap: 7px;
+}
+
+.flex-eq-hw.compact .flex-eq-knob-block {
+  width: 78px;
+}
+
+.flex-eq-hw.compact .flex-eq-knob-block.primary {
+  width: 100px;
+}
+
+.flex-eq-hw.compact .flex-eq-module-knobs {
+  gap: 7px;
+}
+
+.flex-eq-hw.compact .flex-eq-knob-dial {
+  width: 42px;
+  height: 42px;
+}
+
+.flex-eq-hw.compact .flex-eq-knob.lg .flex-eq-knob-dial {
+  width: 58px;
+  height: 58px;
+}
+
+.flex-eq-hw.compact .flex-eq-knob-legend,
+.flex-eq-hw.compact .flex-eq-knob.lg .flex-eq-knob-legend {
+  min-width: 0;
+}
+
+.flex-eq-hw.compact .flex-eq-led {
+  min-width: 52px;
+}
+
+.flex-eq-hw.compact .flex-eq-led * {
+  font-size: 11px !important;
+}
+
+/* ── Responsive steps for the floating module ────────────────────────── */
+
+/* Step 1: tighten knobs and columns. */
+@container eq-display (max-width: 600px) {
+  .flex-eq-hw .flex-eq-module-main {
+    grid-template-columns: 94px auto 94px;
+    gap: 7px;
+  }
+
+  .flex-eq-hw .flex-eq-knob-dial {
+    width: 42px;
+    height: 42px;
+  }
+
+  .flex-eq-hw .flex-eq-knob.lg .flex-eq-knob-dial {
+    width: 58px;
+    height: 58px;
+  }
+
+  .flex-eq-hw .flex-eq-knob-block {
+    width: 78px;
+  }
+
+  .flex-eq-hw .flex-eq-knob-block.primary {
+    width: 100px;
+  }
+
+  .flex-eq-hw .flex-eq-led {
+    width: 56px;
+  }
+
+  .flex-eq-hw .flex-eq-led * {
+    font-size: 11px !important;
+  }
+}
+
+/* Step 2: restack — knobs on top, band type and toggles share the row below. */
+@container eq-display (max-width: 470px) {
+  .flex-eq-hw .flex-eq-control-module {
+    max-width: 98%;
+  }
+
+  .flex-eq-hw .flex-eq-module-main {
+    grid-template-areas:
+      'knobs knobs'
+      'side toggles';
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 6px;
+  }
+
+  .flex-eq-hw .flex-eq-module-knobs {
+    justify-self: center;
+  }
+
+  .flex-eq-hw .flex-eq-module-side {
+    max-width: 150px;
+  }
+
+  .flex-eq-hw .flex-eq-module-toggles {
+    grid-template-columns: repeat(5, auto);
+    align-self: end;
+    width: auto;
+    gap: 3px;
+  }
+
+  .flex-eq-hw .flex-eq-module-toggles button.danger {
+    grid-column: auto;
+  }
+}
+
+/* Step 3: very tight — smallest knobs, minimal padding. */
+@container eq-display (max-width: 360px) {
+  .flex-eq-hw .flex-eq-control-module {
+    padding: 4px 5px 5px;
+    gap: 3px;
+  }
+
+  .flex-eq-hw .flex-eq-knob-dial {
+    width: 36px;
+    height: 36px;
+  }
+
+  .flex-eq-hw .flex-eq-knob.lg .flex-eq-knob-dial {
+    width: 48px;
+    height: 48px;
+  }
+
+  .flex-eq-hw .flex-eq-knob-block {
+    width: 66px;
+  }
+
+  .flex-eq-hw .flex-eq-knob-block.primary {
+    width: 82px;
+  }
+
+  .flex-eq-hw .flex-eq-module-knobs {
+    gap: 5px;
+  }
+}

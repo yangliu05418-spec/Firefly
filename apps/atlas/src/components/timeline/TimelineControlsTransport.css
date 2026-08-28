@@ -1,0 +1,153 @@
+@layer features {
+.timeline-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.timeline-transport-button {
+  width: 26px;
+  min-width: 26px;
+  height: 26px;
+  min-height: 26px;
+  padding: 0;
+  border: 0 !important;
+  background: transparent !important;
+  color: rgba(255, 255, 255, 0.9);
+  opacity: 1;
+  border-radius: 50%;
+  box-shadow: none;
+  transition: color 120ms ease, filter 120ms ease, transform 120ms ease;
+}
+
+.timeline-transport-button:hover:not(:disabled),
+.timeline-transport-button.btn-active,
+.timeline-record-button.recording {
+  border: 0 !important;
+  background: transparent !important;
+  color: #ffffff;
+}
+
+.timeline-transport-button:hover:not(:disabled) {
+  box-shadow: none !important;
+}
+
+.timeline-transport-button.btn-active,
+.timeline-record-button.recording {
+  transform: translateY(-0.5px);
+}
+
+.timeline-transport-button:disabled {
+  color: rgba(255, 255, 255, 0.9);
+  opacity: 1;
+  cursor: not-allowed;
+}
+
+.timeline-transport-icon {
+  display: block;
+  width: 18px;
+  height: 18px;
+  overflow: visible;
+  filter: none;
+  transition: filter 120ms ease, transform 120ms ease;
+}
+
+.timeline-transport-button:hover:not(:disabled) .timeline-transport-icon {
+  filter: drop-shadow(0 0 5px rgba(255, 255, 255, 0.58));
+}
+
+.timeline-transport-button.btn-active .timeline-transport-icon,
+.timeline-record-button.recording .timeline-transport-icon {
+  filter: drop-shadow(0 0 7px rgba(255, 255, 255, 0.78));
+}
+
+.timeline-transport-ring {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.15;
+}
+
+.timeline-transport-fill {
+  fill: currentColor;
+}
+
+.timeline-loop-button,
+.timeline-record-button {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.timeline-proxy-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  min-height: 22px;
+  min-width: 44px;
+  padding: 0 7px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.timeline-proxy-button.is-generating {
+  min-width: 92px;
+}
+
+.timeline-loop-icon {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.45;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.timeline-transport-button.btn-active .timeline-transport-ring,
+.timeline-record-button.recording .timeline-transport-ring {
+  stroke-width: 2.85;
+}
+
+.timeline-transport-button.btn-active .timeline-loop-icon {
+  stroke-width: 3.05;
+}
+
+.timeline-record-button.armed {
+  color: #ffffff;
+}
+
+.timeline-record-button.recording,
+.timeline-record-button.recording:hover {
+  color: #ffffff;
+}
+
+.timeline-record-button:disabled {
+  color: rgba(255, 255, 255, 0.9);
+  border-color: transparent !important;
+  background: transparent !important;
+  opacity: 1;
+}
+
+.timeline-record-recovery {
+  min-width: 20px;
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 55%, var(--border-color));
+}
+
+.timeline-record-storage {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid color-mix(in srgb, var(--info) 55%, var(--border-color));
+  border-radius: 50%;
+  color: var(--info);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.timeline-record-storage.warning {
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 60%, var(--border-color));
+}
+}

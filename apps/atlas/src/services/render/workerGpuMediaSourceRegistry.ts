@@ -1,0 +1,581 @@
+import type { Layer } from '../../types';
+import type { MediaFile } from '../../stores/mediaStore/types';
+import { splitLayerEffects } from '../../engine/render/layerEffectStack';
+import { Logger } from '../logger';
+import type { WorkerRenderHostRuntimeBridge } from './workerRenderHostRuntimeBridge';
+import type { WorkerRenderHostRuntimeJobOutput } from './workerRenderHostRuntimeHandlers';
+import type { WorkerGpuWebCodecsRenderLayer } from './workerGpuRuntimeCommands';
+
+const log = Logger.create('WorkerGpuMediaSourceRegistry');
+
+export interface WorkerGpuVideoPresentationSource {
+  readonly sourceId: string;
+  readonly sourceKey: string;
+  readonly file: File;
+  readonly mediaTime: number;
+  readonly timelineTime: number;
+  readonly width: number;
+  readonly height: number;
+  readonly mediaFileId?: string;
+  readonly runtimeSourceId?: string;
+  readonly runtimeSessionKey?: string;
+}
+
+export interface WorkerGpuVideoPresentationLayerStyle {
+  readonly opacity: number;
+  readonly blendMode: string;
+  readonly inlineBrightness: number;
+  readonly inlineContrast: number;
+  readonly inlineSaturation: number;
+  readonly inlineInvert: boolean;
+  readonly hueShift: number;
+  readonly pixelateSize: number;
+  readonly kaleidoscopeSegments: number;
+  readonly kaleidoscopeRotation: number;
+  readonly mirrorHorizontal: boolean;
+  readonly mirrorVertical: boolean;
+  readonly rgbSplitAmount: number;
+  readonly rgbSplitAngle: number;
+  readonly blurRadius: number;
+  readonly exposure: number;
+  readonly exposureOffset: number;
+  readonly exposureGamma: number;
+  readonly temperature: number;
+  readonly tint: number;
+  readonly vibrance: number;
+  readonly thresholdLevel: number;
+  readonly posterizeLevels: number;
+  readonly vignetteAmount: number;
+  readonly vignetteSize: number;
+  readonly vignetteSoftness: number;
+  readonly vignetteRoundness: number;
+  readonly chromaKeyMode: number;
+  readonly chromaKeyTolerance: number;
+  readonly chromaKeySoftness: number;
+  readonly chromaKeySpill: number;
+  readonly scanlineDensity: number;
+  readonly scanlineOpacity: number;
+  readonly scanlineSpeed: number;
+  readonly grainAmount: number;
+  readonly grainSize: number;
+  readonly grainSpeed: number;
+  readonly waveAmplitudeX: number;
+  readonly waveAmplitudeY: number;
+  readonly waveFrequencyX: number;
+  readonly waveFrequencyY: number;
+  readonly twirlAmount: number;
+  readonly twirlRadius: number;
+  readonly twirlCenterX: number;
+  readonly twirlCenterY: number;
+  readonly bulgeAmount: number;
+  readonly bulgeRadius: number;
+  readonly bulgeCenterX: number;
+  readonly bulgeCenterY: number;
+  readonly sharpenAmount: number;
+  readonly sharpenRadius: number;
+  readonly edgeDetectStrength: number;
+  readonly edgeDetectInvert: boolean;
+  readonly glowAmount: number;
+  readonly glowThreshold: number;
+  readonly glowRadius: number;
+  readonly levelsInputBlack: number;
+  readonly levelsInputWhite: number;
+  readonly levelsGamma: number;
+  readonly levelsOutputBlack: number;
+  readonly levelsOutputWhite: number;
+  readonly levelsEnabled: boolean;
+  readonly complexEffectCount: number;
+  readonly renderEffectFallback?: 'opacity-envelope';
+  readonly renderEffectFallbackOpacity?: number;
+  readonly unsupportedRenderEffectTypes?: readonly string[];
+  readonly ignoredAfterRenderEffectTypes?: readonly string[];
+}
+
+export interface WorkerGpuVideoPresentationLayer extends WorkerGpuVideoPresentationSource, WorkerGpuVideoPresentationLayerStyle {
+  readonly layerId: string;
+  /** Exact evaluated occurrence; never serialized across the Worker boundary. */
+  readonly sourceLayer: Layer;
+  readonly renderLayer: WorkerGpuWebCodecsRenderLayer;
+}
+
+export type WorkerGpuVideoSourceLoadResult =
+  | { readonly status: 'already-loaded'; readonly width: number; readonly height: number }
+  | { readonly status: 'loaded'; readonly width: number; readonly height: number }
+  | { readonly status: 'failed' };
+
+function createFileSignature(file: File): string {
+  return `${file.size}:${file.lastModified}`;
+}
+
+function createSourceKey(layer: Layer): string {
+  const source = layer.source;
+  if (!source) return `layer:${layer.id}`;
+  if (source.runtimeSourceId && source.runtimeSessionKey) {
+    return `runtime:${source.runtimeSourceId}:${source.runtimeSessionKey}`;
+  }
+  if (source.mediaFileId) {
+    return `media:${source.mediaFileId}:${layer.sourceClipId ?? layer.id}`;
+  }
+  return `layer:${layer.sourceClipId ?? layer.id}`;
+}
+
+export function cloneWorkerGpuRenderLayer(layer: Layer): WorkerGpuWebCodecsRenderLayer {
+  return {
+    id: layer.id,
+    name: layer.name,
+    sourceClipId: layer.sourceClipId,
+    visible: layer.visible,
+    opacity: layer.opacity,
+    blendMode: layer.blendMode,
+    position: { ...layer.position },
+    scale: { ...layer.scale },
+    rotation: typeof layer.rotation === 'number'
+      ? layer.rotation
+      : { ...layer.rotation },
+    videoRotation: layer.source?.videoRotation,
+    sourceRect: layer.sourceRect ? { ...layer.sourceRect } : undefined,
+    effects: layer.effects.map((effect) => ({
+      ...effect,
+      params: { ...effect.params },
+    })),
+    colorCorrection: layer.colorCorrection,
+    maskFeather: layer.maskFeather,
+    maskFeatherQuality: layer.maskFeatherQuality,
+    maskInvert: layer.maskInvert,
+    maskClipId: layer.maskClipId,
+    transitionRender: layer.transitionRender ? { ...layer.transitionRender } : undefined,
+  };
+}
+
+function runtimeOutputHasError(output: WorkerRenderHostRuntimeJobOutput | null): boolean {
+  return output?.statusEvents.some((event) => event.type === 'error') ?? true;
+}
+
+function finiteEffectNumber(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function effectBoolean(value: unknown): boolean {
+  return value === true || value === 1;
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+function smoothstep(edge0: number, edge1: number, value: number): number {
+  const t = clamp01((value - edge0) / Math.max(0.00001, edge1 - edge0));
+  return t * t * (3 - 2 * t);
+}
+
+function renderEffectFallbackOpacity(effectStack: ReturnType<typeof splitLayerEffects>): number {
+  const effect = effectStack.renderEffects?.[0];
+  const progress = clamp01(finiteEffectNumber(effect?.params.progress, 0));
+  return 1 - smoothstep(0.15, 0.55, progress);
+}
+
+function applyWorkerInlineEffect(
+  params: {
+    inlineBrightness: number;
+    inlineContrast: number;
+    inlineSaturation: number;
+    inlineInvert: boolean;
+  },
+  effect: { readonly type: string; readonly params: Record<string, unknown> },
+): void {
+  switch (effect.type) {
+    case 'brightness':
+      params.inlineBrightness = finiteEffectNumber(effect.params.amount, 0);
+      break;
+    case 'contrast':
+      params.inlineContrast = finiteEffectNumber(effect.params.amount, 1);
+      break;
+    case 'saturation':
+      params.inlineSaturation = finiteEffectNumber(effect.params.amount, 1);
+      break;
+    case 'invert':
+      params.inlineInvert = true;
+      break;
+  }
+}
+
+function workerGpuInlineParams(effectStack: ReturnType<typeof splitLayerEffects>) {
+  const params = {
+    inlineBrightness: effectStack.inlineEffects.brightness,
+    inlineContrast: effectStack.inlineEffects.contrast,
+    inlineSaturation: effectStack.inlineEffects.saturation,
+    inlineInvert: effectStack.inlineEffects.invert,
+  };
+  for (const effect of effectStack.complexEffects ?? []) {
+    applyWorkerInlineEffect(params, effect);
+  }
+  return params;
+}
+
+export function resolveWorkerGpuVideoPresentationLayerStyle(layer: Layer): WorkerGpuVideoPresentationLayerStyle {
+  const effectStack = splitLayerEffects(layer.effects);
+  const inlineEffects = workerGpuInlineParams(effectStack);
+  const gpuEffects = workerGpuEffectParams(effectStack.complexEffects);
+  const baseOpacity = typeof layer.opacity === 'number' && Number.isFinite(layer.opacity)
+    ? clamp01(layer.opacity)
+    : 1;
+  const renderEffectTypes = effectStack.renderEffects?.map((effect) => effect.type) ?? [];
+  const ignoredAfterRenderEffectTypes =
+    effectStack.unsupportedAfterRenderEffect?.map((effect) => effect.type) ?? [];
+  const hasUnsupportedWorkerRenderEffect = renderEffectTypes.length > 0;
+  const fallbackOpacity = hasUnsupportedWorkerRenderEffect
+    ? renderEffectFallbackOpacity(effectStack)
+    : 1;
+
+  return {
+    opacity: baseOpacity * fallbackOpacity,
+    blendMode: typeof layer.blendMode === 'string' ? layer.blendMode : 'normal',
+    inlineBrightness: inlineEffects.inlineBrightness,
+    inlineContrast: inlineEffects.inlineContrast,
+    inlineSaturation: inlineEffects.inlineSaturation,
+    inlineInvert: inlineEffects.inlineInvert,
+    ...gpuEffects,
+    complexEffectCount: effectStack.complexEffects?.length ?? 0,
+    renderEffectFallback: hasUnsupportedWorkerRenderEffect ? 'opacity-envelope' : undefined,
+    renderEffectFallbackOpacity: hasUnsupportedWorkerRenderEffect ? fallbackOpacity : undefined,
+    unsupportedRenderEffectTypes: hasUnsupportedWorkerRenderEffect ? renderEffectTypes : undefined,
+    ignoredAfterRenderEffectTypes: ignoredAfterRenderEffectTypes.length > 0
+      ? ignoredAfterRenderEffectTypes
+      : undefined,
+  };
+}
+
+function workerGpuEffectParams(effects: ReturnType<typeof splitLayerEffects>['complexEffects']) {
+  const params = {
+    hueShift: 0,
+    pixelateSize: 0,
+    kaleidoscopeSegments: 0,
+    kaleidoscopeRotation: 0,
+    mirrorHorizontal: false,
+    mirrorVertical: false,
+    rgbSplitAmount: 0,
+    rgbSplitAngle: 0,
+    blurRadius: 0,
+    exposure: 0,
+    exposureOffset: 0,
+    exposureGamma: 1,
+    temperature: 0,
+    tint: 0,
+    vibrance: 0,
+    thresholdLevel: -1,
+    posterizeLevels: 0,
+    vignetteAmount: 0,
+    vignetteSize: 0.5,
+    vignetteSoftness: 0.5,
+    vignetteRoundness: 1,
+    chromaKeyMode: 0,
+    chromaKeyTolerance: 0.2,
+    chromaKeySoftness: 0.1,
+    chromaKeySpill: 0.5,
+    scanlineDensity: 0,
+    scanlineOpacity: 0,
+    scanlineSpeed: 0,
+    grainAmount: 0,
+    grainSize: 1,
+    grainSpeed: 1,
+    waveAmplitudeX: 0,
+    waveAmplitudeY: 0,
+    waveFrequencyX: 5,
+    waveFrequencyY: 5,
+    twirlAmount: 0,
+    twirlRadius: 0.5,
+    twirlCenterX: 0.5,
+    twirlCenterY: 0.5,
+    bulgeAmount: 0,
+    bulgeRadius: 0.5,
+    bulgeCenterX: 0.5,
+    bulgeCenterY: 0.5,
+    sharpenAmount: 0,
+    sharpenRadius: 1,
+    edgeDetectStrength: 0,
+    edgeDetectInvert: false,
+    glowAmount: 0,
+    glowThreshold: 0.6,
+    glowRadius: 20,
+    levelsInputBlack: 0,
+    levelsInputWhite: 1,
+    levelsGamma: 1,
+    levelsOutputBlack: 0,
+    levelsOutputWhite: 1,
+    levelsEnabled: false,
+  };
+  for (const effect of effects ?? []) {
+    const effectParams = effect.params as Record<string, unknown>;
+    const effectType = effect.type as string;
+    switch (effectType) {
+      case 'hue-shift':
+        params.hueShift = finiteEffectNumber(effectParams.shift, 0);
+        break;
+      case 'pixelate':
+        params.pixelateSize = finiteEffectNumber(effectParams.size, 8);
+        break;
+      case 'kaleidoscope':
+        params.kaleidoscopeSegments = finiteEffectNumber(effectParams.segments, 6);
+        params.kaleidoscopeRotation = finiteEffectNumber(effectParams.rotation, 0);
+        break;
+      case 'mirror':
+        params.mirrorHorizontal = effectBoolean(effectParams.horizontal);
+        params.mirrorVertical = effectBoolean(effectParams.vertical);
+        break;
+      case 'rgb-split':
+        params.rgbSplitAmount = finiteEffectNumber(effectParams.amount, 0.01);
+        params.rgbSplitAngle = finiteEffectNumber(effectParams.angle, 0);
+        break;
+      case 'gaussian-blur':
+      case 'box-blur':
+      case 'blur':
+        params.blurRadius = Math.max(0, finiteEffectNumber(
+          effectParams.radius,
+          finiteEffectNumber(effectParams.amount, effectType === 'box-blur' ? 5 : 10),
+        ));
+        break;
+      case 'exposure':
+        params.exposure = finiteEffectNumber(effectParams.exposure, 0);
+        params.exposureOffset = finiteEffectNumber(effectParams.offset, 0);
+        params.exposureGamma = Math.max(0.001, finiteEffectNumber(effectParams.gamma, 1));
+        break;
+      case 'temperature':
+        params.temperature = finiteEffectNumber(effectParams.temperature, 0);
+        params.tint = finiteEffectNumber(effectParams.tint, 0);
+        break;
+      case 'vibrance':
+        params.vibrance = finiteEffectNumber(effectParams.amount, 0);
+        break;
+      case 'threshold':
+        params.thresholdLevel = finiteEffectNumber(effectParams.level, 0.5);
+        break;
+      case 'posterize':
+        params.posterizeLevels = Math.max(2, finiteEffectNumber(effectParams.levels, 6));
+        break;
+      case 'vignette':
+        params.vignetteAmount = finiteEffectNumber(effectParams.amount, 0.5);
+        params.vignetteSize = finiteEffectNumber(effectParams.size, 0.5);
+        params.vignetteSoftness = finiteEffectNumber(effectParams.softness, 0.5);
+        params.vignetteRoundness = finiteEffectNumber(effectParams.roundness, 1);
+        break;
+      case 'chroma-key':
+        params.chromaKeyMode = effectParams.keyColor === 'blue' ? 2 : 1;
+        params.chromaKeyTolerance = finiteEffectNumber(effectParams.tolerance, 0.2);
+        params.chromaKeySoftness = finiteEffectNumber(effectParams.softness, 0.1);
+        params.chromaKeySpill = finiteEffectNumber(effectParams.spillSuppression, 0.5);
+        break;
+      case 'scanlines':
+        params.scanlineDensity = finiteEffectNumber(effectParams.density, 5);
+        params.scanlineOpacity = finiteEffectNumber(effectParams.opacity, 0.3);
+        params.scanlineSpeed = finiteEffectNumber(effectParams.speed, 0);
+        break;
+      case 'grain':
+        params.grainAmount = finiteEffectNumber(effectParams.amount, 0.1);
+        params.grainSize = Math.max(0.001, finiteEffectNumber(effectParams.size, 1));
+        params.grainSpeed = finiteEffectNumber(effectParams.speed, 1);
+        break;
+      case 'wave':
+        params.waveAmplitudeX = finiteEffectNumber(effectParams.amplitudeX, 0.02);
+        params.waveAmplitudeY = finiteEffectNumber(effectParams.amplitudeY, 0.02);
+        params.waveFrequencyX = finiteEffectNumber(effectParams.frequencyX, 5);
+        params.waveFrequencyY = finiteEffectNumber(effectParams.frequencyY, 5);
+        break;
+      case 'twirl':
+        params.twirlAmount = finiteEffectNumber(effectParams.amount, 1);
+        params.twirlRadius = Math.max(0.0001, finiteEffectNumber(effectParams.radius, 0.5));
+        params.twirlCenterX = finiteEffectNumber(effectParams.centerX, 0.5);
+        params.twirlCenterY = finiteEffectNumber(effectParams.centerY, 0.5);
+        break;
+      case 'bulge':
+        params.bulgeAmount = finiteEffectNumber(effectParams.amount, 0.5);
+        params.bulgeRadius = Math.max(0.0001, finiteEffectNumber(effectParams.radius, 0.5));
+        params.bulgeCenterX = finiteEffectNumber(effectParams.centerX, 0.5);
+        params.bulgeCenterY = finiteEffectNumber(effectParams.centerY, 0.5);
+        break;
+      case 'sharpen':
+        params.sharpenAmount = finiteEffectNumber(effectParams.amount, 1);
+        params.sharpenRadius = Math.max(0, finiteEffectNumber(effectParams.radius, 1));
+        break;
+      case 'edge-detect':
+        params.edgeDetectStrength = finiteEffectNumber(effectParams.strength, 1);
+        params.edgeDetectInvert = effectBoolean(effectParams.invert);
+        break;
+      case 'glow':
+        params.glowAmount = finiteEffectNumber(effectParams.amount, 1);
+        params.glowThreshold = finiteEffectNumber(effectParams.threshold, 0.6);
+        params.glowRadius = Math.max(0, finiteEffectNumber(effectParams.radius, 20));
+        break;
+      case 'levels':
+        params.levelsInputBlack = finiteEffectNumber(effectParams.inputBlack, 0);
+        params.levelsInputWhite = finiteEffectNumber(effectParams.inputWhite, 1);
+        params.levelsGamma = finiteEffectNumber(effectParams.gamma, 1);
+        params.levelsOutputBlack = finiteEffectNumber(effectParams.outputBlack, 0);
+        params.levelsOutputWhite = finiteEffectNumber(effectParams.outputWhite, 1);
+        params.levelsEnabled = true;
+        break;
+    }
+  }
+  return params;
+}
+
+export class WorkerGpuMediaSourceRegistry {
+  private readonly loadedSourceDimensions = new Map<string, { readonly width: number; readonly height: number }>();
+  private readonly pendingSourceLoads = new Map<string, Promise<WorkerGpuVideoSourceLoadResult>>();
+  private readonly warnedUnsupportedRenderEffectKeys = new Set<string>();
+  private unsupportedRenderEffectFallbacks: Array<{
+    readonly layerId: string;
+    readonly effectTypes: readonly string[];
+    readonly ignoredAfterRenderEffectTypes: readonly string[];
+    readonly fallback: 'opacity-envelope';
+    readonly opacity: number;
+  }> = [];
+
+  get loadedSourceCount(): number {
+    return this.loadedSourceDimensions.size;
+  }
+
+  get pendingLoadCount(): number {
+    return this.pendingSourceLoads.size;
+  }
+
+  getLoadedSourceDimensions(
+    sourceId: string,
+  ): { readonly width: number; readonly height: number } | null {
+    return this.loadedSourceDimensions.get(sourceId) ?? null;
+  }
+
+  get unsupportedRenderEffectFallbackCount(): number {
+    return this.unsupportedRenderEffectFallbacks.length;
+  }
+
+  get lastUnsupportedRenderEffectFallbacks(): readonly {
+    readonly layerId: string;
+    readonly effectTypes: readonly string[];
+    readonly ignoredAfterRenderEffectTypes: readonly string[];
+    readonly fallback: 'opacity-envelope';
+    readonly opacity: number;
+  }[] {
+    return this.unsupportedRenderEffectFallbacks;
+  }
+
+  resolveVideoPresentationSource(
+    layers: readonly Layer[],
+    mediaFiles: readonly MediaFile[],
+  ): WorkerGpuVideoPresentationSource | null {
+    return this.resolveVideoPresentationSources(layers, mediaFiles)[0] ?? null;
+  }
+
+  resolveVideoPresentationSources(
+    layers: readonly Layer[],
+    mediaFiles: readonly MediaFile[],
+  ): readonly WorkerGpuVideoPresentationLayer[] {
+    const mediaFileById = new Map(mediaFiles.map((file) => [file.id, file]));
+    const sources: WorkerGpuVideoPresentationLayer[] = [];
+    this.unsupportedRenderEffectFallbacks = [];
+    for (const layer of layers) {
+      const source = layer.source;
+      if (!layer.visible || source?.type !== 'video') continue;
+      const mediaTime = source.mediaTime ?? source.targetMediaTime;
+      if (typeof mediaTime !== 'number' || !Number.isFinite(mediaTime)) continue;
+      const mediaFile = source.mediaFileId ? mediaFileById.get(source.mediaFileId) : undefined;
+      const file = source.file ?? mediaFile?.file;
+      if (!file) continue;
+      const sourceKey = createSourceKey(layer);
+      const style = resolveWorkerGpuVideoPresentationLayerStyle(layer);
+      const renderEffectTypes = style.unsupportedRenderEffectTypes ?? [];
+      const ignoredAfterRenderEffectTypes = style.ignoredAfterRenderEffectTypes ?? [];
+      if (style.renderEffectFallback === 'opacity-envelope') {
+        const warningKey = `${layer.id}:${renderEffectTypes.join(',')}:${ignoredAfterRenderEffectTypes.join(',')}`;
+        if (!this.warnedUnsupportedRenderEffectKeys.has(warningKey)) {
+          this.warnedUnsupportedRenderEffectKeys.add(warningKey);
+          log.warn('Worker WebGPU preview is using opacity-envelope fallback for unsupported render effect', {
+            layerId: layer.id,
+            effects: renderEffectTypes,
+            ignoredAfterRenderEffects: ignoredAfterRenderEffectTypes,
+          });
+        }
+        this.unsupportedRenderEffectFallbacks.push({
+          layerId: layer.id,
+          effectTypes: renderEffectTypes,
+          ignoredAfterRenderEffectTypes,
+          fallback: 'opacity-envelope',
+          opacity: style.renderEffectFallbackOpacity ?? 1,
+        });
+      }
+      sources.push({
+        sourceId: `gpu-video:${sourceKey}:${createFileSignature(file)}`,
+        sourceKey,
+        file,
+        layerId: layer.id,
+        sourceLayer: layer,
+        renderLayer: cloneWorkerGpuRenderLayer(layer),
+        mediaTime,
+        timelineTime: mediaTime,
+        width: source.intrinsicWidth ?? mediaFile?.width ?? source.videoElement?.videoWidth ?? 0,
+        height: source.intrinsicHeight ?? mediaFile?.height ?? source.videoElement?.videoHeight ?? 0,
+        ...style,
+        mediaFileId: source.mediaFileId,
+        runtimeSourceId: source.runtimeSourceId,
+        runtimeSessionKey: source.runtimeSessionKey,
+      });
+    }
+    return sources;
+  }
+
+  loadVideoSource(
+    bridge: WorkerRenderHostRuntimeBridge,
+    source: WorkerGpuVideoPresentationSource,
+    requestId: string,
+  ): Promise<WorkerGpuVideoSourceLoadResult> {
+    const loadedDimensions = this.loadedSourceDimensions.get(source.sourceId);
+    if (loadedDimensions) {
+      return Promise.resolve({ status: 'already-loaded', ...loadedDimensions });
+    }
+    const pending = this.pendingSourceLoads.get(source.sourceId);
+    if (pending) {
+      return pending;
+    }
+
+    const loadPromise = (async (): Promise<WorkerGpuVideoSourceLoadResult> => {
+      try {
+        const buffer = await source.file.arrayBuffer();
+        const output = await bridge.loadWebCodecsSource(
+          requestId,
+          source.sourceId,
+          buffer,
+          {
+            hardwareAcceleration: 'prefer-hardware',
+            returnBitmap: false,
+          },
+        );
+        const status = output.webCodecs?.status;
+        const loaded = !runtimeOutputHasError(output)
+          && status?.ready === true
+          && Number.isSafeInteger(status.width)
+          && status.width > 0
+          && Number.isSafeInteger(status.height)
+          && status.height > 0;
+        if (!loaded || !status) {
+          return { status: 'failed' };
+        }
+        const dimensions = { width: status.width, height: status.height };
+        this.loadedSourceDimensions.set(source.sourceId, dimensions);
+        return { status: 'loaded', ...dimensions };
+      } catch {
+        return { status: 'failed' };
+      } finally {
+        this.pendingSourceLoads.delete(source.sourceId);
+      }
+    })();
+
+    this.pendingSourceLoads.set(source.sourceId, loadPromise);
+    return loadPromise;
+  }
+
+  clear(): void {
+    this.loadedSourceDimensions.clear();
+    this.pendingSourceLoads.clear();
+    this.unsupportedRenderEffectFallbacks = [];
+    this.warnedUnsupportedRenderEffectKeys.clear();
+  }
+}

@@ -1,0 +1,604 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
+import { createPortal } from 'react-dom';
+import {
+  clearEditableDraggableNumberSettings,
+  dispatchEditableDraggableNumberSettingsUpdated,
+  getEditableDraggableNumberSettings,
+  saveEditableDraggableNumberSettings,
+  type EditableDraggableNumberSettings,
+  useEditableDraggableNumberSettingsRevision,
+} from './EditableDraggableNumberSettings';
+import { resolvePointerLockDragDeltaX } from './pointerLockDragDelta';
+
+interface PopoverPlacement {
+  top: number;
+  left: number;
+  transformOrigin: string;
+  visibility: 'hidden' | 'visible';
+}
+
+export interface EditableDraggableNumberProps {
+  value: number;
+  onChange: (value: number) => void;
+  defaultValue?: number;
+  sensitivity?: number;
+  decimals?: number;
+  suffix?: string;
+  min?: number;
+  max?: number;
+  persistenceKey?: string;
+  ariaLabel?: string;
+  disabled?: boolean;
+  onDragStart?: () => void;
+  onDragEnd?: () => void;
+}
+
+function clampValue(value: number, min?: number, max?: number): number {
+  let nextValue = value;
+  if (min !== undefined) nextValue = Math.max(min, nextValue);
+  if (max !== undefined) nextValue = Math.min(max, nextValue);
+  return nextValue;
+}
+
+function getAdaptiveRange(value: number, min?: number, max?: number): number {
+  if (
+    min !== undefined &&
+    max !== undefined &&
+    Number.isFinite(min) &&
+    Number.isFinite(max) &&
+    max > min
+  ) {
+    return max - min;
+  }
+
+  return Math.max(Math.abs(value), 1) * 4;
+}
+
+function getPixelsForFullRange(range: number): number {
+  return Math.min(12000, Math.max(700, Math.sqrt(Math.max(range, 1)) * 180));
+}
+
+function getPerPixelStep(value: number, sensitivity: number, decimals: number, min?: number, max?: number): number {
+  const range = getAdaptiveRange(value, min, max);
+  const pixelsForFullRange = getPixelsForFullRange(range);
+  const baseStep = range / pixelsForFullRange;
+  const sensitivityFactor = Math.max(1, 1 + sensitivity);
+  const precisionFloor = Math.pow(10, -Math.max(decimals, 0)) * 0.1;
+  return Math.max(precisionFloor, baseStep / sensitivityFactor);
+}
+
+function formatEditableValue(value: number, decimals: number): string {
+  return value.toFixed(decimals);
+}
+
+function roundValue(value: number, decimals: number): number {
+  const factor = Math.pow(10, decimals + 2);
+  return Math.round(value * factor) / factor;
+}
+
+function parseOptionalNumber(value: string): number | undefined {
+  const normalized = value.trim().replace(',', '.');
+  if (normalized.length === 0) return undefined;
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+export function EditableDraggableNumber({
+  value,
+  onChange,
+  defaultValue,
+  sensitivity = 2,
+  decimals = 2,
+  suffix = '',
+  min,
+  max,
+  persistenceKey,
+  ariaLabel,
+  disabled = false,
+  onDragStart,
+  onDragEnd,
+}: EditableDraggableNumberProps) {
+  const spanRef = useRef<HTMLSpanElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const rootRef = useRef<HTMLSpanElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const accumulatedDelta = useRef(0);
+  const rawDragDistance = useRef(0);
+  const startValue = useRef(0);
+  const lastClientX = useRef(0);
+  const dragStarted = useRef(false);
+  const pointerLockRequested = useRef(false);
+  const pointerLockActive = useRef(false);
+  const pointerLockHandoffPending = useRef(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [draftValue, setDraftValue] = useState(() => formatEditableValue(value, decimals));
+  const [draftDefaultValue, setDraftDefaultValue] = useState('');
+  const [showBoundsPopover, setShowBoundsPopover] = useState(false);
+  const [draftMin, setDraftMin] = useState('');
+  const [draftMax, setDraftMax] = useState('');
+  const [transientSettings, setTransientSettings] = useState<EditableDraggableNumberSettings | null>(null);
+  useEditableDraggableNumberSettingsRevision(persistenceKey);
+  const [popoverPlacement, setPopoverPlacement] = useState<PopoverPlacement>({
+    top: 0,
+    left: 0,
+    transformOrigin: 'center bottom',
+    visibility: 'hidden',
+  });
+
+  const storedSettings = getEditableDraggableNumberSettings(persistenceKey);
+  const persistedSettings = persistenceKey ? storedSettings : transientSettings;
+
+  const effectiveMin = persistedSettings?.min ?? min;
+  const effectiveMax = persistedSettings?.max ?? max;
+  const effectiveDefaultValue = persistedSettings?.defaultValue ?? defaultValue;
+
+  const controlTitle = useMemo(() => {
+    if (disabled) return 'Controlled by linked video speed';
+    const parts = ['Drag to change', 'Shift-drag coarse', 'Ctrl-drag fine', 'double-click to type'];
+    if (effectiveDefaultValue !== undefined) {
+      parts.push('right-click to default');
+    }
+    parts.push('middle-click for range');
+    return parts.join(', ');
+  }, [disabled, effectiveDefaultValue]);
+
+  useEffect(() => {
+    if (!isEditing) return;
+    const rafId = window.requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    });
+    return () => window.cancelAnimationFrame(rafId);
+  }, [isEditing]);
+
+  const syncBoundsDraft = useCallback(() => {
+    setDraftDefaultValue(
+      effectiveDefaultValue !== undefined
+        ? formatEditableValue(effectiveDefaultValue, decimals)
+        : '',
+    );
+    setDraftMin(effectiveMin !== undefined ? String(effectiveMin) : '');
+    setDraftMax(effectiveMax !== undefined ? String(effectiveMax) : '');
+  }, [decimals, effectiveDefaultValue, effectiveMax, effectiveMin]);
+
+  const openBoundsPopover = useCallback(() => {
+    setIsEditing(false);
+    syncBoundsDraft();
+    setPopoverPlacement((current) => ({ ...current, visibility: 'hidden' }));
+    setShowBoundsPopover(true);
+  }, [syncBoundsDraft]);
+
+  useEffect(() => {
+    if (!showBoundsPopover) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (
+        target &&
+        (rootRef.current?.contains(target) || popoverRef.current?.contains(target))
+      ) {
+        return;
+      }
+      setShowBoundsPopover(false);
+    };
+
+    window.addEventListener('mousedown', handlePointerDown);
+    return () => window.removeEventListener('mousedown', handlePointerDown);
+  }, [showBoundsPopover]);
+
+  const updatePopoverPlacement = useCallback(() => {
+    const anchor = rootRef.current;
+    const popover = popoverRef.current;
+    if (!anchor || !popover) return;
+
+    const anchorRect = anchor.getBoundingClientRect();
+    const popoverWidth = popover.offsetWidth;
+    const popoverHeight = popover.offsetHeight;
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const margin = 8;
+    const gap = 6;
+
+    let left = anchorRect.left + (anchorRect.width / 2) - (popoverWidth / 2);
+    left = Math.max(margin, Math.min(left, viewportWidth - popoverWidth - margin));
+
+    let top = anchorRect.top - popoverHeight - gap;
+    let transformOrigin = 'center bottom';
+
+    if (top < margin) {
+      top = anchorRect.bottom + gap;
+      transformOrigin = 'center top';
+    }
+
+    if (top + popoverHeight > viewportHeight - margin) {
+      top = Math.max(margin, viewportHeight - popoverHeight - margin);
+    }
+
+    setPopoverPlacement({
+      top,
+      left,
+      transformOrigin,
+      visibility: 'visible',
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!showBoundsPopover) return;
+
+    const rafId = window.requestAnimationFrame(updatePopoverPlacement);
+
+    const handleViewportChange = () => {
+      updatePopoverPlacement();
+    };
+
+    window.addEventListener('resize', handleViewportChange);
+    window.addEventListener('scroll', handleViewportChange, true);
+
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.removeEventListener('resize', handleViewportChange);
+      window.removeEventListener('scroll', handleViewportChange, true);
+    };
+  }, [showBoundsPopover, updatePopoverPlacement]);
+
+  const readDragDeltaX = useCallback((event: MouseEvent) => {
+    const element = spanRef.current;
+    const isPointerLocked =
+      pointerLockActive.current ||
+      (element !== null && document.pointerLockElement === element);
+    const result = resolvePointerLockDragDeltaX({
+      clientX: event.clientX,
+      lastClientX: lastClientX.current,
+      movementX: event.movementX,
+      pointerLockRequested: pointerLockRequested.current,
+      pointerLockActive: isPointerLocked,
+      pointerLockHandoffPending: pointerLockHandoffPending.current,
+    });
+    lastClientX.current = result.nextClientX;
+    if (result.pointerLockHandoffConsumed) {
+      pointerLockHandoffPending.current = false;
+    }
+    return result.deltaX;
+  }, []);
+
+  const beginEditing = useCallback(() => {
+    if (disabled) return;
+    setShowBoundsPopover(false);
+    setDraftValue(formatEditableValue(value, decimals));
+    setIsEditing(true);
+  }, [decimals, disabled, value]);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    if (disabled) return;
+    if (isEditing) return;
+    if (e.button === 1) {
+      e.preventDefault();
+      e.stopPropagation();
+      openBoundsPopover();
+      return;
+    }
+    if (e.button === 0 && e.detail >= 2) {
+      e.preventDefault();
+      e.stopPropagation();
+      beginEditing();
+      return;
+    }
+    if (showBoundsPopover || e.button !== 0) return;
+    e.preventDefault();
+
+    accumulatedDelta.current = 0;
+    rawDragDistance.current = 0;
+    startValue.current = value;
+    lastClientX.current = e.clientX;
+    dragStarted.current = false;
+    pointerLockRequested.current = false;
+    pointerLockActive.current = false;
+    pointerLockHandoffPending.current = false;
+
+    const element = spanRef.current;
+
+    const handlePointerLockChange = () => {
+      pointerLockActive.current = element !== null && document.pointerLockElement === element;
+    };
+
+    document.addEventListener('pointerlockchange', handlePointerLockChange);
+
+    const handleMouseMove = (event: MouseEvent) => {
+      if ((event.buttons & 1) !== 1) {
+        handleMouseUp();
+        return;
+      }
+
+      const dx = readDragDeltaX(event);
+
+      if (!dragStarted.current) {
+        rawDragDistance.current += dx;
+        if (Math.abs(rawDragDistance.current) < 2) {
+          return;
+        }
+        dragStarted.current = true;
+        onDragStart?.();
+        if (element?.requestPointerLock) {
+          pointerLockRequested.current = true;
+          pointerLockHandoffPending.current = true;
+          try {
+            const result = element.requestPointerLock();
+            if (result && typeof result.then === 'function') {
+              void result.then(
+                () => {
+                  pointerLockActive.current = document.pointerLockElement === element;
+                },
+                () => {
+                  pointerLockRequested.current = false;
+                  pointerLockActive.current = false;
+                  pointerLockHandoffPending.current = false;
+                },
+              );
+            }
+          } catch {
+            pointerLockRequested.current = false;
+            pointerLockActive.current = false;
+            pointerLockHandoffPending.current = false;
+          }
+        }
+      }
+
+      if (dx === 0) {
+        return;
+      }
+
+      let modifierMultiplier = 1;
+      if (event.shiftKey) modifierMultiplier = 10;
+      else if (event.ctrlKey) modifierMultiplier = 0.1;
+
+      accumulatedDelta.current += dx * modifierMultiplier;
+      const perPixelStep = getPerPixelStep(startValue.current, sensitivity, decimals, effectiveMin, effectiveMax);
+      const deltaValue = accumulatedDelta.current * perPixelStep;
+      const unclampedValue = startValue.current + deltaValue;
+      const nextValue = clampValue(unclampedValue, effectiveMin, effectiveMax);
+      const preciseValue = roundValue(nextValue, decimals);
+      onChange(preciseValue);
+    };
+
+    const handleMouseUp = () => {
+      const lockedElement = document.pointerLockElement;
+      if (element !== null && lockedElement === element) {
+        document.exitPointerLock?.();
+      }
+      document.removeEventListener('pointerlockchange', handlePointerLockChange);
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+      if (dragStarted.current) {
+        onDragEnd?.();
+      }
+      dragStarted.current = false;
+      pointerLockRequested.current = false;
+      pointerLockActive.current = false;
+      pointerLockHandoffPending.current = false;
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  }, [
+    beginEditing,
+    decimals,
+    disabled,
+    effectiveMax,
+    effectiveMin,
+    onChange,
+    onDragEnd,
+    onDragStart,
+    openBoundsPopover,
+    readDragDeltaX,
+    sensitivity,
+    showBoundsPopover,
+    isEditing,
+    value,
+  ]);
+
+  const applyBoundsDraft = useCallback(() => {
+    const nextDefaultValueInput = parseOptionalNumber(draftDefaultValue);
+    const nextMin = parseOptionalNumber(draftMin);
+    const nextMax = parseOptionalNumber(draftMax);
+
+    if (nextMin !== undefined && nextMax !== undefined && nextMin > nextMax) {
+      return;
+    }
+
+    const nextDefaultValue = nextDefaultValueInput !== undefined
+      ? clampValue(nextDefaultValueInput, nextMin, nextMax)
+      : undefined;
+
+    const nextSettings: EditableDraggableNumberSettings = {
+      min: nextMin,
+      max: nextMax,
+      defaultValue: nextDefaultValue,
+    };
+
+    if (persistenceKey) {
+      saveEditableDraggableNumberSettings(persistenceKey, nextSettings);
+      dispatchEditableDraggableNumberSettingsUpdated(persistenceKey);
+    } else {
+      setTransientSettings(nextSettings);
+    }
+
+    const clampedCurrent = clampValue(value, nextSettings.min, nextSettings.max);
+    const roundedValue = roundValue(clampedCurrent, decimals);
+    if (roundedValue !== value) {
+      onChange(roundedValue);
+    }
+
+    setShowBoundsPopover(false);
+  }, [decimals, draftDefaultValue, draftMax, draftMin, onChange, persistenceKey, value]);
+
+  const resetBounds = useCallback(() => {
+    setDraftDefaultValue(
+      defaultValue !== undefined
+        ? formatEditableValue(defaultValue, decimals)
+        : '',
+    );
+    setDraftMin(min !== undefined ? String(min) : '');
+    setDraftMax(max !== undefined ? String(max) : '');
+    if (persistenceKey) {
+      clearEditableDraggableNumberSettings(persistenceKey);
+      dispatchEditableDraggableNumberSettingsUpdated(persistenceKey);
+    } else {
+      setTransientSettings(null);
+    }
+  }, [decimals, defaultValue, max, min, persistenceKey]);
+
+  const handleResetToDefault = useCallback(() => {
+    if (effectiveDefaultValue === undefined) return;
+    const nextValue = clampValue(effectiveDefaultValue, effectiveMin, effectiveMax);
+    onChange(nextValue);
+    setDraftValue(formatEditableValue(nextValue, decimals));
+    setDraftDefaultValue(formatEditableValue(nextValue, decimals));
+    setShowBoundsPopover(false);
+  }, [decimals, effectiveDefaultValue, effectiveMax, effectiveMin, onChange]);
+
+  const cancelEditing = useCallback(() => {
+    setDraftValue(formatEditableValue(value, decimals));
+    setIsEditing(false);
+  }, [decimals, value]);
+
+  const commitEditing = useCallback(() => {
+    const parsedValue = parseOptionalNumber(draftValue);
+    if (parsedValue === undefined) {
+      cancelEditing();
+      return;
+    }
+
+    const nextValue = roundValue(
+      clampValue(parsedValue, effectiveMin, effectiveMax),
+      decimals,
+    );
+    onChange(nextValue);
+    setDraftValue(formatEditableValue(nextValue, decimals));
+    setIsEditing(false);
+  }, [cancelEditing, decimals, draftValue, effectiveMax, effectiveMin, onChange]);
+
+  const popover = showBoundsPopover && !disabled && typeof document !== 'undefined'
+    ? createPortal(
+        <div
+          ref={popoverRef}
+          className="draggable-number-bounds-popover"
+          style={popoverPlacement as CSSProperties}
+        >
+          <div className="draggable-number-bounds-title">Value Range</div>
+          <div className="draggable-number-bounds-row">
+            <label>Default</label>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={draftDefaultValue}
+              placeholder={defaultValue !== undefined ? String(defaultValue) : 'none'}
+              onChange={(e) => setDraftDefaultValue(e.target.value)}
+            />
+          </div>
+          <div className="draggable-number-bounds-row">
+            <label>Min</label>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={draftMin}
+              placeholder={min !== undefined ? String(min) : 'none'}
+              onChange={(e) => setDraftMin(e.target.value)}
+            />
+          </div>
+          <div className="draggable-number-bounds-row">
+            <label>Max</label>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={draftMax}
+              placeholder={max !== undefined ? String(max) : 'none'}
+              onChange={(e) => setDraftMax(e.target.value)}
+            />
+          </div>
+          <div className="draggable-number-bounds-actions">
+            {effectiveDefaultValue !== undefined && (
+              <button
+                type="button"
+                className="btn btn-xs"
+                onClick={handleResetToDefault}
+              >
+                Default
+              </button>
+            )}
+            <button type="button" className="btn btn-xs" onClick={resetBounds}>
+              Default Caps
+            </button>
+            <button type="button" className="btn btn-xs btn-active" onClick={applyBoundsDraft}>
+              Apply
+            </button>
+          </div>
+        </div>,
+        document.body,
+      )
+    : null;
+
+  return (
+    <span
+      ref={rootRef}
+      className={`draggable-number-anchor ${disabled ? 'draggable-number-anchor-disabled' : ''}`}
+      aria-disabled={disabled}
+    >
+      {isEditing && !disabled ? (
+        <input
+          ref={inputRef}
+          className="draggable-number draggable-number-input"
+          disabled={disabled}
+          type="text"
+          inputMode="decimal"
+          aria-label={ariaLabel}
+          value={draftValue}
+          style={{ width: `${Math.max(4, Math.min(18, draftValue.length + 1))}ch` }}
+          onChange={(e) => setDraftValue(e.target.value)}
+          onBlur={commitEditing}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              commitEditing();
+            } else if (e.key === 'Escape') {
+              e.preventDefault();
+              cancelEditing();
+            }
+          }}
+          title="Enter value"
+        />
+      ) : (
+        <span
+          ref={spanRef}
+          className={`draggable-number ${disabled ? 'draggable-number-disabled' : ''}`}
+          aria-label={ariaLabel}
+          aria-disabled={disabled}
+          onMouseDown={handleMouseDown}
+          onAuxClick={(e) => {
+            if (e.button === 1) {
+              e.preventDefault();
+              e.stopPropagation();
+            }
+          }}
+          onDoubleClick={(e) => {
+            if (disabled) return;
+            e.preventDefault();
+            e.stopPropagation();
+            beginEditing();
+          }}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (disabled) return;
+            handleResetToDefault();
+          }}
+          title={controlTitle}
+        >
+          {value.toFixed(decimals)}{suffix}
+        </span>
+      )}
+
+      {popover}
+    </span>
+  );
+}

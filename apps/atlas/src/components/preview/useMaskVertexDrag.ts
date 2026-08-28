@@ -1,0 +1,433 @@
+// Mask vertex/handle dragging with document-level listeners
+
+import { useCallback, useId, useRef } from 'react';
+import { startBatch } from '../../stores/historyStore';
+import { useTimelineStore } from '../../stores/timeline';
+import type { ClipMask, MaskVertex } from '../../types/masks';
+import type { TimelineClip } from '../../types/timeline';
+import { inferMaskVertexHandleMode } from '../../utils/maskVertexHandles';
+import {
+  applyMaskVertexUpdates,
+  clearMaskPathDragPreview,
+  commitMaskPathDrag,
+  publishMaskPathDragPreview,
+  type MaskPathDragBatch,
+  type MaskVertexUpdate,
+} from './maskPathDragPreview';
+
+function constrainHandleDelta(dx: number, dy: number, shiftKey: boolean): { x: number; y: number } {
+  if (!shiftKey) return { x: dx, y: dy };
+
+  const length = Math.hypot(dx, dy);
+  if (length < 0.000001) return { x: 0, y: 0 };
+
+  const angle = Math.atan2(dy, dx);
+  const snappedAngle = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
+  return {
+    x: Math.cos(snappedAngle) * length,
+    y: Math.sin(snappedAngle) * length,
+  };
+}
+
+function lineIntersection(
+  pointA: { x: number; y: number },
+  directionA: { x: number; y: number },
+  pointB: { x: number; y: number },
+  directionB: { x: number; y: number },
+): { x: number; y: number } | null {
+  const determinant = directionA.x * directionB.y - directionA.y * directionB.x;
+  if (Math.abs(determinant) < 0.000001) return null;
+
+  const dx = pointB.x - pointA.x;
+  const dy = pointB.y - pointA.y;
+  const t = (dx * directionB.y - dy * directionB.x) / determinant;
+  return {
+    x: pointA.x + directionA.x * t,
+    y: pointA.y + directionA.y * t,
+  };
+}
+
+export function buildAngleLockedQuadVertexUpdates(
+  mask: ClipMask,
+  vertexId: string,
+  target: { x: number; y: number },
+): Array<{ id: string; updates: Partial<MaskVertex> }> | null {
+  if (!mask.closed || mask.vertices.length !== 4) return null;
+  const index = mask.vertices.findIndex(vertex => vertex.id === vertexId);
+  if (index < 0) return null;
+
+  const current = mask.vertices[index];
+  const previous = mask.vertices[(index + 3) % 4];
+  const next = mask.vertices[(index + 1) % 4];
+  const opposite = mask.vertices[(index + 2) % 4];
+  if (!current || !previous || !next || !opposite) return null;
+
+  const previousPoint = lineIntersection(
+    target,
+    { x: current.x - previous.x, y: current.y - previous.y },
+    opposite,
+    { x: previous.x - opposite.x, y: previous.y - opposite.y },
+  );
+  const nextPoint = lineIntersection(
+    target,
+    { x: next.x - current.x, y: next.y - current.y },
+    opposite,
+    { x: next.x - opposite.x, y: next.y - opposite.y },
+  );
+  if (!previousPoint || !nextPoint) return null;
+
+  return [
+    { id: current.id, updates: target },
+    { id: previous.id, updates: previousPoint },
+    { id: next.id, updates: nextPoint },
+  ];
+}
+
+export function useMaskVertexDrag(
+  svgRef: React.RefObject<SVGSVGElement | null>,
+  canvasWidth: number,
+  canvasHeight: number,
+  selectedClip: TimelineClip | undefined,
+  activeMask: ClipMask | undefined,
+  clientToLocalPoint?: (clientX: number, clientY: number) => { x: number; y: number } | null,
+  onDragEnd?: (didDrag: boolean) => void,
+) {
+  const { selectVertex, setMaskDragging } = useTimelineStore();
+  const previewOwnerId = useId();
+
+  const dragState = useRef<{
+    vertexId: string | null;
+    handleType: 'vertex' | 'handleIn' | 'handleOut' | null;
+    startX: number;
+    startY: number;
+    startLocalX: number;
+    startLocalY: number;
+    startVertexX: number;
+    startVertexY: number;
+    startHandleX: number;
+    startHandleY: number;
+    lastShiftState: boolean;
+    shiftStartX: number;
+    shiftStartVertexX: number;
+    shiftStartVertexY: number;
+    startHandleInX: number;
+    startHandleInY: number;
+    startHandleOutX: number;
+    startHandleOutY: number;
+    startVertices: Array<{ id: string; x: number; y: number }>;
+    didDrag: boolean;
+  }>({
+    vertexId: null,
+    handleType: null,
+    startX: 0,
+    startY: 0,
+    startLocalX: 0,
+    startLocalY: 0,
+    startVertexX: 0,
+    startVertexY: 0,
+    startHandleX: 0,
+    startHandleY: 0,
+    lastShiftState: false,
+    shiftStartX: 0,
+    shiftStartVertexX: 0,
+    shiftStartVertexY: 0,
+    startHandleInX: 0,
+    startHandleInY: 0,
+    startHandleOutX: 0,
+    startHandleOutY: 0,
+    startVertices: [],
+    didDrag: false,
+  });
+
+  const handleVertexMouseDown = useCallback((
+    e: React.MouseEvent,
+    vertexId: string,
+    handleType: 'vertex' | 'handleIn' | 'handleOut'
+  ) => {
+    if (e.button !== 0) return;
+
+    e.stopPropagation();
+    e.preventDefault();
+
+    if (!activeMask || !selectedClip) return;
+
+    const vertex = activeMask.vertices.find(v => v.id === vertexId);
+    if (!vertex) return;
+
+    const currentSelection = useTimelineStore.getState().selectedVertexIds;
+    const addToSelection = false;
+    const keepMultiSelection = handleType === 'vertex' && currentSelection.has(vertexId) && currentSelection.size > 1 && !addToSelection;
+
+    if (addToSelection && currentSelection.has(vertexId)) {
+      selectVertex(vertexId, true);
+      return;
+    }
+
+    let selectedIds: string[];
+    if (keepMultiSelection) {
+      selectedIds = Array.from(currentSelection);
+    } else if (addToSelection) {
+      selectedIds = Array.from(new Set([...currentSelection, vertexId]));
+      selectVertex(vertexId, addToSelection);
+    } else {
+      selectedIds = [vertexId];
+      selectVertex(vertexId, false);
+    }
+
+    const startVertices = activeMask.vertices
+      .filter(v => selectedIds.includes(v.id))
+      .map(v => ({ id: v.id, x: v.x, y: v.y }));
+
+    clearMaskPathDragPreview(previewOwnerId);
+    setMaskDragging(true);
+    const startLocalPoint = clientToLocalPoint?.(e.clientX, e.clientY);
+
+    dragState.current = {
+      vertexId,
+      handleType,
+      startX: e.clientX,
+      startY: e.clientY,
+      startLocalX: startLocalPoint?.x ?? vertex.x,
+      startLocalY: startLocalPoint?.y ?? vertex.y,
+      startVertexX: vertex.x,
+      startVertexY: vertex.y,
+      startHandleX: handleType === 'handleIn' ? vertex.handleIn.x : vertex.handleOut.x,
+      startHandleY: handleType === 'handleIn' ? vertex.handleIn.y : vertex.handleOut.y,
+      lastShiftState: false,
+      shiftStartX: e.clientX,
+      shiftStartVertexX: vertex.x,
+      shiftStartVertexY: vertex.y,
+      startHandleInX: vertex.handleIn.x,
+      startHandleInY: vertex.handleIn.y,
+      startHandleOutX: vertex.handleOut.x,
+      startHandleOutY: vertex.handleOut.y,
+      startVertices,
+      didDrag: false,
+    };
+
+    let latestMoveEvent: MouseEvent | null = null;
+    let moveFrame: number | null = null;
+    let dragBatch: MaskPathDragBatch | null = null;
+    let latestVertexUpdates: MaskVertexUpdate[] = [];
+    let latestPreviewMask = activeMask;
+    const historyLabel = handleType === 'vertex'
+      ? 'Move mask vertices'
+      : 'Adjust mask bezier handle';
+
+    const publishVertexUpdates = (vertexUpdates: MaskVertexUpdate[]) => {
+      latestVertexUpdates = vertexUpdates;
+      latestPreviewMask = applyMaskVertexUpdates(activeMask, vertexUpdates);
+      publishMaskPathDragPreview(previewOwnerId, selectedClip.id, latestPreviewMask);
+    };
+
+    const applyMouseMove = (moveEvent: MouseEvent) => {
+      if (!dragState.current.vertexId || !dragState.current.handleType) return;
+      if (!selectedClip || !activeMask) return;
+
+      const svg = svgRef.current;
+      if (!svg) return;
+
+      const rect = svg.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const scaleX = canvasWidth / rect.width;
+      const scaleY = canvasHeight / rect.height;
+
+      const isShiftPressed = moveEvent.shiftKey;
+      if (
+        !dragState.current.didDrag &&
+        Math.hypot(
+          moveEvent.clientX - dragState.current.startX,
+          moveEvent.clientY - dragState.current.startY,
+        ) > 2
+      ) {
+        dragState.current.didDrag = true;
+        dragBatch = startBatch(historyLabel);
+      }
+      if (!dragState.current.didDrag) return;
+
+      if (isShiftPressed && !dragState.current.lastShiftState) {
+        dragState.current.shiftStartX = moveEvent.clientX;
+        const currentVertex = latestPreviewMask.vertices.find(
+          vertex => vertex.id === dragState.current.vertexId,
+        );
+        if (currentVertex) {
+          dragState.current.shiftStartVertexX = currentVertex.x;
+          dragState.current.shiftStartVertexY = currentVertex.y;
+        }
+      }
+      dragState.current.lastShiftState = isShiftPressed;
+
+      if (dragState.current.handleType === 'vertex') {
+        const freeMove = moveEvent.ctrlKey || moveEvent.metaKey;
+        if (isShiftPressed && !freeMove) {
+          const shiftDx = (moveEvent.clientX - dragState.current.shiftStartX) * scaleX;
+          const normalizedShiftDx = shiftDx / canvasWidth;
+          const scaleFactor = 1 + normalizedShiftDx * 5;
+
+          publishVertexUpdates([{
+            id: dragState.current.vertexId,
+            updates: {
+              x: dragState.current.shiftStartVertexX,
+              y: dragState.current.shiftStartVertexY,
+              handleIn: {
+                x: dragState.current.startHandleInX * scaleFactor,
+                y: dragState.current.startHandleInY * scaleFactor,
+              },
+              handleOut: {
+                x: dragState.current.startHandleOutX * scaleFactor,
+                y: dragState.current.startHandleOutY * scaleFactor,
+              },
+            },
+          }]);
+        } else {
+          const localPoint = clientToLocalPoint?.(moveEvent.clientX, moveEvent.clientY);
+          const normalizedDx = localPoint
+            ? localPoint.x - dragState.current.startLocalX
+            : ((moveEvent.clientX - dragState.current.startX) * scaleX) / canvasWidth;
+          const normalizedDy = localPoint
+            ? localPoint.y - dragState.current.startLocalY
+            : ((moveEvent.clientY - dragState.current.startY) * scaleY) / canvasHeight;
+          const axisLocked = freeMove && moveEvent.shiftKey
+            ? Math.abs(normalizedDx) >= Math.abs(normalizedDy)
+              ? { dx: normalizedDx, dy: 0 }
+              : { dx: 0, dy: normalizedDy }
+            : { dx: normalizedDx, dy: normalizedDy };
+
+          const target = {
+            x: dragState.current.startVertexX + axisLocked.dx,
+            y: dragState.current.startVertexY + axisLocked.dy,
+          };
+          const lockedUpdates = !freeMove && dragState.current.startVertices.length === 1
+            ? buildAngleLockedQuadVertexUpdates(activeMask, dragState.current.vertexId, target)
+            : null;
+          const vertexUpdates = lockedUpdates ?? dragState.current.startVertices.map(startVertex => ({
+            id: startVertex.id,
+            updates: {
+              x: startVertex.x + axisLocked.dx,
+              y: startVertex.y + axisLocked.dy,
+            },
+          }));
+          publishVertexUpdates(vertexUpdates);
+        }
+      } else {
+        const handleKey = dragState.current.handleType;
+        const localPoint = clientToLocalPoint?.(moveEvent.clientX, moveEvent.clientY);
+        const rawHandle = localPoint
+          ? {
+              x: localPoint.x - dragState.current.startVertexX,
+              y: localPoint.y - dragState.current.startVertexY,
+            }
+          : {
+              x: dragState.current.startHandleX + ((moveEvent.clientX - dragState.current.startX) * scaleX) / canvasWidth,
+              y: dragState.current.startHandleY + ((moveEvent.clientY - dragState.current.startY) * scaleY) / canvasHeight,
+            };
+        const nextHandle = constrainHandleDelta(
+          rawHandle.x,
+          rawHandle.y,
+          moveEvent.shiftKey,
+        );
+        const currentVertex = latestPreviewMask.vertices.find(
+          vertex => vertex.id === dragState.current.vertexId,
+        );
+        const currentMode = currentVertex ? inferMaskVertexHandleMode(currentVertex) : 'mirrored';
+        const nextMode = moveEvent.altKey || currentMode === 'split' ? 'split' : 'mirrored';
+        const updates = {
+          [handleKey]: nextHandle,
+          handleMode: nextMode,
+        } as Partial<MaskVertex>;
+
+        if (nextMode === 'mirrored') {
+          const oppositeHandleKey = handleKey === 'handleIn' ? 'handleOut' : 'handleIn';
+          updates[oppositeHandleKey] = {
+            x: -nextHandle.x,
+            y: -nextHandle.y,
+          };
+        }
+
+        publishVertexUpdates([{
+          id: dragState.current.vertexId,
+          updates,
+        }]);
+      }
+    };
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      latestMoveEvent = moveEvent;
+      if (moveFrame !== null) return;
+
+      moveFrame = window.requestAnimationFrame(() => {
+        moveFrame = null;
+        if (latestMoveEvent) {
+          applyMouseMove(latestMoveEvent);
+        }
+      });
+    };
+
+    const handleMouseUp = () => {
+      if (moveFrame !== null) {
+        window.cancelAnimationFrame(moveFrame);
+        moveFrame = null;
+      }
+      if (latestMoveEvent) {
+        applyMouseMove(latestMoveEvent);
+        latestMoveEvent = null;
+      }
+      const didDrag = dragState.current.didDrag;
+      if (didDrag && dragBatch) {
+        commitMaskPathDrag(
+          useTimelineStore.getState(),
+          selectedClip.id,
+          activeMask,
+          latestVertexUpdates,
+          historyLabel,
+          dragBatch,
+        );
+      }
+      clearMaskPathDragPreview(previewOwnerId);
+      setMaskDragging(false);
+      dragState.current = {
+        vertexId: null,
+        handleType: null,
+        startX: 0,
+        startY: 0,
+        startLocalX: 0,
+        startLocalY: 0,
+        startVertexX: 0,
+        startVertexY: 0,
+        startHandleX: 0,
+        startHandleY: 0,
+        lastShiftState: false,
+        shiftStartX: 0,
+        shiftStartVertexX: 0,
+        shiftStartVertexY: 0,
+        startHandleInX: 0,
+        startHandleInY: 0,
+        startHandleOutX: 0,
+        startHandleOutY: 0,
+        startVertices: [],
+        didDrag: false,
+      };
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener('blur', handleMouseUp);
+      onDragEnd?.(didDrag);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    window.addEventListener('blur', handleMouseUp);
+  }, [
+    activeMask,
+    canvasHeight,
+    canvasWidth,
+    clientToLocalPoint,
+    onDragEnd,
+    previewOwnerId,
+    selectedClip,
+    selectVertex,
+    setMaskDragging,
+    svgRef,
+  ]);
+
+  return { handleVertexMouseDown };
+}

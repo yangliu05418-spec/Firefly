@@ -1,0 +1,184 @@
+// Unique ID generator - prevents collision when creating multiple clips rapidly
+// Uses timestamp + counter + random suffix for guaranteed uniqueness
+
+let clipCounter = 0;
+let lastTimestamp = 0;
+
+/**
+ * Generate a unique clip ID.
+ * Format: {prefix}-{timestamp}-{counter}-{random}
+ *
+ * The counter resets when timestamp changes, ensuring:
+ * - IDs are always unique even when created in the same millisecond
+ * - IDs are roughly sortable by creation time
+ * - Random suffix adds extra collision resistance
+ */
+export function generateClipId(prefix: string = 'clip'): string {
+  const now = Date.now();
+
+  // Reset counter when timestamp changes
+  if (now !== lastTimestamp) {
+    lastTimestamp = now;
+    clipCounter = 0;
+  }
+
+  const count = ++clipCounter;
+  const random = Math.random().toString(36).substr(2, 5);
+
+  return `${prefix}-${now}-${count}-${random}`;
+}
+
+/**
+ * Generate a unique ID for video clips.
+ */
+export function generateVideoClipId(): string {
+  return generateClipId('clip');
+}
+
+/**
+ * Generate a unique ID for audio clips (linked to video).
+ */
+export function generateAudioClipId(): string {
+  return generateClipId('clip-audio');
+}
+
+/**
+ * Generate a unique ID for text clips.
+ */
+export function generateTextClipId(): string {
+  return generateClipId('clip-text');
+}
+
+/**
+ * Generate a unique ID for solid clips.
+ */
+export function generateSolidClipId(): string {
+  return generateClipId('clip-solid');
+}
+
+/**
+ * Generate a unique ID for MIDI clips (issue #182).
+ */
+export function generateMidiClipId(): string {
+  return generateClipId('clip-midi');
+}
+
+/**
+ * Generate a unique ID for MIDI notes (issue #182).
+ */
+export function generateMidiNoteId(): string {
+  return generateClipId('midi-note');
+}
+
+/**
+ * Generate a stable unique ID for a synth LFO (issue #298). The mod-matrix refers
+ * to LFOs by this id (never a positional index), so it must survive reorders.
+ */
+export function generateSynthLfoId(): string {
+  return generateClipId('lfo');
+}
+
+/**
+ * Generate a unique ID for math scene clips.
+ */
+export function generateMathSceneClipId(): string {
+  return generateClipId('clip-math');
+}
+
+/**
+ * Generate a unique ID for motion design clips.
+ */
+export function generateMotionClipId(kind: 'shape' | 'null' | 'adjustment' | 'group' = 'shape'): string {
+  return generateClipId(`clip-motion-${kind}`);
+}
+
+/**
+ * Generate a unique ID for mesh clips.
+ */
+export function generateMeshClipId(): string {
+  return generateClipId('clip-mesh');
+}
+
+/**
+ * Generate a unique ID for camera clips.
+ */
+export function generateCameraClipId(): string {
+  return generateClipId('clip-camera');
+}
+
+/**
+ * Generate a unique ID for light clips.
+ */
+export function generateLightClipId(): string {
+  return generateClipId('clip-light');
+}
+
+/**
+ * Generate a unique ID for splat effector clips.
+ */
+export function generateSplatEffectorClipId(): string {
+  return generateClipId('clip-splat-effector');
+}
+
+/**
+ * Generate a unique ID for composition clips.
+ */
+export function generateCompClipId(): string {
+  return generateClipId('clip-comp');
+}
+
+/**
+ * Generate a unique ID for YouTube download clips.
+ */
+export function generateYouTubeClipId(): string {
+  return generateClipId('clip-yt');
+}
+
+/**
+ * Generate a unique ID for nested clips within a composition.
+ */
+export function generateNestedClipId(parentCompClipId: string, originalClipId: string): string {
+  return `nested-${parentCompClipId}-${originalClipId}`;
+}
+
+/**
+ * Generate a unique ID for effects.
+ */
+export function generateEffectId(): string {
+  return generateClipId('effect');
+}
+
+/**
+ * Generate a unique ID for multicam linked groups.
+ */
+export function generateLinkedGroupId(): string {
+  return generateClipId('multicam');
+}
+
+/**
+ * Generate a unique ID for manually linked timeline clip groups.
+ */
+export function generateManualLinkedGroupId(): string {
+  return generateClipId('clip-link');
+}
+
+export function isManualLinkedGroupId(groupId: string | undefined): boolean {
+  return typeof groupId === 'string' && groupId.startsWith('clip-link-');
+}
+
+/**
+ * Generate a unique ID for tracks.
+ */
+export function generateTrackId(type: 'video' | 'audio' | 'midi'): string {
+  return generateClipId(`track-${type}`);
+}
+
+/**
+ * Generate paired IDs for video and linked audio clips.
+ * Ensures they're created with the same timestamp for consistency.
+ */
+export function generateLinkedClipIds(): { videoId: string; audioId: string } {
+  const videoId = generateVideoClipId();
+  const audioId = generateAudioClipId();
+  return { videoId, audioId };
+}
