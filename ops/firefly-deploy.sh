@@ -109,11 +109,16 @@ sync_atlas_assets() (
       exit 1
     }
   done
-  export_worker_found=0
-  for export_worker in "$atlas_bundle_dir"/assets/export.worker-*.js; do
-    if [ -s "$export_worker" ]; then export_worker_found=1; break; fi
+  for required_pattern in 'App-*.js' 'projectLifecycle-*.js' 'timelineClipCanvas.worker-*.js' 'ExportPanel-*.js'; do
+    required_asset_found=0
+    for required_asset in "$atlas_bundle_dir/assets"/$required_pattern; do
+      if [ -s "$required_asset" ]; then required_asset_found=1; break; fi
+    done
+    [ "$required_asset_found" -eq 1 ] || {
+      echo "Atlas runtime asset is missing: $required_pattern" >&2
+      exit 1
+    }
   done
-  [ "$export_worker_found" -eq 1 ] || { echo "Atlas export worker is missing" >&2; exit 1; }
   install -d -o root -g root -m 0755 /srv/firefly/atlas-assets
   cp -a "$atlas_bundle_dir/assets/." /srv/firefly/atlas-assets/
   chmod -R a=rX /srv/firefly/atlas-assets
