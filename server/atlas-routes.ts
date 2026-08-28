@@ -194,7 +194,9 @@ const verifyCompletedTransfer = async (
     }
   }
   const parts = validateCompleteParts(mergeCompletedParts(reportedParts, completedParts, transfer), transfer);
-  store.markTransferVerifying(transfer.id, ownerId, parts, at);
+  if (!store.markTransferVerifying(transfer.id, ownerId, parts, at)) {
+    throw new AtlasRouteError(409, "ATLAS_CHECKPOINT_STATE_CHANGED", "检查点状态已变化，请刷新后重试");
+  }
   return completeAndVerify(storage, transfer, parts, digest);
 };
 
@@ -364,6 +366,8 @@ export const createAtlasRouter = (dependencies: AtlasRouterDependencies) => {
     if (reservation.status === "missing") throw new AtlasRouteError(404, "ATLAS_PROJECT_NOT_FOUND", "Atlas项目不存在");
     if (reservation.status === "lease_lost") throw new AtlasRouteError(409, "ATLAS_LEASE_LOST", "编辑租约已失效，请重新接管项目");
     if (reservation.status === "conflict") return res.status(409).json({ error: "项目已在其他窗口更新", code: "ATLAS_REVISION_CONFLICT", currentRevision: reservation.currentRevision });
+    if (reservation.status === "stale_in_flight") throw new AtlasRouteError(425, "ATLAS_CHECKPOINT_STALE_IN_FLIGHT", "旧窗口的检查点仍在完成中，请稍后重试");
+    if (reservation.status === "generation_invalid" || reservation.status === "state_changed") throw new AtlasRouteError(409, "ATLAS_CHECKPOINT_STATE_CHANGED", "检查点状态异常，请刷新后重试");
     if (reservation.status === "resetting") throw new AtlasRouteError(425, "ATLAS_CHECKPOINT_RECOVERING", "检查点正在恢复，请稍后重试");
     if (reservation.status === "recoverable") {
       // Claim the failed reservation in SQLite before touching its

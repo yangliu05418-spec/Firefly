@@ -1,9 +1,10 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import express from "express";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAtlasRouter, type AtlasImportSource, type AtlasStorageDependencies, type AtlasVerifiedObject } from "./atlas-routes.js";
 import { AtlasStore, type AtlasTransferPart } from "./atlas-store.js";
 import { UserStore } from "./db.js";
@@ -183,6 +184,107 @@ describe("Atlas project API", () => {
     });
     expect(recovered.status).toBe(200);
     expect(await api.json(recovered)).toMatchObject({ checkpointId: started.checkpointId, revision: 1, status: "ready" });
+  });
+
+  it("recovers an errored uploading checkpoint after a lease takeover without blocking on the old digest", async () => {
+    const api = await setup();
+    const project = await api.json<{ id: string }>(await api.request("/projects", { method: "POST", body: JSON.stringify({ title: "P0恢复" }) }));
+    const oldLease = await api.json<{ token: string }>(await api.request(`/projects/${project.id}/lease`, {
+      method: "POST", body: JSON.stringify({ deviceId: "old-tab-checkpoint" }),
+    }));
+    const firstResponse = await api.request(`/projects/${project.id}/checkpoints`, {
+      method: "POST", body: JSON.stringify({ expectedRevision: 0, leaseToken: oldLease.token, digest: "a".repeat(64), size: 8 }),
+    });
+    expect(firstResponse.status).toBe(201);
+    const first = await api.json<{ checkpointId: string; transfer: { id: string } }>(firstResponse);
+    const oldTransfer = api.store.readTransfer(first.transfer.id, api.owner.id)!;
+    api.store.recordTransferError(oldTransfer.id, api.owner.id, "SignatureDoesNotMatch", 1_001);
+    const newLease = await api.json<{ token: string }>(await api.request(`/projects/${project.id}/lease`, {
+      method: "POST", body: JSON.stringify({ deviceId: "new-tab-checkpoint", takeover: true }),
+    }));
+    const recoveredResponse = await api.request(`/projects/${project.id}/checkpoints`, {
+      method: "POST", body: JSON.stringify({ expectedRevision: 0, leaseToken: newLease.token, digest: "b".repeat(64), size: 9 }),
+    });
+    expect(recoveredResponse.status).toBe(201);
+    const recovered = await api.json<{ checkpointId: string; transfer: { id: string } }>(recoveredResponse);
+    expect(recovered.checkpointId).toBe(first.checkpointId);
+    expect(api.aborted).toContainEqual({ objectKey: oldTransfer.objectKey, uploadId: oldTransfer.tosUploadId });
+    expect(api.store.readVersion(first.checkpointId, api.owner.id)).toMatchObject({
+      status: "uploading", leaseGeneration: 2, digest: "b".repeat(64), size: 9,
+    });
+    expect(api.store.readTransfer(recovered.transfer.id, api.owner.id)).toMatchObject({ status: "uploading", error: undefined });
+  });
+
+  it("reuses the current multipart after a transient checkpoint error when the payload is unchanged", async () => {
+    const api = await setup({ partSize: 4 });
+    const project = await api.json<{ id: string }>(await api.request("/projects", {
+      method: "POST", body: JSON.stringify({ title: "断点续传" }),
+    }));
+    const lease = await api.json<{ token: string }>(await api.request(`/projects/${project.id}/lease`, {
+      method: "POST", body: JSON.stringify({ deviceId: "same-tab-retry" }),
+    }));
+    const body = { expectedRevision: 0, leaseToken: lease.token, digest: "a".repeat(64), size: 8 };
+    const first = await api.json<{ checkpointId: string; transfer: { id: string } }>(await api.request(
+      `/projects/${project.id}/checkpoints`, { method: "POST", body: JSON.stringify(body) },
+    ));
+    const originalUploadId = api.store.readTransfer(first.transfer.id, api.owner.id)!.tosUploadId;
+    api.store.recordTransferError(first.transfer.id, api.owner.id, "SignatureDoesNotMatch", 1_001);
+
+    const retry = await api.request(`/projects/${project.id}/checkpoints`, {
+      method: "POST", body: JSON.stringify(body),
+    });
+    expect(retry.status).toBe(200);
+    expect(await api.json(retry)).toMatchObject({
+      checkpointId: first.checkpointId,
+      transfer: { id: first.transfer.id, status: "uploading" },
+    });
+    expect(api.store.readTransfer(first.transfer.id, api.owner.id)?.tosUploadId).toBe(originalUploadId);
+    expect(api.aborted).toEqual([]);
+    expect(api.deleted).toEqual([]);
+    expect(api.uploads.size).toBe(1);
+  });
+
+  it("returns 425 for a healthy stale upload and fences a late completion after reset claim", async () => {
+    const api = await setup();
+    const project = await api.json<{ id: string }>(await api.request("/projects", { method: "POST", body: JSON.stringify({ title: "并发围栏" }) }));
+    const oldLease = await api.json<{ token: string }>(await api.request(`/projects/${project.id}/lease`, {
+      method: "POST", body: JSON.stringify({ deviceId: "old-completing-tab" }),
+    }));
+    const first = await api.json<{ checkpointId: string; transfer: { id: string } }>(await api.request(`/projects/${project.id}/checkpoints`, {
+      method: "POST", body: JSON.stringify({ expectedRevision: 0, leaseToken: oldLease.token, digest: "a".repeat(64), size: 8 }),
+    }));
+    const transfer = api.store.readTransfer(first.transfer.id, api.owner.id)!;
+    const parts = [{ partNumber: 1, etag: "p1" }, { partNumber: 2, etag: "p2" }];
+    api.uploadedParts.set(transfer.tosUploadId!, parts);
+    expect(api.store.markTransferVerifying(transfer.id, api.owner.id, parts, 1_001)).toBe(true);
+    const newLease = await api.json<{ token: string }>(await api.request(`/projects/${project.id}/lease`, {
+      method: "POST", body: JSON.stringify({ deviceId: "new-waiting-tab", takeover: true }),
+    }));
+    const waiting = await api.request(`/projects/${project.id}/checkpoints`, {
+      method: "POST", body: JSON.stringify({ expectedRevision: 0, leaseToken: newLease.token, digest: "b".repeat(64), size: 9 }),
+    });
+    expect(waiting.status).toBe(425);
+    expect(await api.json(waiting)).toMatchObject({ code: "ATLAS_CHECKPOINT_STALE_IN_FLIGHT" });
+    expect(api.aborted).toEqual([]);
+    expect(api.deleted).toEqual([]);
+
+    api.store.recordTransferError(transfer.id, api.owner.id, "SignatureDoesNotMatch", 1_002);
+    expect(api.store.reserveCheckpoint({
+      id: "unused", transferId: "unused", ownerId: api.owner.id, projectId: project.id, expectedRevision: 0,
+      objectKey: transfer.objectKey, digest: "b".repeat(64), size: 9, partSize: 4, partCount: 3,
+      now: 1_003, expiresAt: 100_000, leaseTokenHash: crypto.createHash("sha256").update(newLease.token).digest("hex"),
+    })).toMatchObject({ status: "recoverable" });
+    expect(api.store.claimFailedCheckpointReset({
+      versionId: first.checkpointId, transferId: transfer.id, ownerId: api.owner.id, projectId: project.id,
+      expectedRevision: 0, now: 1_004, leaseTokenHash: crypto.createHash("sha256").update(newLease.token).digest("hex"), claimToken: "winner",
+    })).toMatchObject({ status: "ok" });
+    const complete = vi.spyOn(api.storage, "completeMultipartUpload");
+    const late = await api.request(`/projects/${project.id}/checkpoints/${first.checkpointId}/complete`, {
+      method: "POST", body: JSON.stringify({ leaseToken: newLease.token, parts }),
+    });
+    expect(late.status).toBe(409);
+    expect(await api.json(late)).toMatchObject({ code: "ATLAS_CHECKPOINT_STATE_CHANGED" });
+    expect(complete).not.toHaveBeenCalled();
   });
 
   it("fails closed when checkpoint SHA-256 metadata is absent and recovers after authoritative metadata appears", async () => {

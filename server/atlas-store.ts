@@ -4,6 +4,7 @@ import Database from "better-sqlite3";
 import { assertSchemaVersion } from "./migrations.js";
 
 const CHECKPOINT_RESET_CLAIM_TTL_MS = 10 * 60_000;
+class CheckpointStateChanged extends Error {}
 
 export type AtlasProject = {
   id: string;
@@ -284,7 +285,7 @@ export class AtlasStore {
     objectKey: string; digest: string; size: number; partSize: number; partCount: number; now: number; expiresAt: number;
     leaseTokenHash?: string;
   }) {
-    return this.database.transaction(() => {
+    try { return this.database.transaction(() => {
       const project = this.readProject(input.projectId, input.ownerId);
       if (!project) return { status: "missing" } as const;
       if (input.leaseTokenHash && !this.database.prepare(`
@@ -294,7 +295,51 @@ export class AtlasStore {
       const existing = versionFromRow(this.database.prepare("SELECT * FROM atlas_project_versions WHERE project_id = ? AND revision = ?")
         .get(input.projectId, input.expectedRevision + 1) as VersionRow | undefined);
       if (existing) {
+        if (project.revision !== input.expectedRevision) return { status: "conflict", currentRevision: project.revision } as const;
         const transfer = transferFromRow(this.database.prepare("SELECT * FROM atlas_transfers WHERE version_id = ?").get(existing.id) as TransferRow | undefined);
+        const validShape = existing.ownerId === input.ownerId && existing.projectId === input.projectId
+          && existing.objectKey === input.objectKey && transfer?.ownerId === input.ownerId
+          && transfer.projectId === input.projectId && transfer.versionId === existing.id
+          && transfer.objectKey === input.objectKey && transfer.kind === "checkpoint";
+        if (!validShape) return { status: "state_changed" } as const;
+        if (existing.leaseGeneration > project.leaseGeneration) return { status: "generation_invalid" } as const;
+        const unfinished = existing.status === "uploading" && Boolean(transfer && ["initiated", "uploading", "verifying"].includes(transfer.status));
+        const stale = unfinished && existing.leaseGeneration < project.leaseGeneration;
+        const explicitError = Boolean(existing.error || transfer?.error);
+        const samePayload = existing.digest === input.digest && existing.size === input.size;
+        if (stale && !explicitError) return { status: "stale_in_flight", version: existing, transfer: transfer! } as const;
+        // A transient error in the current editor must keep the same multipart
+        // when the document payload is unchanged. Reset only when an old lease
+        // is fenced, or when the current editor is replacing that payload.
+        const abandoned = unfinished && project.revision === input.expectedRevision && explicitError
+          && (stale || !samePayload);
+        if (abandoned && transfer) {
+          // Atomically fence the stale/erroring attempt into the existing
+          // claimed-reset protocol. Only the claim winner may abort/delete the
+          // old multipart and deterministic object; concurrent retries merely
+          // observe recoverable/resetting and cannot delete the winner's data.
+          const marker = stale
+            ? "ABANDONED_LEASE_GENERATION"
+            : "ABANDONED_TRANSFER_ERROR";
+          const versionChanged = this.database.prepare(`
+            UPDATE atlas_project_versions SET status = 'failed', error = ?
+            WHERE id = ? AND owner_id = ? AND project_id = ? AND object_key = ?
+              AND status = 'uploading' AND lease_generation = ? AND error IS ?
+          `).run(marker, existing.id, input.ownerId, input.projectId, input.objectKey,
+            existing.leaseGeneration, existing.error ?? null).changes;
+          const transferChanged = this.database.prepare(`
+            UPDATE atlas_transfers SET status = 'failed', error = ?, updated_at = ?
+            WHERE id = ? AND owner_id = ? AND project_id = ? AND version_id = ? AND object_key = ? AND kind = 'checkpoint'
+              AND status = ? AND error IS ?
+          `).run(marker, input.now, transfer.id, input.ownerId, input.projectId, existing.id, input.objectKey,
+            transfer.status, transfer.error ?? null).changes;
+          if (versionChanged !== 1 || transferChanged !== 1) throw new CheckpointStateChanged();
+          const failedVersion = this.readVersion(existing.id, input.ownerId)!;
+          const failedTransfer = this.readTransfer(transfer.id, input.ownerId)!;
+          if (failedVersion.status === "failed" && failedTransfer.status === "failed") {
+            return { status: "recoverable", version: failedVersion, transfer: failedTransfer } as const;
+          }
+        }
         const terminal = existing.status === "failed" && Boolean(transfer && ["failed", "cancelled"].includes(transfer.status));
         if (terminal && transfer?.error?.startsWith("RESETTING:")
           && transfer.updatedAt + CHECKPOINT_RESET_CLAIM_TTL_MS > input.now) {
@@ -326,7 +371,11 @@ export class AtlasStore {
         status: "created", version: this.readVersion(input.id, input.ownerId)!,
         transfer: this.readTransfer(input.transferId, input.ownerId)!,
       } as const;
-    })();
+    }).immediate(); }
+    catch (error) {
+      if (error instanceof CheckpointStateChanged) return { status: "state_changed" } as const;
+      throw error;
+    }
   }
 
   claimFailedCheckpointReset(input: {
@@ -494,6 +543,7 @@ export class AtlasStore {
     this.database.prepare(`
       UPDATE atlas_transfers SET status = CASE WHEN ? THEN 'failed' ELSE status END, error = ?, updated_at = ?
       WHERE id = ? AND owner_id = ? AND status NOT IN ('completed', 'cancelled')
+        AND NOT (status = 'failed' AND error LIKE 'RESETTING:%')
     `).run(terminal ? 1 : 0, error.slice(0, 1000), now, id, ownerId);
   }
 
