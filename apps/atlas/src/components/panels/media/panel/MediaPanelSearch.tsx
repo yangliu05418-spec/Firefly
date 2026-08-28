@@ -16,16 +16,16 @@ export function MediaPanelSearch({ query, onQueryChange }: MediaPanelSearchProps
         onKeyDown={(event) => {
           if (event.key === 'Escape') onQueryChange('');
         }}
-        placeholder="Search or *.mp4"
-        aria-label="Search project items"
+        placeholder="搜索素材或 *.mp4"
+        aria-label="搜索项目素材"
       />
       {query ? (
         <button
           type="button"
           className="media-panel-search-clear"
           onClick={() => onQueryChange('')}
-          title="Clear search"
-          aria-label="Clear search"
+          title="清除搜索"
+          aria-label="清除搜索"
         >
           x
         </button>

@@ -21,6 +21,17 @@ import {
   sectionTransitionPanelItems,
 } from './transitions/transitionPanelItems';
 import './TransitionsPanel.css';
+import { translate, type MessageKey } from '../../firefly/i18n';
+
+const IS_FIREFLY_VARIANT = import.meta.env.VITE_APP_VARIANT === 'firefly';
+const ui = (key: MessageKey, fallback: string) => IS_FIREFLY_VARIANT ? translate('zh-CN', key) : fallback;
+const TRANSITION_ZH: Record<string, string> = {
+  Dissolve: '溶解', Wipe: '擦除', Push: '推入', Slide: '滑动', Dip: '沉浸', Iris: '虹膜',
+  Light: '光效', 'Motion Blur': '动态模糊', Glitch: '故障', Pattern: '图案', Stylize: '风格化',
+  Rotate: '旋转', Zoom: '缩放', Flip: '翻转', Tumble: '翻滚', Roll: '滚动', Spin: '旋转', Cube: '立方体',
+  Door: '开门', Fold: '折叠', Peel: '揭页', Crossfade: '交叉淡化', 'Dip to Black': '淡入黑场',
+};
+const transitionLabel = (value: string) => IS_FIREFLY_VARIANT ? (TRANSITION_ZH[value] ?? value) : value;
 
 interface TransitionItemProps {
   label: string;
@@ -126,7 +137,7 @@ function TransitionItem({
         variant ? 'transition-item-variant' : '',
         isPlanned ? 'transition-item-planned' : '',
       ].filter(Boolean).join(' ')}
-      title={transition.description}
+      title={IS_FIREFLY_VARIANT ? transitionLabel(label) : transition.description}
       aria-disabled={isPlanned || undefined}
     >
       <div className="transition-item-preview">
@@ -159,9 +170,13 @@ export function TransitionsPanel() {
     includePlanned: showCapabilityBadge,
   });
   const transitionItems = useMemo(() => groupTransitionPanelItems(allTransitions), [allTransitions]);
+  const searchableTransitionItems = useMemo(() => IS_FIREFLY_VARIANT ? transitionItems.map((item) => ({
+    ...item,
+    searchText: `${item.searchText} ${transitionLabel(item.label)} ${item.variants.map((variant) => transitionLabel(variant.name)).join(' ')}`.toLowerCase(),
+  })) : transitionItems, [transitionItems]);
   const visibleTransitionItems = useMemo(
-    () => filterTransitionPanelItems(transitionItems, searchQuery),
-    [searchQuery, transitionItems]
+    () => filterTransitionPanelItems(searchableTransitionItems, searchQuery),
+    [searchQuery, searchableTransitionItems]
   );
   const transitionSections = useMemo(() => sectionTransitionPanelItems(visibleTransitionItems), [visibleTransitionItems]);
   const isSearchActive = searchQuery.trim().length > 0;
@@ -192,7 +207,7 @@ export function TransitionsPanel() {
   return (
     <div className="transitions-panel" onMouseLeave={() => setExpandedFamilyKey(null)}>
       <div className="transitions-panel-header">
-        <span className="transitions-panel-title">Transitions</span>
+          <span className="transitions-panel-title">{ui('transitions.title', 'Transitions')}</span>
         <div className="transitions-duration-control">
           <input
             type="number"
@@ -225,16 +240,16 @@ export function TransitionsPanel() {
           onKeyDown={(event) => {
             if (event.key === 'Escape') setSearchQuery('');
           }}
-          placeholder="Search transitions"
-          aria-label="Search transitions"
+          placeholder={ui('transitions.search', 'Search transitions')}
+          aria-label={ui('transitions.search', 'Search transitions')}
         />
         {searchQuery ? (
           <button
             type="button"
             className="transitions-search-clear"
             onClick={() => setSearchQuery('')}
-            title="Clear search"
-            aria-label="Clear search"
+            title={ui('transitions.clearSearch', 'Clear search')}
+            aria-label={ui('transitions.clearSearch', 'Clear search')}
           >
             x
           </button>
@@ -264,7 +279,7 @@ export function TransitionsPanel() {
                 >
                   <path d="M4 6 8 10 12 6" />
                 </svg>
-                <span className="transitions-family-title">{section.label}</span>
+                <span className="transitions-family-title">{transitionLabel(section.label)}</span>
                 <span className="transitions-family-count">{section.items.length}</span>
               </button>
               {!isCollapsed && section.items.map((item) => {
@@ -272,7 +287,7 @@ export function TransitionsPanel() {
                 return (
                   <div className="transition-family-item" key={item.key}>
                     <TransitionItem
-                      label={item.label}
+                      label={transitionLabel(item.label)}
                       transition={item.transition}
                       duration={duration}
                       capability={getTransitionCapability(item.transition)}
@@ -281,11 +296,11 @@ export function TransitionsPanel() {
                       onClick={() => toggleFamily(item.key)}
                     />
                     {isExpanded ? (
-                      <div className="transition-variant-list" aria-label={`${item.label} transition variants`}>
+                      <div className="transition-variant-list" aria-label={`${transitionLabel(item.label)}转场变体`}>
                         {item.variants.map((variant) => (
                           <TransitionItem
                             key={variant.id}
-                            label={variant.name}
+                            label={transitionLabel(variant.name)}
                             transition={variant}
                             duration={duration}
                             capability={getTransitionCapability(variant)}
@@ -304,7 +319,7 @@ export function TransitionsPanel() {
 
         {visibleTransitionItems.length === 0 && (
           <div className="transitions-empty">
-            {isSearchActive ? 'No transitions found' : 'No transitions available'}
+            {isSearchActive ? ui('transitions.noResults', 'No transitions found') : ui('transitions.noAvailable', 'No transitions available')}
           </div>
         )}
       </div>
@@ -314,7 +329,7 @@ export function TransitionsPanel() {
           <circle cx="12" cy="12" r="10" />
           <path d="M12 16v-4M12 8h.01" />
         </svg>
-        <span>Drag onto clip junction</span>
+        <span>{ui('transitions.dragHint', 'Drag onto clip junction')}</span>
       </div>
     </div>
   );

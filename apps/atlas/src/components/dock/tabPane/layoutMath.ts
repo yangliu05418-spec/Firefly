@@ -1,6 +1,7 @@
 import type { CSSProperties } from 'react';
 
 import type { DockPanel, PanelType } from '../../../types/dock';
+import { localizePanelTitle } from '../../../firefly/i18n/panelLabels';
 
 export const HOLD_DURATION = 500;
 export const TAB_INSERT_HOT_ZONE_PX = 36;
@@ -67,6 +68,7 @@ export const getDynamicTabTitle = ({
   selectedPropertiesName,
   audioMixerTabStats,
 }: DynamicTabTitleInput): { tabTitle: string; tabTooltip: string } => {
+  const localizedTitle = localizePanelTitle(panel.type, panel.title);
   if (panel.type === 'clip-properties' && (selectedSlotName || selectedPropertiesName)) {
     const label = selectedSlotName || selectedPropertiesName || panel.title;
     return {
@@ -83,8 +85,8 @@ export const getDynamicTabTitle = ({
   }
 
   return {
-    tabTitle: panel.title,
-    tabTooltip: panel.title,
+    tabTitle: localizedTitle,
+    tabTooltip: localizedTitle,
   };
 };
 

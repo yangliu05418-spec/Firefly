@@ -11,7 +11,7 @@ export function MediaNoSearchResultsEmptyState({
 }: MediaNoSearchResultsEmptyStateProps) {
   return (
     <div className="media-panel-empty" onContextMenu={onContextMenu}>
-      <p>No matching items</p>
+      <p>没有匹配的素材</p>
       <p className="hint">{query}</p>
     </div>
   );

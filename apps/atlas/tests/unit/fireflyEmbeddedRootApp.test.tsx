@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 const appRender = vi.hoisted(() => vi.fn());
 
-vi.mock('../../src/App', () => ({
+vi.mock('../../src/FireflyEmbeddedEditor', () => ({
   default: (props: unknown) => {
     appRender(props);
     return <div>original-editor-runtime</div>;
@@ -23,6 +23,8 @@ describe('Firefly embedded RootApp boundary', () => {
         name: '九久',
         email: 'jiujiu@dokuai.tv',
       },
+      projectId: 'atlas-project-1',
+      capabilities: { agent: true, generate: true },
       onBackToProjects: vi.fn(),
     };
 

@@ -7,6 +7,9 @@ import type {
   ExportBasicsVideoState,
 } from './exportBasicsTypes';
 
+const IS_FIREFLY_VARIANT = import.meta.env.VITE_APP_VARIANT === 'firefly';
+const ui = (zh: string, en: string) => IS_FIREFLY_VARIANT ? zh : en;
+
 interface ExportImageControlsProps {
   image: ExportBasicsImageState;
   video: ExportBasicsVideoState;
@@ -35,8 +38,8 @@ export function ExportImageControls({
       <div className="export-quick-grid export-quick-grid-stack">
         {!directSource && <div className="export-field-card export-subcard" data-export-target="image-mode">
           <div className="export-field-head">
-            <span>Mode</span>
-            <strong>{isImageSequenceMode ? `Sequence ${imageSequenceOutputLabel}` : 'Single frame'}</strong>
+            <span>{ui('模式', 'Mode')}</span>
+            <strong>{isImageSequenceMode ? `${ui('序列', 'Sequence')} ${imageSequenceOutputLabel}` : ui('单帧', 'Single frame')}</strong>
           </div>
           <div className="export-chip-row">
             <button
@@ -44,21 +47,21 @@ export function ExportImageControls({
               className={`export-chip${image.imageExportMode === 'frame' ? ' is-active' : ''}`}
               onClick={() => actions.setImageExportMode('frame')}
             >
-              Frame
+              {ui('单帧', 'Frame')}
             </button>
             <button
               type="button"
               className={`export-chip${image.imageExportMode === 'sequence' ? ' is-active' : ''}`}
               onClick={() => actions.setImageExportMode('sequence')}
             >
-              Sequence
+              {ui('序列', 'Sequence')}
             </button>
           </div>
         </div>}
 
         <div className="export-field-card export-subcard" data-export-target="image-resolution">
           <div className="export-field-head">
-            <span>Resolution</span>
+            <span>{ui('分辨率', 'Resolution')}</span>
             <strong>{video.actualWidth}x{video.actualHeight}</strong>
           </div>
           <div className="export-chip-row">
@@ -77,7 +80,7 @@ export function ExportImageControls({
               className={`export-chip${video.useCustomResolution ? ' is-active' : ''}`}
               onClick={() => actions.setUseCustomResolution(true)}
             >
-              Custom
+              {ui('自定义', 'Custom')}
             </button>
           </div>
           {video.useCustomResolution && (
@@ -86,7 +89,7 @@ export function ExportImageControls({
                 type="number"
                 value={video.customWidth}
                 onChange={(e) => actions.setCustomWidth(Math.max(1, parseInt(e.target.value) || 1920))}
-                placeholder="Width"
+                placeholder={ui('宽度', 'Width')}
                 min="1"
                 max="7680"
               />
@@ -95,7 +98,7 @@ export function ExportImageControls({
                 type="number"
                 value={video.customHeight}
                 onChange={(e) => actions.setCustomHeight(Math.max(1, parseInt(e.target.value) || 1080))}
-                placeholder="Height"
+                placeholder={ui('高度', 'Height')}
                 min="1"
                 max="4320"
               />
@@ -105,12 +108,12 @@ export function ExportImageControls({
 
         <div className="export-field-card export-subcard" data-export-target="image-quality">
           <div className="export-field-head">
-            <span>Quality</span>
-            <strong>{image.selectedImageFormat.lossless ? 'Lossless' : `${Math.round(image.imageQuality * 100)}%`}</strong>
+            <span>{ui('质量', 'Quality')}</span>
+            <strong>{image.selectedImageFormat.lossless ? ui('无损', 'Lossless') : `${Math.round(image.imageQuality * 100)}%`}</strong>
           </div>
           <div className="export-chip-row">
             <span className="export-chip export-chip-static">
-              {image.selectedImageFormat.supportsAlpha ? 'Alpha kept' : 'Opaque'}
+              {image.selectedImageFormat.supportsAlpha ? ui('保留 Alpha', 'Alpha kept') : ui('不透明', 'Opaque')}
             </span>
             {!image.selectedImageFormat.lossless && IMAGE_QUALITY_PRESETS.map((preset) => (
               <button
@@ -126,7 +129,7 @@ export function ExportImageControls({
           {!image.selectedImageFormat.lossless && (
             <div className="export-slider-control">
               <div className="export-slider-head">
-                <label>Fine Tune</label>
+                <label>{ui('精细调整', 'Fine Tune')}</label>
                 <span className="export-slider-value">{Math.round(image.imageQuality * 100)}%</span>
               </div>
               <input
@@ -147,7 +150,7 @@ export function ExportImageControls({
         <>
           <div className="export-field-card export-subcard" data-export-target="image-fps">
             <div className="export-field-head">
-              <span>Frame Rate</span>
+              <span>{ui('帧率', 'Frame Rate')}</span>
               <strong>{video.actualFps} fps</strong>
             </div>
             <div className="export-chip-row">
@@ -169,7 +172,7 @@ export function ExportImageControls({
                 className={`export-chip${video.useCustomFps ? ' is-active' : ''}`}
                 onClick={() => actions.setUseCustomFps(true)}
               >
-                Custom
+                {ui('自定义', 'Custom')}
               </button>
             </div>
             {video.useCustomFps && (
@@ -189,8 +192,8 @@ export function ExportImageControls({
 
           <div className="export-field-card export-subcard" data-export-target="image-range">
             <div className="export-field-head">
-              <span>Sequence</span>
-              <strong>{image.imageSequenceFrameCount} frames</strong>
+              <span>{ui('序列', 'Sequence')}</span>
+              <strong>{image.imageSequenceFrameCount} {ui('帧', 'frames')}</strong>
             </div>
             <div className="export-chip-row">
               <button
@@ -198,25 +201,25 @@ export function ExportImageControls({
                 className={`export-chip${useInOut ? ' is-active' : ''}`}
                 onClick={() => actions.setUseInOut(!useInOut)}
               >
-                Use In/Out
+                {ui('使用入点/出点', 'Use In/Out')}
               </button>
               <span className="export-chip export-chip-static">{imageSequenceOutputLabel}</span>
             </div>
             <div className="export-inline-note">
-              Range {time.formatTime(time.startTime)} - {time.formatTime(time.endTime)} saved as numbered .{image.imageFormat} files.
+              {ui('范围', 'Range')} {time.formatTime(time.startTime)} - {time.formatTime(time.endTime)} {ui(`将保存为编号的 .${image.imageFormat} 文件。`, `saved as numbered .${image.imageFormat} files.`)}
             </div>
           </div>
         </>
       ) : (
         <div className="export-field-card export-subcard" data-export-target="image-range">
           <div className="export-field-head">
-            <span>Frame</span>
-            <strong>{directSource ? 'Full source' : time.formatTime(time.playheadPosition)}</strong>
+            <span>{ui('帧', 'Frame')}</span>
+            <strong>{directSource ? ui('完整源图', 'Full source') : time.formatTime(time.playheadPosition)}</strong>
           </div>
           <div className="export-inline-note">
             {directSource
-              ? 'Encodes the complete source image at the selected output resolution.'
-              : 'Exports the exact composited frame currently under the playhead.'}
+              ? ui('以所选分辨率编码完整源图。', 'Encodes the complete source image at the selected output resolution.')
+              : ui('导出当前播放头下的最终合成帧。', 'Exports the exact composited frame currently under the playhead.')}
           </div>
         </div>
       )}

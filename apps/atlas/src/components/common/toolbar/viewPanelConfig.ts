@@ -26,6 +26,7 @@ export const VIEW_CORE_PANEL_TYPES = VIEW_CORE_PANEL_TYPE_ORDER.filter((type) =>
   !SCOPE_PANEL_TYPES.includes(type)
   && !WIP_PANEL_TYPES.includes(type)
   && !AI_PANEL_TYPES.includes(type)
+  && !PANEL_PICKER_HIDDEN_TYPES.includes(type)
 ));
 
 export const VIEW_WIP_ONLY_PANEL_TYPES = WIP_PANEL_TYPES.filter((type) => (

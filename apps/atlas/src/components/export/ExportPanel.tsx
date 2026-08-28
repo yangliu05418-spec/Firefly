@@ -50,8 +50,10 @@ import {
   EXPORT_MEDIA_IDS_MIME_TYPE,
   readExportMediaIdsFromDataTransfer,
 } from '../timeline/utils/externalDragSession';
+import { translate } from '../../firefly/i18n';
 
 const log = Logger.create('ExportPanel');
+const IS_FIREFLY_VARIANT = import.meta.env.VITE_APP_VARIANT === 'firefly';
 const EMPTY_BATCH_EXPORT: BatchExportData = {
   enabled: false,
   useSharedSettings: false,
@@ -122,7 +124,7 @@ export function ExportPanel() {
   const selectedBatchJob = useMemo(() => (
     batch.jobs.find((job) => job.id === batch.selectedJobId) ?? batch.jobs[0]
   ), [batch.jobs, batch.selectedJobId]);
-  const batchActive = batch.enabled && batch.jobs.length > 0 && !!selectedBatchJob;
+  const batchActive = !IS_FIREFLY_VARIANT && batch.enabled && batch.jobs.length > 0 && !!selectedBatchJob;
   const selectedBatchJobId = selectedBatchJob?.id;
   const setEffectiveExportSettings = useCallback((patch: Parameters<typeof setSettings>[0]) => {
     if (batchActive && selectedBatchJobId) {
@@ -696,13 +698,14 @@ export function ExportPanel() {
   // If neither encoder is supported, show error
   if (!webCodecsAvailable && !ffmpegAvailable) {
     return (
-      <div className="export-panel" role="region" aria-label="Export">
+      <div className="export-panel" role="region" aria-label={IS_FIREFLY_VARIANT ? translate('zh-CN', 'export.title') : 'Export'}>
         <div className="panel-header">
-          <h3>Export</h3>
+          <h3>{IS_FIREFLY_VARIANT ? translate('zh-CN', 'export.title') : 'Export'}</h3>
         </div>
         <div className="export-error" role="alert">
-          No video encoder available. WebCodecs requires Chrome 94+ or Safari 16.4+.
-          FFmpeg WASM requires WebAssembly support.
+          {IS_FIREFLY_VARIANT
+            ? '当前浏览器没有可用的视频编码器。请使用最新版 Chrome 或 Edge。'
+            : 'No video encoder available. WebCodecs requires Chrome 94+ or Safari 16.4+. FFmpeg WASM requires WebAssembly support.'}
         </div>
       </div>
     );
@@ -713,13 +716,13 @@ export function ExportPanel() {
       className="export-panel"
       ref={panelRef}
       role="region"
-      aria-label="Export"
+      aria-label={IS_FIREFLY_VARIANT ? translate('zh-CN', 'export.title') : 'Export'}
       aria-busy={isExporting || isBatchRunning}
-      onDragOver={handleBatchDragOver}
-      onDragLeave={handleBatchDragLeave}
-      onDrop={handleBatchDrop}
+      onDragOver={IS_FIREFLY_VARIANT ? undefined : handleBatchDragOver}
+      onDragLeave={IS_FIREFLY_VARIANT ? undefined : handleBatchDragLeave}
+      onDrop={IS_FIREFLY_VARIANT ? undefined : handleBatchDrop}
     >
-      {isBatchDragOver && (
+      {!IS_FIREFLY_VARIANT && isBatchDragOver && (
         <div className="export-batch-drop-overlay">
           Add media to batch export
         </div>
@@ -730,8 +733,8 @@ export function ExportPanel() {
             <ExportSummaryBadgesSection
               showCompositionSync={!batchActive && (isVideoMode || isImageMode)}
               sameAsComposition={sameAsComposition}
-              summaryBadges={summaryBadges}
-              primaryExportLabel={batchActive ? batchPrimaryLabel : primaryExportLabel}
+              summaryBadges={IS_FIREFLY_VARIANT ? [] : summaryBadges}
+              primaryExportLabel={IS_FIREFLY_VARIANT ? translate('zh-CN', 'export.start') : batchActive ? batchPrimaryLabel : primaryExportLabel}
               estimatedSizeLabel={estimatedSizeLabel}
               exportDisabled={exportDisabled || (!batchActive && isVideoMode && storyboardExportGuard.blocked)}
               onPrimaryExport={handlePanelPrimaryExport}
@@ -739,7 +742,7 @@ export function ExportPanel() {
               onScrollToSummaryTarget={scrollToSummaryTarget}
             />
 
-            <BatchExportQueue
+            {!IS_FIREFLY_VARIANT && <BatchExportQueue
               jobs={batch.jobs}
               selectedJobId={batch.selectedJobId}
               enabled={batch.enabled}
@@ -752,11 +755,11 @@ export function ExportPanel() {
               onRemoveJob={removeBatchJob}
               onClear={clearBatchJobs}
               onCancel={cancelBatch}
-            />
+            />}
           </div>
 
           <div className="export-settings-body" inert={isBatchRunning ? true : undefined}>
-            {!batchActive && isVideoMode && hasStoryboardScenesInRange && (
+            {!IS_FIREFLY_VARIANT && !batchActive && isVideoMode && hasStoryboardScenesInRange && (
               <StoryboardExportModeControl
                 mode={storyboardExportMode}
                 warnings={storyboardExportGuard.warnings}
@@ -764,7 +767,7 @@ export function ExportPanel() {
               />
             )}
 
-            <ExportPresetCommandSection
+            {!IS_FIREFLY_VARIANT && <ExportPresetCommandSection
               presets={presets}
               selectedPresetId={selectedPresetId}
               setupStatus={setupStatus}
@@ -772,9 +775,9 @@ export function ExportPanel() {
               onLoad={loadSavedSetup}
               onUpdate={updateCurrentSetup}
               onSave={saveCurrentSetup}
-            />
+            />}
 
-            {!batchActive && (
+            {!IS_FIREFLY_VARIANT && !batchActive && (
               <ExportWorkflowSection
                 encoder={encoder}
                 webCodecsAvailable={webCodecsAvailable}
@@ -804,7 +807,7 @@ export function ExportPanel() {
               actions={basicsActions}
             />
 
-            <ExportAdvancedSections
+            {!IS_FIREFLY_VARIANT && <ExportAdvancedSections
               filename={filename}
               mode={basicsMode}
               display={basicsDisplay}
@@ -813,9 +816,9 @@ export function ExportPanel() {
               audio={basicsAudio}
               options={basicsOptions}
               actions={basicsActions}
-            />
+            />}
 
-            <ExportAdvancedSummarySections
+            {!IS_FIREFLY_VARIANT && <ExportAdvancedSummarySections
               encoder={encoder}
               isGifMode={isGifMode}
               stackedAlpha={stackedAlpha}
@@ -832,7 +835,7 @@ export function ExportPanel() {
               error={error}
               formatTime={formatTime}
               fixedSourceRange={batchActive}
-            />
+            />}
           </div>
         </div>
       ) : (

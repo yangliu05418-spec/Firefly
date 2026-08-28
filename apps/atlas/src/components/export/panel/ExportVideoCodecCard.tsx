@@ -13,6 +13,8 @@ import type {
   ExportBasicsVideoState,
 } from './exportBasicsTypes';
 
+const IS_FIREFLY_VARIANT = import.meta.env.VITE_APP_VARIANT === 'firefly';
+
 interface ExportVideoCodecCardProps {
   mode: ExportBasicsModeState;
   display: ExportBasicsDisplayState;
@@ -29,13 +31,13 @@ export function ExportVideoCodecCard({
   return (
     <div className="export-field-card export-subcard" data-export-target="video-codec">
       <div className="export-field-head">
-        <span>Codec</span>
+        <span>{IS_FIREFLY_VARIANT ? '编码器' : 'Codec'}</span>
         <strong>{display.currentCodecLabel}</strong>
       </div>
       <div className="export-chip-row">
         {mode.isGifMode ? (
           <span className="export-chip export-chip-static">
-            {mode.encoder === 'ffmpeg' ? 'FFmpeg palette' : 'Browser encoder'}
+            {mode.encoder === 'ffmpeg' ? (IS_FIREFLY_VARIANT ? 'FFmpeg 调色板' : 'FFmpeg palette') : (IS_FIREFLY_VARIANT ? '浏览器编码器' : 'Browser encoder')}
           </span>
         ) : mode.isWebCodecsEncoder
           ? FrameExporter.getVideoCodecs(video.containerFormat).map(({ id, label }) => (

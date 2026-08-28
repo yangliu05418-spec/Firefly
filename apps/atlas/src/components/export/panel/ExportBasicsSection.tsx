@@ -16,6 +16,9 @@ import type {
   ExportBasicsVideoState,
 } from './exportBasicsTypes';
 
+const IS_FIREFLY_VARIANT = import.meta.env.VITE_APP_VARIANT === 'firefly';
+const ui = (zh: string, en: string) => IS_FIREFLY_VARIANT ? zh : en;
+
 interface ExportBasicsSectionProps {
   filename: string;
   filenameLocked?: boolean;
@@ -49,24 +52,24 @@ export function ExportBasicsSection({
 }: ExportBasicsSectionProps) {
   return (
     <div className="export-section export-basics-section">
-      <div className="export-section-header">Basics</div>
+      <div className="export-section-header">{ui('基础设置', 'Basics')}</div>
 
       <div className="export-channel-grid">
         <div className="export-channel-card export-basic-card">
           <div className="export-channel-head">
             <div className="export-channel-title">
-              <span>Basic</span>
+              <span>{ui('基础', 'Basic')}</span>
               <strong>{display.displayContainerLabel}</strong>
             </div>
           </div>
 
           <div className="export-field-card export-subcard" data-export-target="basic-output">
             <div className="export-field-head">
-              <span>Output</span>
+              <span>{ui('输出', 'Output')}</span>
               <strong>{display.displayOutputName}</strong>
             </div>
             <div className="control-row">
-              <label htmlFor="export-output-name">Name</label>
+              <label htmlFor="export-output-name">{ui('文件名', 'Name')}</label>
               <div className="export-input-group">
                 <input
                   id="export-output-name"
@@ -75,7 +78,7 @@ export function ExportBasicsSection({
                   onChange={(e) => actions.setFilename(e.target.value)}
                   placeholder="export"
                   disabled={filenameLocked}
-                  title={filenameLocked ? 'File names stay individual while shared batch settings are active' : undefined}
+                  title={filenameLocked ? ui('批量使用共享设置时，各文件仍保留自己的名称', 'File names stay individual while shared batch settings are active') : undefined}
                 />
               </div>
             </div>
@@ -83,12 +86,12 @@ export function ExportBasicsSection({
 
           <div className="export-field-card export-subcard" data-export-target="basic-container">
             <div className="export-field-head">
-              <span>Container</span>
+              <span>{ui('封装格式', 'Container')}</span>
               <strong>{display.displayContainerLabel}</strong>
             </div>
             <div className="export-container-groups">
               {(!sourceMediaType || sourceMediaType === 'video') && <div className="export-container-group">
-                <span className="export-container-group-label">Video</span>
+                <span className="export-container-group-label">{ui('视频', 'Video')}</span>
                 <div className="export-chip-row">
                   {options.videoContainerFormats.map((format) => (
                     <button
@@ -121,7 +124,7 @@ export function ExportBasicsSection({
               </div>}
 
               {(!sourceMediaType || sourceMediaType === 'image') && <div className="export-container-group">
-                <span className="export-container-group-label">Image</span>
+                <span className="export-container-group-label">{ui('图片', 'Image')}</span>
                 <div className="export-chip-row">
                   {IMAGE_FORMATS.map((format) => (
                     <button
@@ -142,7 +145,7 @@ export function ExportBasicsSection({
               </div>}
 
               {(!sourceMediaType || sourceMediaType === 'audio') && <div className="export-container-group">
-                <span className="export-container-group-label">Audio</span>
+                <span className="export-container-group-label">{ui('音频', 'Audio')}</span>
                 <div className="export-chip-row">
                   <button
                     type="button"
@@ -207,12 +210,12 @@ export function ExportBasicsSection({
 
           {sourceMediaType ? (
             <div className="export-inline-note">
-              Direct source encoding uses the complete media file. Timeline-only outputs and In/Out markers are bypassed.
+              {ui('直接编码完整源文件，不应用时间线入点与出点。', 'Direct source encoding uses the complete media file. Timeline-only outputs and In/Out markers are bypassed.')}
             </div>
           ) : mode.isVideoMode ? (
             <div className="export-field-card export-subcard" data-export-target="basic-workflow">
               <div className="export-field-head">
-                <span>Workflow</span>
+                <span>{ui('编码方式', 'Workflow')}</span>
                 <strong>{display.methodMeta.title}</strong>
               </div>
               <div className="export-chip-row">
@@ -221,7 +224,7 @@ export function ExportBasicsSection({
                     type="button"
                     className={`export-chip${mode.encoder === 'webcodecs' ? ' is-active' : ''}`}
                     onClick={() => actions.setEncoder('webcodecs')}
-                    aria-label="Use WebCodecs Fast export"
+                    aria-label={ui('使用 WebCodecs 快速导出', 'Use WebCodecs Fast export')}
                     aria-pressed={mode.encoder === 'webcodecs'}
                   >
                     WebCodecs
@@ -256,11 +259,11 @@ export function ExportBasicsSection({
                       disabled={mode.isFFmpegLoading}
                       className="btn-small export-status-button"
                     >
-                      {mode.isFFmpegLoading ? 'Loading FFmpeg...' : 'Load FFmpeg Runtime'}
+                      {mode.isFFmpegLoading ? ui('正在加载 FFmpeg…', 'Loading FFmpeg...') : ui('加载 FFmpeg 运行环境', 'Load FFmpeg Runtime')}
                     </button>
                   ) : (
                     <span className="export-status-ok">
-                      FFmpeg Ready
+                      {ui('FFmpeg 已就绪', 'FFmpeg Ready')}
                     </span>
                   )}
                 </div>
@@ -274,19 +277,19 @@ export function ExportBasicsSection({
             </div>
           ) : mode.isXmlMode ? (
             <div className="export-inline-note">
-              XML export writes a Final Cut Pro interchange file from the current timeline instead of rendering media.
+              {ui('导出当前时间线的 Final Cut Pro 交换文件，不渲染媒体。', 'XML export writes a Final Cut Pro interchange file from the current timeline instead of rendering media.')}
             </div>
           ) : mode.isImageMode ? (
             <div className="export-inline-note">
               {mode.isImageSequenceMode
                 ? mode.imageSequenceFolderSupported
-                  ? 'Image sequence export writes numbered frames into a selected folder.'
-                  : 'Image sequence export uses a ZIP fallback because folder writes are not available in this browser.'
-                : 'Image export renders exactly one frame at the current playhead position.'}
+                  ? ui('将编号帧写入所选文件夹。', 'Image sequence export writes numbered frames into a selected folder.')
+                  : ui('当前浏览器不能写入文件夹，将改用 ZIP。', 'Image sequence export uses a ZIP fallback because folder writes are not available in this browser.')
+                : ui('导出当前播放头所在的一帧。', 'Image export renders exactly one frame at the current playhead position.')}
             </div>
           ) : mode.isAudioOnlyMode ? (
             <div className="export-inline-note">
-              Audio-only export writes the selected audio file format.
+              {ui('仅导出所选音频格式。', 'Audio-only export writes the selected audio file format.')}
             </div>
           ) : null}
         </div>

@@ -53,6 +53,7 @@ import { useDevChatNotification } from './toolbar/useDevChatNotification';
 import { screenCaptureService } from '../../services/capture/ScreenCaptureService';
 import { CreditBurnMeter } from './CreditBurnMeter';
 import { runToolbarProjectBootRestore } from './toolbar/toolbarProjectStartup';
+import type { FireflyEmbeddingValue } from '../../firefly/FireflyEmbeddingContext';
 
 const log = Logger.create('Toolbar');
 
@@ -62,14 +63,7 @@ interface ToolbarProps {
   onOpenSplash?: () => void;
 }
 
-export interface FireflyEmbeddedToolbarContext {
-  user: {
-    name: string;
-    email: string;
-    avatarUrl?: string;
-  };
-  onBackToProjects: () => void | Promise<void>;
-}
+export type FireflyEmbeddedToolbarContext = FireflyEmbeddingValue;
 
 export function Toolbar({ fireflyEmbedded, onOpenChangelog, onOpenSplash }: ToolbarProps) {
   const { isEngineReady, createOutputWindow } = useEngine();
@@ -178,7 +172,7 @@ export function Toolbar({ fireflyEmbedded, onOpenChangelog, onOpenSplash }: Tool
         setIsProjectOpen(true);
         setNeedsPermission(false);
       } else {
-        setProjectName('No Project Open');
+        setProjectName(fireflyEmbedded ? '未打开项目' : 'No Project Open');
         setIsProjectOpen(false);
       }
     };
@@ -186,7 +180,7 @@ export function Toolbar({ fireflyEmbedded, onOpenChangelog, onOpenSplash }: Tool
     updateProjectState();
     const interval = setInterval(updateProjectState, 2000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fireflyEmbedded]);
 
   useEffect(() => {
     if (fireflyEmbedded) {
@@ -444,7 +438,7 @@ export function Toolbar({ fireflyEmbedded, onOpenChangelog, onOpenSplash }: Tool
                 setIsEditingName(true);
               }
             }}
-            title={isProjectOpen ? 'Click to rename project' : 'No project open'}
+            title={isProjectOpen ? (fireflyEmbedded ? '点击重命名项目' : 'Click to rename project') : (fireflyEmbedded ? '未打开项目' : 'No project open')}
           >
             {projectName}
             {projectFileService.hasUnsavedChanges() && ' \u2022'}
@@ -476,6 +470,7 @@ export function Toolbar({ fireflyEmbedded, onOpenChangelog, onOpenSplash }: Tool
         />
 
         <EditMenu
+          fireflyEmbedded={fireflyEmbedded !== undefined}
           onCopy={editActions.handleCopy}
           onMenuClick={handleMenuClick}
           onMenuHover={handleMenuHover}
@@ -486,6 +481,7 @@ export function Toolbar({ fireflyEmbedded, onOpenChangelog, onOpenSplash }: Tool
         />
 
         <ViewMenu
+          fireflyEmbedded={fireflyEmbedded !== undefined}
           activeSavedLayout={viewActions.activeSavedLayout}
           activeSavedLayoutId={activeSavedLayoutId}
           activeSavedLayoutProtected={viewActions.activeSavedLayoutProtected}
@@ -506,7 +502,7 @@ export function Toolbar({ fireflyEmbedded, onOpenChangelog, onOpenSplash }: Tool
           sortedSavedLayouts={viewActions.sortedSavedLayouts}
         />
 
-        <OutputMenu
+        {!fireflyEmbedded && <OutputMenu
           isEngineReady={isEngineReady}
           onMenuClick={handleMenuClick}
           onMenuHover={handleMenuHover}
@@ -514,9 +510,9 @@ export function Toolbar({ fireflyEmbedded, onOpenChangelog, onOpenSplash }: Tool
           onOpenOutputManager={handleOpenOutputManager}
           openMenu={openMenu}
           outputTargets={outputTargets}
-        />
+        />}
 
-        <InfoMenu
+        {!fireflyEmbedded && <InfoMenu
           closeMenu={closeMenu}
           fireflyEmbedded={fireflyEmbedded !== undefined}
           onMenuClick={handleMenuClick}
@@ -525,7 +521,7 @@ export function Toolbar({ fireflyEmbedded, onOpenChangelog, onOpenSplash }: Tool
           onOpenSplash={onOpenSplash}
           openMenu={openMenu}
           setShowLegalDialog={setShowLegalDialog}
-        />
+        />}
 
         {!fireflyEmbedded && (
             <HelpMenu

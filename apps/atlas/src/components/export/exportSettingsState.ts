@@ -27,6 +27,9 @@ import type {
 import type { EncoderType } from './useExportState';
 import { buildSummaryBadges } from './exportSummaryState';
 
+const IS_FIREFLY_VARIANT = import.meta.env.VITE_APP_VARIANT === 'firefly';
+const ui = (zh: string, en: string) => IS_FIREFLY_VARIANT ? zh : en;
+
 export const IMAGE_FORMATS: Array<{
   id: ImageFormat;
   label: string;
@@ -41,8 +44,8 @@ export const IMAGE_FORMATS: Array<{
 ];
 
 export const IMAGE_QUALITY_PRESETS = [
-  { id: 'draft', label: 'Draft', value: 0.72 }, { id: 'standard', label: 'Standard', value: 0.85 },
-  { id: 'high', label: 'High', value: 0.92 }, { id: 'max', label: 'Max', value: 1 },
+  { id: 'draft', label: ui('草稿', 'Draft'), value: 0.72 }, { id: 'standard', label: ui('标准', 'Standard'), value: 0.85 },
+  { id: 'high', label: ui('高', 'High'), value: 0.92 }, { id: 'max', label: ui('最高', 'Max'), value: 1 },
 ] as const;
 
 export function formatExportTime(seconds: number): string {
@@ -140,7 +143,7 @@ export function buildExportSettingsState(input: ExportSettingsStateInput) {
   const isImageMode = !isXmlMode && input.videoEnabled && input.visualMode === 'image';
   const isImageSequenceMode = isImageMode && input.imageExportMode === 'sequence';
   const imageSequenceFolderSupported = isImageSequenceMode && isImageSequenceFolderExportSupported();
-  const imageSequenceOutputLabel = imageSequenceFolderSupported ? 'Folder' : 'ZIP';
+  const imageSequenceOutputLabel = imageSequenceFolderSupported ? ui('文件夹', 'Folder') : 'ZIP';
   const imageSequenceBaseName = getImageSequenceFolderName(input.filename || 'export', input.imageFormat);
   const imageSequenceOutputName = imageSequenceFolderSupported ? `${imageSequenceBaseName}/` : `${imageSequenceBaseName}.zip`;
   const isGifMode = !isXmlMode && input.videoEnabled && input.visualMode === 'gif';
@@ -202,25 +205,25 @@ export function buildExportSettingsState(input: ExportSettingsStateInput) {
   const displayOutputName = isImageSequenceMode ? imageSequenceOutputName : `${input.filename || 'export'}.${displayExtension}`;
   const displayContainerLabel = isImageSequenceMode ? imageSequenceOutputLabel : `.${displayExtension}`;
   const estimatedSizeLabel = isXmlMode
-    ? 'Metadata only'
+    ? ui('仅元数据', 'Metadata only')
     : isImageMode
-      ? (isImageSequenceMode ? `${imageSequenceFrameCount} frames ${imageSequenceOutputLabel}` : 'Current frame')
+      ? (isImageSequenceMode ? `${imageSequenceFrameCount} ${ui('帧', 'frames')} ${imageSequenceOutputLabel}` : ui('当前帧', 'Current frame'))
       : (!input.videoEnabled && !input.includeAudio && !isGifMode)
         ? '-'
         : estimateOutputSize(input, actualFps, gifSizeEstimate.bytes);
-  const sizeStatLabel = isVideoMode && isWebCodecsEncoder && !isGifMode ? 'Target Size' : 'Est. Size';
+  const sizeStatLabel = isVideoMode && isWebCodecsEncoder && !isGifMode ? ui('目标大小', 'Target Size') : ui('预计大小', 'Est. Size');
   const webCodecsRateNote = input.rateControl === 'vbr'
-    ? 'VBR is only a bitrate target. Simple shots can encode much smaller than the selected Mbps.'
-    : 'CBR tries to stay closer, but browser encoders can still drift from the requested bitrate.';
+    ? ui('VBR 是目标码率；简单画面可能明显小于所选码率。', 'VBR is only a bitrate target. Simple shots can encode much smaller than the selected Mbps.')
+    : ui('CBR 会尽量接近目标，但浏览器编码器仍可能存在偏差。', 'CBR tries to stay closer, but browser encoders can still drift from the requested bitrate.');
   const exportModeLabel = isXmlMode
-    ? 'Timeline XML'
+    ? ui('时间线 XML', 'Timeline XML')
     : isImageMode
-      ? (isImageSequenceMode ? 'Image Sequence' : 'Image Frame')
+      ? (isImageSequenceMode ? ui('图片序列', 'Image Sequence') : ui('图片帧', 'Image Frame'))
       : isGifMode
         ? 'Animated GIF'
         : isVideoMode
-          ? (effectiveIncludeAudio ? 'Video + Audio' : 'Video Only')
-          : (input.includeAudio ? 'Audio Only' : 'Nothing Selected');
+          ? (effectiveIncludeAudio ? ui('视频 + 音频', 'Video + Audio') : ui('仅视频', 'Video Only'))
+          : (input.includeAudio ? ui('仅音频', 'Audio Only') : ui('未选择输出', 'Nothing Selected'));
   const exportDisabled =
     input.isExporting ||
     (isImageSequenceMode && input.durationEndTime <= input.durationStartTime) ||
@@ -272,7 +275,7 @@ export function buildExportSettingsState(input: ExportSettingsStateInput) {
     webCodecsRateNote,
     exportModeLabel,
     exportDisabled,
-    primaryExportLabel: 'Export',
+    primaryExportLabel: ui('导出', 'Export'),
     usesBrowserProgress: isImageSequenceMode || input.encoder === 'webcodecs' || input.encoder === 'htmlvideo',
     summaryBadges: buildSummaryBadges({
       input,
@@ -303,10 +306,10 @@ export function buildExportSettingsState(input: ExportSettingsStateInput) {
     quickFrameRatePresets: [24, 30, 60],
     videoContainerFormats,
     webQualityPresets: [
-      { id: 'review', label: 'Review', detail: '8 Mbps', value: 8_000_000 },
-      { id: 'standard', label: 'Standard', detail: '15 Mbps', value: 15_000_000 },
-      { id: 'high', label: 'High', detail: '25 Mbps', value: 25_000_000 },
-      { id: 'master', label: 'Master', detail: '50 Mbps', value: 50_000_000 },
+      { id: 'review', label: ui('预览', 'Review'), detail: '8 Mbps', value: 8_000_000 },
+      { id: 'standard', label: ui('标准', 'Standard'), detail: '15 Mbps', value: 15_000_000 },
+      { id: 'high', label: ui('高', 'High'), detail: '25 Mbps', value: 25_000_000 },
+      { id: 'master', label: ui('母版', 'Master'), detail: '50 Mbps', value: 50_000_000 },
     ] as const,
     audioSampleRatePresets: [
       { value: 48000 as const, label: '48 kHz' },
@@ -376,34 +379,34 @@ function getMethodMeta(
 ) {
   if (isGifMode) {
     return {
-      title: encoder === 'ffmpeg' ? 'FFmpeg GIF' : 'Browser GIF',
-      badge: encoder === 'ffmpeg' ? 'Palette' : 'Browser',
+      title: encoder === 'ffmpeg' ? 'FFmpeg GIF' : ui('浏览器 GIF', 'Browser GIF'),
+      badge: encoder === 'ffmpeg' ? ui('调色板', 'Palette') : ui('浏览器', 'Browser'),
       description: encoder === 'ffmpeg'
-        ? 'Palette and dither controlled animated GIF output.'
-        : 'Browser-side animated GIF output without loading FFmpeg.',
+        ? ui('可控制调色板与抖动的 GIF 输出。', 'Palette and dither controlled animated GIF output.')
+        : ui('无需加载 FFmpeg，直接在浏览器中生成 GIF。', 'Browser-side animated GIF output without loading FFmpeg.'),
     };
   }
 
   if (encoder === 'webcodecs') {
     return {
-      title: 'WebCodecs Fast',
-      badge: 'Fast',
-      description: 'Best for quick delivery renders directly in the browser.',
+      title: ui('WebCodecs 快速', 'WebCodecs Fast'),
+      badge: ui('快速', 'Fast'),
+      description: ui('适合在浏览器中快速交付成片。', 'Best for quick delivery renders directly in the browser.'),
     };
   }
 
   if (encoder === 'htmlvideo') {
     return {
-      title: 'HTMLVideo Precise',
-      badge: 'Precise',
-      description: 'Explicit HTMLVideo seeking for difficult timing cases.',
+      title: ui('HTMLVideo 精确', 'HTMLVideo Precise'),
+      badge: ui('精确', 'Precise'),
+      description: ui('适合对时间定位要求更高的素材。', 'Explicit HTMLVideo seeking for difficult timing cases.'),
     };
   }
 
   return {
     title: 'FFmpeg CPU',
     badge: isFFmpegMultiThreaded ? 'Intermediate' : 'CPU',
-    description: 'Professional intermediates and edit-friendly interchange formats.',
+    description: ui('适合中间格式与后续专业剪辑。', 'Professional intermediates and edit-friendly interchange formats.'),
   };
 }
 

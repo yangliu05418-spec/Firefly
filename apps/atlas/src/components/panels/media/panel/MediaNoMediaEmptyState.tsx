@@ -14,8 +14,8 @@ export function MediaNoMediaEmptyState({ onContextMenu }: MediaNoMediaEmptyState
           <line x1="12" y1="3" x2="12" y2="15" />
         </svg>
       </div>
-      <p>No media imported</p>
-      <p className="hint">Drag & drop files or folders here or click Import</p>
+      <p>还没有项目素材</p>
+      <p className="hint">将文件或文件夹拖到这里，或点击“导入”</p>
     </div>
   );
 }

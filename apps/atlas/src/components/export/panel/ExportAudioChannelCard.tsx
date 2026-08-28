@@ -8,6 +8,9 @@ import type {
 } from './exportBasicsTypes';
 import type { BatchExportMediaType } from '../../../stores/exportStore';
 
+const IS_FIREFLY_VARIANT = import.meta.env.VITE_APP_VARIANT === 'firefly';
+const ui = (zh: string, en: string) => IS_FIREFLY_VARIANT ? zh : en;
+
 interface ExportAudioChannelCardProps {
   mode: ExportBasicsModeState;
   display: ExportBasicsDisplayState;
@@ -33,37 +36,37 @@ export function ExportAudioChannelCard({
     <div className={`export-channel-card${mode.isImageMode || mode.isGifMode || (!audio.includeAudio && !mode.isXmlMode) ? ' is-disabled' : ''}`} data-export-target="audio-section">
       <div className="export-channel-head">
         <div className="export-channel-title">
-          <span>Audio</span>
-          <strong>{mode.isGifMode ? 'Not supported' : mode.isXmlMode ? (audio.includeAudio ? 'Track references included' : 'No audio references') : !mode.isImageMode && audio.includeAudio ? `${display.currentAudioCodecLabel} / ${audio.audioSampleRate / 1000} kHz` : 'Disabled'}</strong>
+          <span>{ui('音频', 'Audio')}</span>
+          <strong>{mode.isGifMode ? ui('不支持', 'Not supported') : mode.isXmlMode ? (audio.includeAudio ? ui('包含轨道引用', 'Track references included') : ui('不包含音频引用', 'No audio references')) : !mode.isImageMode && audio.includeAudio ? `${display.currentAudioCodecLabel} / ${audio.audioSampleRate / 1000} kHz` : ui('已关闭', 'Disabled')}</strong>
         </div>
         <button
           type="button"
           className={`export-toggle${!mode.isGifMode && (mode.isXmlMode ? audio.includeAudio : !mode.isImageMode && audio.includeAudio) ? ' is-active' : ''}`}
           onClick={() => actions.setIncludeAudio(!audio.includeAudio)}
           disabled={mode.isImageMode || mode.isGifMode || (!mode.isXmlMode && mode.browserAudioUnavailable) || (sourceMediaType !== undefined && sourceMediaType !== 'video')}
-          title={sourceMediaType && sourceMediaType !== 'video' ? 'The audio channel is fixed by the source media type' : undefined}
+          title={sourceMediaType && sourceMediaType !== 'video' ? ui('音频通道由源素材类型决定', 'The audio channel is fixed by the source media type') : undefined}
         >
-          {!mode.isGifMode && (mode.isXmlMode ? audio.includeAudio : !mode.isImageMode && audio.includeAudio) ? 'On' : 'Off'}
+          {!mode.isGifMode && (mode.isXmlMode ? audio.includeAudio : !mode.isImageMode && audio.includeAudio) ? ui('开启', 'On') : ui('关闭', 'Off')}
         </button>
       </div>
 
       {mode.isImageMode ? (
         <div className="export-inline-note">
-          Image export ignores audio and renders only the current playhead frame.
+          {ui('图片导出不包含音频，只渲染当前播放头所在帧。', 'Image export ignores audio and renders only the current playhead frame.')}
         </div>
       ) : mode.isGifMode ? (
         <div className="export-inline-note">
-          GIF export is silent.
+          {ui('GIF 不包含声音。', 'GIF export is silent.')}
         </div>
       ) : mode.isXmlMode ? (
         <div className="export-inline-note">
-          XML export can include or omit audio track references, but it does not encode audio files.
+          {ui('XML 可以保留或忽略音频轨道引用，但不会编码音频文件。', 'XML export can include or omit audio track references, but it does not encode audio files.')}
         </div>
       ) : audio.includeAudio ? (
         <>
           <div className="export-field-card export-subcard" data-export-target="audio-format">
             <div className="export-field-head">
-              <span>Format</span>
+              <span>{ui('格式', 'Format')}</span>
               <strong>{display.currentAudioCodecLabel}</strong>
             </div>
             <div className="export-chip-row">
@@ -112,7 +115,7 @@ export function ExportAudioChannelCard({
 
           <div className="export-field-card export-subcard" data-export-target="audio-quality">
             <div className="export-field-head">
-              <span>Quality</span>
+              <span>{ui('质量', 'Quality')}</span>
               <strong>{mode.isAudioOnlyMode && audio.audioOnlyFormat === 'wav' ? '16-bit PCM' : `${Math.round(audio.audioBitrate / 1000)} kbps`}</strong>
             </div>
             <div className="export-chip-row">
@@ -135,8 +138,8 @@ export function ExportAudioChannelCard({
 
           <div className="export-field-card export-subcard" data-export-target="audio-processing">
             <div className="export-field-head">
-              <span>Processing</span>
-              <strong>{audio.normalizeAudio ? 'Normalized' : 'Direct'}</strong>
+              <span>{ui('处理', 'Processing')}</span>
+              <strong>{audio.normalizeAudio ? ui('已标准化', 'Normalized') : ui('直接输出', 'Direct')}</strong>
             </div>
             <div className="export-chip-row">
               <button
@@ -146,7 +149,7 @@ export function ExportAudioChannelCard({
                 disabled={sourceMediaType !== undefined}
                 title={sourceMediaType ? 'Direct source normalization is not available yet' : undefined}
               >
-                Normalize
+                {ui('响度标准化', 'Normalize')}
               </button>
               {mode.showRangeInAudio && (
                 <button
@@ -154,25 +157,25 @@ export function ExportAudioChannelCard({
                   className={`export-toggle${useInOut ? ' is-active' : ''}`}
                   onClick={() => actions.setUseInOut(!useInOut)}
                 >
-                  Use In/Out
+                  {ui('使用入点/出点', 'Use In/Out')}
                 </button>
               )}
             </div>
 
             {mode.browserAudioUnavailable && (
               <div className="export-inline-note export-inline-note-warning">
-                Browser audio encoding is not available here. Video export still works.
+                {ui('当前浏览器不能编码音频，视频仍可导出。', 'Browser audio encoding is not available here. Video export still works.')}
               </div>
             )}
 
             {mode.showRangeInAudio && (
               <div className="export-stats-grid export-stats-grid-compact">
                 <div className="export-stat-card">
-                  <span>Output</span>
+                  <span>{ui('输出', 'Output')}</span>
                   <strong>{display.currentAudioCodecLabel} only</strong>
                 </div>
                 <div className="export-stat-card">
-                  <span>Duration</span>
+                  <span>{ui('时长', 'Duration')}</span>
                   <strong>{time.formatTime(time.endTime - time.startTime)}</strong>
                 </div>
                 <div className="export-stat-card">
@@ -185,7 +188,7 @@ export function ExportAudioChannelCard({
         </>
       ) : (
         <div className="export-inline-note">
-          Audio export is disabled. Video export stays silent until you turn audio back on.
+          {ui('音频导出已关闭，重新开启前视频将保持静音。', 'Audio export is disabled. Video export stays silent until you turn audio back on.')}
         </div>
       )}
     </div>

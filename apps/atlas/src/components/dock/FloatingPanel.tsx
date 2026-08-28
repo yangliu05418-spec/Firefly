@@ -6,6 +6,7 @@ import { useDockStore } from '../../stores/dockStore';
 import { findFirstTabGroup } from '../../stores/dockStore/layoutTree';
 import { startBatch, endBatch } from '../../stores/historyStore';
 import { DockPanelContent } from './DockPanelContent';
+import { localizePanelTitle } from '../../firefly/i18n/panelLabels';
 
 interface FloatingPanelProps {
   floating: FloatingPanelType;
@@ -146,7 +147,7 @@ export function FloatingPanel({ floating }: FloatingPanelProps) {
           onMouseDown={handleFloatingTabMouseDown}
           title="Drag into a dock area to dock this panel"
         >
-          {floating.panel.title}
+          {localizePanelTitle(floating.panel.type, floating.panel.title)}
         </button>
         <button
           className="floating-panel-dock-button"

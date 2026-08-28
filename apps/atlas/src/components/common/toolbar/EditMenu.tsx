@@ -1,6 +1,7 @@
 import type { ToolbarMenuController, ToolbarShortcutLabels } from './menuTypes';
 
 interface EditMenuProps extends ToolbarMenuController {
+  fireflyEmbedded?: boolean;
   onCopy: () => void;
   onOpenSettings: () => void;
   onPaste: () => void;
@@ -8,6 +9,7 @@ interface EditMenuProps extends ToolbarMenuController {
 }
 
 export function EditMenu({
+  fireflyEmbedded = false,
   onCopy,
   onMenuClick,
   onMenuHover,
@@ -23,21 +25,21 @@ export function EditMenu({
         onClick={() => onMenuClick('edit')}
         onMouseEnter={() => onMenuHover('edit')}
       >
-        Edit
+        {fireflyEmbedded ? '编辑' : 'Edit'}
       </button>
       {openMenu === 'edit' && (
         <div className="menu-dropdown">
           <button className="menu-option" onClick={onCopy}>
-            <span>Copy</span>
+            <span>{fireflyEmbedded ? '复制' : 'Copy'}</span>
             <span className="shortcut">{shortcutLabels.copy}</span>
           </button>
           <button className="menu-option" onClick={onPaste}>
-            <span>Paste</span>
+            <span>{fireflyEmbedded ? '粘贴' : 'Paste'}</span>
             <span className="shortcut">{shortcutLabels.paste}</span>
           </button>
           <div className="menu-separator" />
           <button className="menu-option" onClick={onOpenSettings}>
-            <span>Settings...</span>
+            <span>{fireflyEmbedded ? '设置…' : 'Settings...'}</span>
           </button>
         </div>
       )}
