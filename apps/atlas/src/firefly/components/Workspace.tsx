@@ -16,6 +16,7 @@ import { PreviewPanel } from './PreviewPanel';
 import { TimelineView } from './TimelineView';
 
 type SaveStatus = 'saved' | 'local' | 'saving' | 'failed';
+const LEASE_RELOAD_HANDOFF_MAX_AGE_MS = 60_000;
 
 export function Workspace({
   bootstrap,
@@ -68,6 +69,10 @@ export function Workspace({
   const uploadPoolRef = useRef(createTaskPool(2));
   const activeUploadAssetIdsRef = useRef(new Set<string>());
   const leaseAcquireInFlightRef = useRef(false);
+  const leaseResumePendingRef = useRef<{ token: string; attempt: number } | null>(null);
+  const leaseResumeTimerRef = useRef<number | null>(null);
+  const recoverLeaseRef = useRef<() => void>(() => undefined);
+  const pageHidingRef = useRef(false);
   const initialHydrationRef = useRef(true);
   const deviceIdRef = useRef(getDeviceId(bootstrap.user.id));
 
@@ -166,10 +171,32 @@ export function Workspace({
   }, [saveCloud]);
 
   useEffect(() => {
-    const onPageHide = () => { void flushLocalSnapshot(); };
+    const onPageHide = () => {
+      pageHidingRef.current = true;
+      const resumable = leaseRef.current ?? leaseResumePendingRef.current;
+      if (resumable) {
+        sessionStorage.setItem(getLeaseHandoffKey(bootstrap.user.id, initialDocument.projectId), JSON.stringify({
+          createdAt: Date.now(),
+        }));
+      }
+      void flushLocalSnapshot();
+    };
+    const onPageShow = (event: PageTransitionEvent) => {
+      pageHidingRef.current = false;
+      // A bfcache restore keeps the original document alive, so no successor
+      // should be allowed to consume its reload handoff.
+      if (event.persisted) {
+        sessionStorage.removeItem(getLeaseHandoffKey(bootstrap.user.id, initialDocument.projectId));
+        recoverLeaseRef.current();
+      }
+    };
     window.addEventListener('pagehide', onPageHide);
-    return () => window.removeEventListener('pagehide', onPageHide);
-  }, [flushLocalSnapshot]);
+    window.addEventListener('pageshow', onPageShow);
+    return () => {
+      window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('pageshow', onPageShow);
+    };
+  }, [bootstrap.user.id, flushLocalSnapshot, initialDocument.projectId]);
 
   useEffect(() => {
     void requestPersistentStorage().then((granted) => setStorageDenied(!granted));
@@ -178,6 +205,9 @@ export function Workspace({
   useEffect(() => {
     let stopped = false;
     const projectId = initialDocument.projectId;
+    const leaseSessionKey = getLeaseSessionKey(bootstrap.user.id, projectId);
+    const leaseHandoffKey = getLeaseHandoffKey(bootstrap.user.id, projectId);
+    let renewInFlight = false;
     const acquire = async (takeover = false) => {
       if (leaseAcquireInFlightRef.current) return;
       leaseAcquireInFlightRef.current = true;
@@ -185,11 +215,13 @@ export function Workspace({
         const lease = await retryLeaseRequest(() => atlasApi.acquireLease(projectId, deviceIdRef.current, takeover));
         if (stopped) return;
         leaseRef.current = lease;
+        sessionStorage.setItem(leaseSessionKey, lease.token);
         setReadOnly(false);
         setConflict(false);
       } catch (error) {
         if (!stopped) {
           leaseRef.current = null;
+          sessionStorage.removeItem(leaseSessionKey);
           setReadOnly(true);
           if (error instanceof ApiError && error.status === 409) setConflict(true);
         }
@@ -197,27 +229,102 @@ export function Workspace({
         leaseAcquireInFlightRef.current = false;
       }
     };
-    void acquire();
-    const renew = window.setInterval(() => {
-      const lease = leaseRef.current;
-      if (lease) void retryLeaseRequest(() => atlasApi.renewLease(projectId, lease.token)).then((result) => {
-        lease.expiresAt = result.expiresAt;
-      }).catch((error) => {
-        leaseRef.current = null;
+    const resumeLease = async () => {
+      const pending = leaseResumePendingRef.current;
+      if (!pending || renewInFlight || stopped) return;
+      renewInFlight = true;
+      try {
+        const lease = await retryLeaseRequest(() => atlasApi.renewLease(projectId, pending.token));
+        if (stopped) return;
+        leaseRef.current = lease;
+        leaseResumePendingRef.current = null;
+        setReadOnly(false);
+        setConflict(false);
+      } catch (error) {
+        if (stopped) return;
+        if (isLeaseLost(error)) {
+          sessionStorage.removeItem(leaseSessionKey);
+          leaseResumePendingRef.current = null;
+          await acquire();
+          return;
+        }
+        if (isProjectMissing(error)) {
+          sessionStorage.removeItem(leaseSessionKey);
+          leaseResumePendingRef.current = null;
+          setReadOnly(true);
+          return;
+        }
+        // A transient renew failure must never fall through to acquire: the
+        // server may still hold this exact lease, which would self-conflict.
         setReadOnly(true);
-        if (error instanceof ApiError && error.status === 409) setConflict(true);
-      });
-    }, 15_000);
-    const onOnline = () => { if (!leaseRef.current) void acquire(); };
+        pending.attempt += 1;
+        const delay = Math.min(10_000, 1_000 * 2 ** Math.min(3, pending.attempt - 1));
+        leaseResumeTimerRef.current = window.setTimeout(() => void resumeLease(), delay);
+      } finally {
+        renewInFlight = false;
+      }
+    };
+    const resumeOrAcquire = async () => {
+      const priorToken = sessionStorage.getItem(leaseSessionKey);
+      const handoff = priorToken ? consumeFreshLeaseHandoff(leaseHandoffKey) : null;
+      if (priorToken && handoff) {
+        leaseResumePendingRef.current = { token: priorToken, attempt: 0 };
+        await resumeLease();
+        return;
+      }
+      await acquire();
+    };
+    void resumeOrAcquire();
+    const renewActiveLease = async () => {
+      const lease = leaseRef.current;
+      if (!lease || renewInFlight) return;
+      renewInFlight = true;
+      try {
+        const result = await retryLeaseRequest(() => atlasApi.renewLease(projectId, lease.token));
+        if (stopped) return;
+        lease.expiresAt = result.expiresAt;
+        setReadOnly(false);
+      } catch (error) {
+        if (stopped) return;
+        setReadOnly(true);
+        if (isLeaseLost(error)) {
+          leaseRef.current = null;
+          sessionStorage.removeItem(leaseSessionKey);
+          await acquire();
+        } else if (isProjectMissing(error)) {
+          leaseRef.current = null;
+          sessionStorage.removeItem(leaseSessionKey);
+        }
+      } finally {
+        renewInFlight = false;
+      }
+    };
+    const renew = window.setInterval(() => void renewActiveLease(), 15_000);
+    const recover = () => {
+      if (leaseResumePendingRef.current) void resumeLease();
+      else if (leaseRef.current) void renewActiveLease();
+      else void acquire();
+    };
+    recoverLeaseRef.current = recover;
+    const onOnline = recover;
     window.addEventListener('online', onOnline);
     return () => {
       stopped = true;
+      recoverLeaseRef.current = () => undefined;
       window.clearInterval(renew);
+      if (leaseResumeTimerRef.current) window.clearTimeout(leaseResumeTimerRef.current);
       window.removeEventListener('online', onOnline);
-      const lease = leaseRef.current;
-      if (lease) void fetch(`/api/atlas/projects/${encodeURIComponent(projectId)}/lease`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ token: lease.token }), keepalive: true });
+      const token = leaseRef.current?.token ?? leaseResumePendingRef.current?.token;
+      // A reload keeps this tab's sessionStorage. Preserve its lease so the
+      // replacement document can renew it; a normal in-app navigation still
+      // releases immediately for another real tab/device.
+      if (token && !pageHidingRef.current) {
+        sessionStorage.removeItem(leaseSessionKey);
+        leaseResumePendingRef.current = null;
+        void fetch(`/api/atlas/projects/${encodeURIComponent(projectId)}/lease`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ token }), keepalive: true });
+      }
     };
-  }, [initialDocument.projectId]);
+  }, [bootstrap.user.id, initialDocument.projectId]);
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
@@ -553,6 +660,33 @@ function getDeviceId(userId: string): string {
   localStorage.setItem(key, id);
   return id;
 }
+
+export function getLeaseSessionKey(userId: string, projectId: string): string {
+  return `firefly:atlas:${userId}:project:${projectId}:lease-token`;
+}
+
+export function getLeaseHandoffKey(userId: string, projectId: string): string {
+  return `firefly:atlas:${userId}:project:${projectId}:reload-handoff`;
+}
+
+/** Atomically consumes the bounded proof that this tab is replacing itself. */
+export function consumeFreshLeaseHandoff(key: string, currentTime = Date.now()): true | null {
+  const raw = sessionStorage.getItem(key);
+  sessionStorage.removeItem(key);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as { createdAt?: unknown };
+    const createdAt = Number(parsed.createdAt);
+    if (!Number.isFinite(createdAt) || createdAt > currentTime) return null;
+    if (currentTime - createdAt > LEASE_RELOAD_HANDOFF_MAX_AGE_MS) return null;
+    return true;
+  } catch {
+    return null;
+  }
+}
+
+const isLeaseLost = (error: unknown): boolean => error instanceof ApiError && error.status === 409;
+const isProjectMissing = (error: unknown): boolean => error instanceof ApiError && error.status === 404;
 
 /** Two files at a time; each file already bounds TOS part concurrency to 3. */
 export function createTaskPool(limit: number) {
