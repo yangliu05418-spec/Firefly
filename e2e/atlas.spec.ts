@@ -234,10 +234,15 @@ test.describe("Atlas production SPA", () => {
     );
     await expect(leftPane).toHaveClass(/drop-target/);
     await page.mouse.up();
-    await expect(leftPane.locator('[data-guided-panel-tab="preview"]')).toBeVisible();
+    const movedPreviewTabBox = await page.locator('[data-guided-panel-tab="preview"]').boundingBox();
+    expect(movedPreviewTabBox).not.toBeNull();
+    expect(movedPreviewTabBox!.x).toBeLessThan(previewTabBox!.x - 40);
 
     await page.reload();
-    await expect(leftPane.locator('[data-guided-panel-tab="preview"]')).toBeVisible();
+    await expect.poll(async () => Math.abs(
+      ((await page.locator('[data-guided-panel-tab="preview"]').boundingBox())?.x ?? -10_000)
+        - movedPreviewTabBox!.x,
+    )).toBeLessThanOrEqual(3);
     await expect.poll(async () => Math.abs(
       ((await originalTimeline(page).boundingBox())?.height ?? 0) - timelineAfter!.height,
     )).toBeLessThanOrEqual(3);
