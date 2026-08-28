@@ -247,7 +247,7 @@ jobs:
         run: npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
 
   atlas-test-build:
-    name: Atlas Node 24 test and slim build
+    name: Atlas Node 24 upstream runtime test and build
     if: github.event_name != 'push'
     runs-on: ubuntu-latest
     defaults:
@@ -267,29 +267,47 @@ jobs:
           npm config set registry https://registry.npmjs.org
           npm ci
       - run: npm run typecheck
-      - run: npm test
+      - run: npm run test:firefly-release
       - run: npm run build
-      - name: Enforce the shipped-editor dependency and bundle budget
+      - name: Enforce the Atlas initial-route budget
         shell: bash
         run: |
           set -euo pipefail
-          if find dist -type f | grep -Ei '(onnx|transformers|ffmpeg|playcanvas|webgpu)' >/dev/null; then
-            echo 'An excluded heavy runtime entered the Atlas production bundle' >&2
-            exit 1
-          fi
           node --input-type=module <<'NODE'
-          import { readdirSync, readFileSync, statSync } from 'node:fs';
-          import { join } from 'node:path';
+          import { readFileSync, readdirSync } from 'node:fs';
+          import { basename, join } from 'node:path';
           import { gzipSync } from 'node:zlib';
-          const files = [];
-          const walk = (dir) => { for (const name of readdirSync(dir)) { const path = join(dir, name); statSync(path).isDirectory() ? walk(path) : files.push(path); } };
-          walk('dist');
-          const shipped = files.filter((path) => /\.(?:js|css)$/.test(path));
-          const chunks = shipped.map((path) => ({ path, bytes: gzipSync(readFileSync(path), { level: 9 }).byteLength }));
-          const total = chunks.reduce((sum, chunk) => sum + chunk.bytes, 0);
-          const biggest = chunks.reduce((max, chunk) => Math.max(max, chunk.bytes), 0);
-          console.log(JSON.stringify({ gzipBytes: total, largestChunkGzipBytes: biggest, chunks }, null, 2));
-          if (total > 2 * 1024 * 1024 || biggest > 750 * 1024) process.exit(1);
+          const html = readFileSync('dist/index.html', 'utf8');
+          const references = [...html.matchAll(/(?:src|href)="([^"]+\.(?:js|css))"/g)]
+            .map((match) => join('dist', 'assets', basename(match[1])));
+          if (references.length === 0) throw new Error('Atlas index has no initial JS/CSS assets');
+          const chunks = references.map((path) => ({
+            path,
+            bytes: gzipSync(readFileSync(path), { level: 9 }).byteLength,
+          }));
+          const initialGzipBytes = chunks.reduce((sum, chunk) => sum + chunk.bytes, 0);
+          const largestInitialChunkGzipBytes = Math.max(...chunks.map((chunk) => chunk.bytes));
+          const assets = readdirSync('dist/assets');
+          const editorChunk = (pattern) => {
+            const name = assets.find((asset) => pattern.test(asset));
+            if (!name) throw new Error(`Missing original Atlas editor chunk: ${pattern}`);
+            const path = join('dist', 'assets', name);
+            return { path, bytes: gzipSync(readFileSync(path), { level: 9 }).byteLength };
+          };
+          const editorOpen = {
+            appJs: editorChunk(/^App-.*\.js$/),
+            appCss: editorChunk(/^App-.*\.css$/),
+            projectLifecycle: editorChunk(/^projectLifecycle-.*\.js$/),
+          };
+          console.log(JSON.stringify({ initialGzipBytes, largestInitialChunkGzipBytes, chunks, editorOpen }, null, 2));
+          // Heavy editor features remain in their proven lazy chunks. This gate
+          // protects the authenticated dashboard and project-picker cold path.
+          if (initialGzipBytes > 1024 * 1024 || largestInitialChunkGzipBytes > 750 * 1024) process.exit(1);
+          // Preserve the complete upstream editor while preventing accidental
+          // eager imports from making project-open performance regress silently.
+          if (editorOpen.appJs.bytes > 700 * 1024
+            || editorOpen.appCss.bytes > 150 * 1024
+            || editorOpen.projectLifecycle.bytes > 1700 * 1024) process.exit(1);
           NODE
       - name: Audit Atlas production dependencies
         run: npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
@@ -421,6 +439,12 @@ jobs:
           if [ "$ready" -ne 1 ]; then docker logs firefly-ci-web; exit 1; fi
 
           test "$(docker run --rm firefly-ci:${{ github.sha }} sh -c 'test -s /app/dist-atlas/index.html && echo ok')" = ok
+          docker run --rm firefly-ci:${{ github.sha }} sh -c '
+            find /app/dist-atlas/assets -maxdepth 1 -type f -name "App-*.js" -size +100k | grep -q . &&
+            find /app/dist-atlas/assets -maxdepth 1 -type f -name "projectLifecycle-*.js" -size +1M | grep -q . &&
+            find /app/dist-atlas/assets -maxdepth 1 -type f -name "timelineClipCanvas.worker-*.js" | grep -q . &&
+            find /app/dist-atlas/assets -maxdepth 1 -type f -name "ExportPanel-*.js" | grep -q .
+          '
           curl --fail --silent --dump-header /tmp/atlas.headers \
             http://127.0.0.1:18090/studio/atlas/ --output /tmp/atlas.html
           grep -Eqi '^cache-control:.*no-cache' /tmp/atlas.headers

@@ -90,7 +90,7 @@ function App({ fireflyEmbedded }: AppProps) {
   const isFireflyEmbedded = fireflyEmbedded !== undefined;
   // Check for test mode via URL param
   const urlParams = new URLSearchParams(window.location.search);
-  const testMode = urlParams.get('test');
+  const testMode = isFireflyEmbedded ? null : urlParams.get('test');
   const [redeemCode, setRedeemCode] = useState(() => urlParams.get('redeem')?.trim() ?? '');
 
   // === ALL HOOKS MUST BE CALLED BEFORE ANY EARLY RETURNS ===
@@ -566,7 +566,10 @@ function App({ fireflyEmbedded }: AppProps) {
   }
 
   // Show mobile UI unless user explicitly requested desktop mode
-  const showMobileUI = !isStartLayout && (isMobile || forceMobile) && !forceDesktopMode;
+  const showMobileUI = !isFireflyEmbedded
+    && !isStartLayout
+    && (isMobile || forceMobile)
+    && !forceDesktopMode;
   if (showMobileUI) {
     return <MobileApp />;
   }

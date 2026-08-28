@@ -1,17 +1,12 @@
 import { createRoot } from 'react-dom/client';
 import './styles/tokens.css';
 import './styles/base.css';
-import RootApp from './RootApp.tsx';
-import { resolveEntryExperience } from './routing/entryExperience';
+import './firefly/styles.css';
+import { FireflyAtlasApp } from './firefly/FireflyAtlasApp';
+import { I18nProvider } from './firefly/i18n';
 import { installChunkLoadRecovery } from './runtime/chunkLoadRecovery';
 
 installChunkLoadRecovery();
-
-const initialExperience = resolveEntryExperience(window.location);
-
-if (initialExperience === 'editor' || initialExperience === 'landing') {
-  void import('./editorBoot');
-}
 
 const root = document.getElementById('root');
 
@@ -21,4 +16,8 @@ if (!root) {
 
 // StrictMode remains disabled because the original WebGPU runtime owns external
 // texture lifetimes and is not safe under React's development double mount.
-createRoot(root).render(<RootApp initialExperience={initialExperience} />);
+createRoot(root).render(
+  <I18nProvider>
+    <FireflyAtlasApp />
+  </I18nProvider>,
+);
