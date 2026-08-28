@@ -12,6 +12,7 @@ describe('Firefly localization boundary for the original Atlas editor', () => {
     const { originalUi } = await import('../../src/firefly/i18n/originalUi');
 
     expect(originalUi('original.favoriteLayouts', 'Favorite layouts')).toBe('常用布局');
+    expect(originalUi('original.layoutStart', 'START')).toBe('Agent 模式');
     expect(originalUi('original.mediaDuration', 'Duration')).toBe('时长');
     expect(originalUi('original.timelineTools', 'Timeline tools')).toBe('时间线工具');
     expect(originalUi('original.previewComposition', 'Composition preview')).toBe('合成预览');

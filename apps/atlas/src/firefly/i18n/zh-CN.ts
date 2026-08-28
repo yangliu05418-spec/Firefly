@@ -282,7 +282,7 @@ export const zhCN = {
   'original.layoutVideo': '视频剪辑',
   'original.layoutAudio': '音频剪辑',
   'original.layout3d': '3D 编辑',
-  'original.layoutStart': '开始',
+  'original.layoutStart': 'Agent 模式',
   'original.panelTabs': '面板标签页',
   'original.repositionPanel': '按住并拖动以调整面板位置',
   'original.addPanel': '添加面板',

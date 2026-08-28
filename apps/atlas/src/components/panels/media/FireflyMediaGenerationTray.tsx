@@ -31,9 +31,9 @@ export function FireflyMediaGenerationTray({ expanded, onExpandedChange }: { exp
   if (!embedding?.capabilities.generate) return null;
   return <>
     {!expanded && <div className="media-ai-tray media-ai-tray-collapsed firefly-generate-launcher" onMouseDown={stopEvent} onClick={stopEvent}>
-      <button className="media-ai-tray-launch" type="button" onClick={() => { setActivated(true); onExpandedChange(true); }} title="打开 Firefly 生成素材">
-        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="M8 1.5 9.2 5 13 6.2 9.2 7.4 8 11 6.8 7.4 3 6.2 6.8 5 8 1.5Z"/><path d="m12.4 10.4.5 1.4 1.5.5-1.5.5-.5 1.4-.5-1.4-1.5-.5 1.5-.5.5-1.4Z"/></svg>
-        <span>生成</span>
+      <button className="media-ai-tray-launch firefly-generate-button" type="button" onClick={() => { setActivated(true); onExpandedChange(true); }} title="打开 Firefly 生成素材" aria-label="生成" data-label="生成">
+        <svg viewBox="0 0 16 16" width="19" height="19" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="M8 1.5 9.2 5 13 6.2 9.2 7.4 8 11 6.8 7.4 3 6.2 6.8 5 8 1.5Z"/><path d="m12.4 10.4.5 1.4 1.5.5-1.5.5-.5 1.4-.5-1.4-1.5-.5 1.5-.5.5-1.4Z"/></svg>
+        <span className="firefly-generate-label">生成</span>
       </button>
     </div>}
     <div className={`firefly-generate-drawer ${expanded ? 'is-open' : ''}`} onMouseDown={stopEvent} onClick={stopEvent} aria-hidden={!expanded}>
