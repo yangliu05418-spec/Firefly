@@ -22,7 +22,7 @@ const originalTimeline = (page: Page) => page.locator(
 );
 
 const originalPreview = (page: Page) => page.locator(
-  '.dock-panel-content[data-panel-type="preview"] .preview-container[aria-label="Preview"]',
+  '.dock-panel-content[data-panel-type="preview"] .preview-container',
 );
 
 async function expectOriginalEditorLayout(page: Page) {
@@ -31,22 +31,35 @@ async function expectOriginalEditorLayout(page: Page) {
   await expect(dock).toBeVisible();
   await expect(timeline).toBeVisible();
   await expect(originalPreview(page)).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Agent 模式' })).toBeVisible();
 
-  const [dockBox, timelineBox, bodyBox, trackStackBox] = await Promise.all([
+  const mediaPanel = page.locator('.dock-panel-content[data-panel-type="media"]');
+  const generateButton = mediaPanel.getByRole('button', { name: '生成' });
+  await expect(generateButton).toBeVisible();
+
+  const [dockBox, timelineBox, bodyBox, trackStackBox, mediaBox, generateBox] = await Promise.all([
     dock.boundingBox(),
     timeline.boundingBox(),
     timeline.locator('.timeline-body').boundingBox(),
     timeline.locator('.timeline-track-stack').boundingBox(),
+    mediaPanel.boundingBox(),
+    generateButton.boundingBox(),
   ]);
   expect(dockBox).not.toBeNull();
   expect(timelineBox).not.toBeNull();
   expect(bodyBox).not.toBeNull();
   expect(trackStackBox).not.toBeNull();
+  expect(mediaBox).not.toBeNull();
+  expect(generateBox).not.toBeNull();
   expect(timelineBox!.width / dockBox!.width).toBeGreaterThan(0.98);
   expect(Math.abs(timelineBox!.x - dockBox!.x)).toBeLessThanOrEqual(4);
   expect(Math.abs((timelineBox!.x + timelineBox!.width) - (dockBox!.x + dockBox!.width))).toBeLessThanOrEqual(4);
   expect(bodyBox!.width / timelineBox!.width).toBeGreaterThan(0.98);
   expect(trackStackBox!.width / timelineBox!.width).toBeGreaterThan(0.98);
+  expect(Math.abs(generateBox!.width - generateBox!.height)).toBeLessThanOrEqual(1);
+  expect(generateBox!.width).toBeGreaterThanOrEqual(48);
+  expect((mediaBox!.x + mediaBox!.width) - (generateBox!.x + generateBox!.width)).toBeGreaterThanOrEqual(18);
+  expect((mediaBox!.y + mediaBox!.height) - (generateBox!.y + generateBox!.height)).toBeGreaterThanOrEqual(18);
 }
 
 async function mockAtlasApi(page: Page) {
@@ -173,7 +186,7 @@ test.describe("Atlas production SPA", () => {
       const selectors = [
         '.dock-container',
         '.dock-panel-content[data-panel-type="timeline"] .timeline-container',
-        '.dock-panel-content[data-panel-type="preview"] .preview-container[aria-label="Preview"]',
+        '.dock-panel-content[data-panel-type="preview"] .preview-container',
       ];
       const boxes = selectors.map((selector) => {
         const element = document.querySelector(selector);

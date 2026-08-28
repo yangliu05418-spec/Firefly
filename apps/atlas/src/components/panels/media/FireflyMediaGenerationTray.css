@@ -1,19 +1,25 @@
 .firefly-generate-launcher.media-ai-tray-collapsed {
+  position: absolute;
   top: auto;
   right: 28px;
   bottom: 28px;
+  z-index: 95;
+  display: flex;
   width: 52px;
   align-items: center;
   justify-content: center;
+  pointer-events: none;
 }
 
 .firefly-generate-launcher .firefly-generate-button {
   position: relative;
+  display: inline-flex;
   width: 52px;
   min-width: 52px;
   height: 52px;
   min-height: 52px;
   padding: 0;
+  align-items: center;
   justify-content: center;
   border-radius: 50%;
   background: #eee4cc;
@@ -21,6 +27,8 @@
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, .72),
     0 10px 24px rgba(0, 0, 0, .34);
+  cursor: pointer;
+  pointer-events: auto;
   transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease;
 }
 
