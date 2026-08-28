@@ -247,7 +247,7 @@ jobs:
         run: npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
 
   atlas-test-build:
-    name: Atlas Node 24 upstream runtime test and build
+    name: Atlas Node 24 test and slim build
     if: github.event_name != 'push'
     runs-on: ubuntu-latest
     defaults:
