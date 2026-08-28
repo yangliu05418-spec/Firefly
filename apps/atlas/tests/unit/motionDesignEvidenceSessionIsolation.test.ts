@@ -40,6 +40,20 @@ describe('Motion Design evidence startup isolation', () => {
     expect(loadProjectToStores).not.toHaveBeenCalled();
   });
 
+  it('does not restore a legacy project when Firefly already opened the selected project', async () => {
+    const restoreLastProject = vi.fn(async () => true);
+    const loadProjectToStores = vi.fn(async () => {});
+
+    await expect(runToolbarProjectBootRestore({
+      url: 'https://firefly.kumadrama.com/studio/atlas/',
+      projectAlreadyOpen: true,
+      restoreLastProject,
+      loadProjectToStores,
+    })).resolves.toBe('already-open');
+    expect(restoreLastProject).not.toHaveBeenCalled();
+    expect(loadProjectToStores).not.toHaveBeenCalled();
+  });
+
   it.each([
     'http://localhost:5173/',
     'http://motion-md0-c4e8d2f7.localhost:5173/?motionDesignEvidenceSession=wrong123',

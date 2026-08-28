@@ -9,7 +9,10 @@ const SHOW_CHANGELOG = typeof __SHOW_CHANGELOG__ !== 'undefined' ? __SHOW_CHANGE
 
 import { useState, useCallback, useEffect, lazy, Suspense } from 'react';
 import { flushSync } from 'react-dom';
-import { Toolbar } from './components/common/Toolbar';
+import {
+  Toolbar,
+  type FireflyEmbeddedToolbarContext,
+} from './components/common/Toolbar';
 import { DockContainer } from './components/dock';
 import { AccountDialog } from './components/common/AccountDialog';
 import { AuthDialog } from './components/common/AuthDialog';
@@ -79,7 +82,12 @@ const KeyframeCurveVisualQa = lazy(() =>
   import('./test/KeyframeCurveVisualQa').then(m => ({ default: m.KeyframeCurveVisualQa }))
 );
 
-function App() {
+export interface AppProps {
+  fireflyEmbedded?: FireflyEmbeddedToolbarContext;
+}
+
+function App({ fireflyEmbedded }: AppProps) {
+  const isFireflyEmbedded = fireflyEmbedded !== undefined;
   // Check for test mode via URL param
   const urlParams = new URLSearchParams(window.location.search);
   const testMode = urlParams.get('test');
@@ -200,8 +208,8 @@ function App() {
   }, []);
 
   // Check if there's a stored project in IndexedDB (the only allowed browser storage)
-  const [isChecking, setIsChecking] = useState(true);
-  const [hasStoredProject, setHasStoredProject] = useState(false);
+  const [isChecking, setIsChecking] = useState(() => !isFireflyEmbedded);
+  const [hasStoredProject, setHasStoredProject] = useState(() => isFireflyEmbedded);
   const [manuallyDismissed, setManuallyDismissed] = useState(false);
   const [startupOverlaysReady, setStartupOverlaysReady] = useState(() => !isStartLayout);
 
@@ -244,8 +252,9 @@ function App() {
   // Load the optional non-AI YouTube integration credential on mount.
   const loadIntegrationCredentials = useSettingsStore((s) => s.loadIntegrationCredentials);
   useEffect(() => {
+    if (isFireflyEmbedded) return;
     void loadIntegrationCredentials();
-  }, [loadIntegrationCredentials]);
+  }, [isFireflyEmbedded, loadIntegrationCredentials]);
 
   const accountDialog = useAccountStore((s) => s.dialog);
   const accountCreditBalance = useAccountStore((s) => s.creditBalance);
@@ -261,10 +270,14 @@ function App() {
     setBillingSuccessCelebration(null);
   }, []);
   useEffect(() => {
+    if (isFireflyEmbedded) return;
     void loadAccountState();
-  }, [loadAccountState]);
+  }, [isFireflyEmbedded, loadAccountState]);
 
   useEffect(() => {
+    if (isFireflyEmbedded) {
+      return;
+    }
     if (!isAccountInitialized) {
       return;
     }
@@ -299,7 +312,7 @@ function App() {
     };
 
     void finalize();
-  }, [isAccountInitialized, loadAccountState, openAccountDialog]);
+  }, [isAccountInitialized, isFireflyEmbedded, loadAccountState, openAccountDialog]);
 
   const clearRedeemCode = useCallback(() => {
     const currentUrl = new URL(window.location.href);
@@ -313,6 +326,12 @@ function App() {
   // Check for stored project on mount, then poll for changes
   // This handles the case where Toolbar's restore fails and clears handles
   useEffect(() => {
+    if (isFireflyEmbedded) {
+      setHasStoredProject(true);
+      setIsChecking(false);
+      return;
+    }
+
     const checkProject = async () => {
       // Check if IndexedDB has failed to initialize
       if (projectDB.hasInitFailed()) {
@@ -358,11 +377,12 @@ function App() {
     }, 2000);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [isFireflyEmbedded]);
 
   // Show welcome if no stored project and not manually dismissed this session
   // Don't show while checking to avoid flash
   const showWelcome = startupOverlaysReady
+    && !isFireflyEmbedded
     && !isStartLayout
     && !isChecking
     && !hasStoredProject
@@ -372,6 +392,7 @@ function App() {
   // Show Splash screen after initial check (when no welcome overlay)
   // This effect intentionally sets state based on derived conditions
   useEffect(() => {
+    if (isFireflyEmbedded) return;
     if (!startupOverlaysReady || isStartLayout) return;
     if (!shouldShowChangelogOnStartup) return;
     if (isChecking) return;
@@ -382,7 +403,14 @@ function App() {
     // Show splash screen - this is intentional state sync, not a cascading render
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setShowSplash(true);
-  }, [isChecking, isStartLayout, showWelcome, shouldShowChangelogOnStartup, startupOverlaysReady]);
+  }, [
+    isChecking,
+    isFireflyEmbedded,
+    isStartLayout,
+    showWelcome,
+    shouldShowChangelogOnStartup,
+    startupOverlaysReady,
+  ]);
 
   const activateTutorialCampaign = useCallback((campaignId: string) => {
     const campaign = getCampaignById(campaignId);
@@ -559,22 +587,26 @@ function App() {
       {showStartTransitionBackground && (
         <div className="app-start-transition-background" aria-hidden="true" />
       )}
-      <Toolbar onOpenChangelog={() => setShowChangelog(true)} onOpenSplash={() => setShowSplash(true)} />
+      <Toolbar
+        fireflyEmbedded={fireflyEmbedded}
+        onOpenChangelog={() => setShowChangelog(true)}
+        onOpenSplash={() => setShowSplash(true)}
+      />
       <DockContainer />
       {!isStartLayout && (
         <>
           <GuidedActionOverlay />
           <ShortcutDisplayOverlay />
           <ProjectLoadProgressOverlay />
-          <MuscriptorDialogHost />
+          {!isFireflyEmbedded && <MuscriptorDialogHost />}
           <HistoryActionToast notice={historyNotice} onDone={clearHistoryNotice} />
           {showWelcome && (
             <WelcomeOverlay onComplete={handleWelcomeComplete} noFadeOnClose />
           )}
-          {showSplash && startupOverlaysReady && (
+          {!isFireflyEmbedded && showSplash && startupOverlaysReady && (
             <SplashScreen onClose={handleSplashClose} onOpenChangelog={handleSplashOpenChangelog} />
           )}
-          {showChangelog && (
+          {!isFireflyEmbedded && showChangelog && (
             <WhatsNewDialog onClose={handleChangelogClose} />
           )}
           {showIndexedDBError && (
@@ -609,16 +641,16 @@ function App() {
               campaignTitle={activeCampaign.title}
             />
           ) : null}
-          {accountDialog === 'auth' && <AuthDialog onClose={closeAccountDialog} />}
-          {accountDialog === 'pricing' && <PricingDialog onClose={closeAccountDialog} />}
-          {accountDialog === 'account' && (
+          {!isFireflyEmbedded && accountDialog === 'auth' && <AuthDialog onClose={closeAccountDialog} />}
+          {!isFireflyEmbedded && accountDialog === 'pricing' && <PricingDialog onClose={closeAccountDialog} />}
+          {!isFireflyEmbedded && accountDialog === 'account' && (
             <AccountDialog
               initialRedeemCode={redeemCode}
               onClose={closeAccountDialog}
               onRedeemed={clearRedeemCode}
             />
           )}
-          {billingSuccessCelebration && (
+          {!isFireflyEmbedded && billingSuccessCelebration && (
             <BillingSuccessCelebration
               creditBalance={accountCreditBalance}
               onClose={closeBillingSuccessCelebration}
