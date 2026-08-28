@@ -5,6 +5,7 @@ import { MEDIA_CLASSIC_COLUMN_LABELS } from './classicColumnLabels';
 import type { MediaClassicColumnId, MediaClassicDynamicColumnWidths, MediaClassicListRowData } from './types';
 import { isProxyFrameCountComplete } from '../../../../stores/mediaStore/helpers/proxyCompleteness';
 import type { Composition, MediaFile, ProjectItem, SignalAssetItem } from '../../../../stores/mediaStore';
+import { originalUi } from '../../../../firefly/i18n/originalUi';
 
 export const MEDIA_CLASSIC_ROW_HEIGHT = 20;
 export const MEDIA_CLASSIC_OVERSCAN_ROWS = 12;
@@ -279,19 +280,19 @@ export function getClassicMediaColumnText(item: ProjectItem, colId: Exclude<Medi
         ? `${mediaFile.fps}`
         : ('type' in item && item.type === 'composition' ? `${(item as Composition).frameRate}` : '\u2013');
     case 'container':
-      if ('type' in item && item.type === 'composition') return 'Comp';
+      if ('type' in item && item.type === 'composition') return originalUi('original.composition', 'Comp');
       if (signalAsset) return signalAsset.providerId || 'Signal';
       return getMediaFileContainerLabel(mediaFile) || '\u2013';
     case 'codec':
       if (mediaFile?.type === 'audio') return mediaFile.audioCodec || getMediaFileCodecLabel(mediaFile) || '\u2013';
       if (mediaFile?.type === 'image') return getMediaFileCodecLabel(mediaFile) || 'Raster';
-      if ('type' in item && item.type === 'composition') return 'Timeline';
+      if ('type' in item && item.type === 'composition') return originalUi('original.timelineItem', 'Timeline');
       if (signalAsset) return signalAsset.asset.source.extension || signalAsset.asset.source.mimeType || signalAsset.asset.source.kind;
       return getMediaFileCodecLabel(mediaFile) || '\u2013';
     case 'audio':
       return mediaFile?.type === 'audio' ? getAudioProxyColumnLabel(mediaFile) :
         mediaFile?.type === 'image' ? 'Image' :
-        'type' in item && item.type === 'composition' ? 'Timeline' :
+        'type' in item && item.type === 'composition' ? originalUi('original.timelineItem', 'Timeline') :
         signalAsset ? `${signalAsset.diagnostics?.length ?? 0} diag` :
         mediaFile?.hasAudio === true ? 'Yes' :
         mediaFile?.hasAudio === false ? 'No' : '\u2013';

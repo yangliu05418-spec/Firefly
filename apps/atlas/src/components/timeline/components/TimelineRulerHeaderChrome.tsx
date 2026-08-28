@@ -8,6 +8,7 @@ import {
   selectRulerLanes,
   selectTempoMap,
 } from '../../../stores/timeline/selectors';
+import { originalUi } from '../../../firefly/i18n/originalUi';
 
 type TimelineRulerProps = ComponentProps<typeof TimelineRuler>;
 
@@ -91,7 +92,7 @@ export function TimelineRulerHeaderChrome({
         className={`timeline-layer-divider-resize-handle ${isTrackHeaderWidthResizing ? 'active' : ''}`}
         role="separator"
         aria-orientation="vertical"
-        title="Drag to resize layer column"
+        title={originalUi('original.resizeLayerColumn', 'Drag to resize layer column')}
         onPointerDown={onTrackHeaderWidthResizeStart}
       />
     </>

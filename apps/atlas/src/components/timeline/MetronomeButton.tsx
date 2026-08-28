@@ -15,6 +15,7 @@ import {
   selectMetronomeVolume,
 } from '../../stores/timeline/selectors';
 import './TimelineControlsViewDropdown.css';
+import { originalUi } from '../../firefly/i18n/originalUi';
 
 export function MetronomeButton() {
   const enabled = useTimelineStore(selectMetronomeEnabled);
@@ -43,7 +44,7 @@ export function MetronomeButton() {
       <button
         type="button"
         className={`btn btn-sm ${enabled ? 'btn-active' : ''}`}
-        aria-label="Metronome"
+        aria-label={originalUi('original.metronome', 'Metronome')}
         aria-pressed={enabled}
         onClick={toggleMetronome}
         title={enabled ? 'Metronome on — click follows the tempo map' : 'Metronome off'}
@@ -57,10 +58,10 @@ export function MetronomeButton() {
       <button
         type="button"
         className="metronome-settings-toggle"
-        aria-label="Metronome settings"
+        aria-label={originalUi('original.metronomeSettings', 'Metronome settings')}
         aria-expanded={open}
         onClick={() => setOpen((previous) => !previous)}
-        title="Metronome settings"
+        title={originalUi('original.metronomeSettings', 'Metronome settings')}
       >
         <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="2.5">
           <polyline points="6 9 12 15 18 9" />

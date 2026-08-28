@@ -54,8 +54,22 @@ import { screenCaptureService } from '../../services/capture/ScreenCaptureServic
 import { CreditBurnMeter } from './CreditBurnMeter';
 import { runToolbarProjectBootRestore } from './toolbar/toolbarProjectStartup';
 import type { FireflyEmbeddingValue } from '../../firefly/FireflyEmbeddingContext';
+import { originalUi } from '../../firefly/i18n/originalUi';
+import {
+  FACTORY_3D_EDIT_LAYOUT_ID,
+  FACTORY_AUDIO_EDIT_LAYOUT_ID,
+  FACTORY_START_LAYOUT_ID,
+  FACTORY_VIDEO_EDIT_LAYOUT_ID,
+} from '../../stores/dockStore/panelRegistry';
 
 const log = Logger.create('Toolbar');
+
+const FACTORY_LAYOUT_LABELS = new Map([
+  [FACTORY_VIDEO_EDIT_LAYOUT_ID, originalUi('original.layoutVideo', 'VIDEO EDIT')],
+  [FACTORY_AUDIO_EDIT_LAYOUT_ID, originalUi('original.layoutAudio', 'AUDIO EDIT')],
+  [FACTORY_3D_EDIT_LAYOUT_ID, originalUi('original.layout3d', '3D EDIT')],
+  [FACTORY_START_LAYOUT_ID, originalUi('original.layoutStart', 'START')],
+]);
 
 interface ToolbarProps {
   fireflyEmbedded?: FireflyEmbeddedToolbarContext;
@@ -540,16 +554,16 @@ export function Toolbar({ fireflyEmbedded, onOpenChangelog, onOpenSplash }: Tool
 
       <div className="toolbar-center">
         {viewActions.favoriteSavedLayouts.length > 0 && (
-          <div className="toolbar-layout-switcher" aria-label="Favorite layouts">
+          <div className="toolbar-layout-switcher" aria-label={originalUi('original.favoriteLayouts', 'Favorite layouts')}>
             {viewActions.favoriteSavedLayouts.map((savedLayout) => (
               <button
                 key={savedLayout.id}
                 className={`toolbar-layout-switch ${savedLayout.id === activeSavedLayoutId ? 'active' : ''}`}
                 onClick={() => loadSavedLayout(savedLayout.id)}
-                title={`Load ${savedLayout.name}`}
+                title={`${originalUi('original.loadLayout', 'Load')} ${FACTORY_LAYOUT_LABELS.get(savedLayout.id) ?? savedLayout.name}`}
                 type="button"
               >
-                {savedLayout.name}
+                {FACTORY_LAYOUT_LABELS.get(savedLayout.id) ?? savedLayout.name}
               </button>
             ))}
           </div>

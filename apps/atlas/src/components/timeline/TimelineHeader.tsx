@@ -19,6 +19,7 @@ import {
 import { getTimelineTrackColor, TIMELINE_TRACK_COLOR_HIDDEN } from './trackColor';
 import { useTimelineHeaderAudioPopoverState } from './hooks/useTimelineHeaderAudioPopoverState';
 import { useTrackReorderDrag, trackReorderSection } from './hooks/useTrackReorderDrag';
+import { originalUi } from '../../firefly/i18n/originalUi';
 
 function TimelineHeaderComponent({
   track,
@@ -196,7 +197,7 @@ function TimelineHeaderComponent({
       >
         <div
           className="track-reorder-handle"
-          title="Drag to reorder"
+          title={originalUi('original.dragToReorder', 'Drag to reorder')}
           onPointerDown={onReorderPointerDown}
           onClick={(e) => e.stopPropagation()}
         >
@@ -210,7 +211,9 @@ function TimelineHeaderComponent({
               className={`track-expand-arrow ${isExpanded ? 'expanded' : ''} ${
                 hasKeyframes ? 'has-keyframes' : ''
               }`}
-              title={isExpanded ? 'Collapse properties' : 'Expand properties'}
+              title={isExpanded
+                ? originalUi('original.collapseProperties', 'Collapse properties')
+                : originalUi('original.collapseProperties', 'Expand properties')}
               onClick={(event) => {
                 event.stopPropagation();
                 onToggleExpand();
@@ -223,7 +226,7 @@ function TimelineHeaderComponent({
             <span
               className="track-color-chip"
               style={{ background: trackColor }}
-              title="Track color"
+              title={originalUi('original.trackColor', 'Track color')}
               onClick={(event) => event.stopPropagation()}
             />
           )}
@@ -243,7 +246,7 @@ function TimelineHeaderComponent({
               className="track-name"
               onClick={handleNameClick}
               onDoubleClick={handleNameDoubleClick}
-              title="Click to rename"
+              title={originalUi('original.clickToRename', 'Click to rename')}
             >
               {track.name}
             </span>

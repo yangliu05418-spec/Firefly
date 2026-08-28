@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { IconMagnet } from '@tabler/icons-react';
+import { originalUi } from '../../../firefly/i18n/originalUi';
 
 interface TimelineSnappingButtonProps {
   snappingEnabled: boolean;
@@ -42,7 +43,7 @@ export function TimelineSnappingButton({
     <button
       type="button"
       className={`timeline-tool-button timeline-snapping-button ${effectivelyEnabled ? 'active' : ''}`}
-      aria-label="Snapping"
+      aria-label={originalUi('original.snapping', 'Snapping')}
       aria-pressed={effectivelyEnabled}
       data-temporary-active={temporarilyEnabled ? 'true' : undefined}
       onClick={(event) => {

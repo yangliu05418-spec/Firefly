@@ -1,6 +1,7 @@
 import type { ExportPreset } from '../../../stores/exportStore';
 import type { ExportSummaryBadge, ExportSummaryTarget } from '../exportSummaryState';
 import type { EncoderType } from '../useExportState';
+import { originalUi } from '../../../firefly/i18n/originalUi';
 
 interface ExportSummaryBadgesSectionProps {
   showCompositionSync: boolean;
@@ -34,8 +35,8 @@ export function ExportSummaryBadgesSection({
               type="button"
               className={`export-pill export-pill-${sameAsComposition ? 'sac' : 'nac'}`}
               onClick={onSyncComposition}
-              aria-label={sameAsComposition ? 'Same as composition' : 'Use composition resolution and frame rate'}
-              title={sameAsComposition ? 'Same as composition' : 'Use composition resolution and frame rate'}
+              aria-label={originalUi('original.exportSameAsComposition', 'Same as composition')}
+              title={originalUi('original.exportSameAsComposition', 'Same as composition')}
             >
               {sameAsComposition ? 'SaC' : 'NaC'}
             </button>

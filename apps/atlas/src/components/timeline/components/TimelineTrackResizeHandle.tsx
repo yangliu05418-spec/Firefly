@@ -1,4 +1,5 @@
 import type { TimelineTrackProps } from '../types';
+import { originalUi } from '../../../firefly/i18n/originalUi';
 
 type TimelineTrackResizeHandleProps = {
   isResizeActive: boolean;
@@ -16,7 +17,7 @@ export function TimelineTrackResizeHandle({
       className={`track-resize-handle track-resize-handle-lane ${isResizeActive ? 'active' : ''}`}
       role="separator"
       aria-orientation="horizontal"
-      title="Drag to resize track height"
+      title={originalUi('original.resizeTrackHeight', 'Drag to resize track height')}
       onPointerDown={(event) => onResizeStart(event, trackId)}
     />
   );

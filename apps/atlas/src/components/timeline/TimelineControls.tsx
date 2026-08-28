@@ -146,7 +146,7 @@ function TimelineControlsComponent({
       ? recordingRange.punchOutTime !== undefined
         ? `Punch record ${formatTime(recordingRange.startTime)} to ${formatTime(recordingRange.punchOutTime)}`
         : `Record armed audio track${armedAudioTracks.length === 1 ? '' : 's'} from ${formatTime(recordingRange.startTime)}`
-      : 'Arm an audio track before recording';
+      : label('original.recordArmRequired', 'Arm an audio track before recording');
   const showMainControls = variant !== 'utility';
   const showUtilityControls = variant !== 'main' && variant !== 'transport' && variant !== 'zoom';
 
@@ -247,8 +247,8 @@ function TimelineControlsComponent({
           onClick={isPlaying ? onPause : onPlay}
           data-guided-target="button:timeline-play"
           data-tutorial-id="play-btn"
-          title={isPlaying ? 'Pause' : 'Play'}
-          aria-label={isPlaying ? 'Pause' : 'Play'}
+          title={isPlaying ? label('original.pause', 'Pause') : label('original.play', 'Play')}
+          aria-label={isPlaying ? label('original.pause', 'Pause') : label('original.play', 'Play')}
           aria-pressed={isPlaying}
         >
           {isPlaying ? (
@@ -260,7 +260,7 @@ function TimelineControlsComponent({
         <button
           className={`btn btn-sm btn-icon timeline-transport-button timeline-loop-button ${loopPlayback ? 'btn-active' : ''}`}
           onClick={onToggleLoop}
-          title={loopPlayback ? 'Loop On (L)' : 'Loop Off (L)'}
+          title={`${loopPlayback ? label('original.loopOn', 'Loop On') : label('original.loopOff', 'Loop Off')} (L)`}
         >
           <IconRepeat className="timeline-transport-icon timeline-loop-icon" stroke={2.8} aria-hidden="true" />
         </button>
@@ -277,7 +277,7 @@ function TimelineControlsComponent({
           onClick={onToggleProxy}
           title={proxyTitle}
         >
-          {isProxyGenerating ? proxyGenerationLabel : 'Proxy'}
+          {isProxyGenerating ? proxyGenerationLabel : label('original.proxy', 'Proxy')}
         </button>
         {recoveryEntries.length > 0 && (
           <button
@@ -320,9 +320,9 @@ function TimelineControlsComponent({
           }}
           title={label('timeline.masterBus', 'Master audio bus')}
         >
-          Master {formatMasterVolumeDb(masterAudio.volumeDb)}
+          {label('timeline.masterBus', 'Master')} {formatMasterVolumeDb(masterAudio.volumeDb)}
         </button>
-        <AudioLevelMeter streamScope={{ kind: 'master' }} streamFeatures={['level']} label="Master level" className="timeline-master-audio-meter" display="mono" />
+        <AudioLevelMeter streamScope={{ kind: 'master' }} streamFeatures={['level']} label={label('timeline.masterBus', 'Master level')} className="timeline-master-audio-meter" display="mono" />
         {masterDropdownOpen && (
           <div
             className="timeline-master-audio-popover"

@@ -19,6 +19,7 @@ import {
 } from './utils/timelineGrid';
 import { createDefaultRulerLanes, createDefaultTempoMap } from '../../timeline/tempo/rulerDefaults';
 import { TempoRulerLane } from './components/TempoRulerLane';
+import { originalUi } from '../../firefly/i18n/originalUi';
 
 const RULER_VIEWPORT_FALLBACK_PX = 1600;
 const RULER_VIEWPORT_MIN_PX = 1600;
@@ -161,7 +162,7 @@ function TimelineRulerComponent({
       ref={rulerRef}
       className="time-ruler"
       data-ai-id="timeline-ruler"
-      aria-label="Timeline ruler"
+      aria-label={originalUi('original.rulers', 'Timeline ruler')}
       style={{ width, transform: `translateX(-${alignedScrollX}px)` }}
       onMouseDown={onRulerMouseDown}
     >
