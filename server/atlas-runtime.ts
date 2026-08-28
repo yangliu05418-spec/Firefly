@@ -41,7 +41,7 @@ const importSource = (input: { objectKey: string; fileName: string; contentType:
   return kind && input.size > 0 ? { ...input, kind } : null;
 };
 
-const resolveImportSource = async (input: {
+export const resolveAtlasImportSource = async (input: {
   ownerId: string;
   sourceType: "user_asset" | "generation" | "generated" | "canvas_project";
   sourceId: string;
@@ -89,7 +89,7 @@ const verifyAtlasObject: AtlasStorageDependencies["verifyObject"] = async (objec
   return { size, contentType, etag, metadata };
 };
 
-const atlasStorage = (enqueueDelete: (objectKey: string) => Promise<void>): AtlasStorageDependencies => ({
+export const createAtlasStorage = (enqueueDelete: (objectKey: string) => Promise<void>): AtlasStorageDependencies => ({
   createMultipartUpload: ({ objectKey, contentType, fileName, metadata }) => createMultipartUpload(objectKey, contentType, fileName, metadata),
   signUploadPart: ({ objectKey, uploadId, partNumber }) => signUploadPart(objectKey, uploadId, partNumber),
   listParts: async ({ objectKey, uploadId }) => (await listAllUploadedParts(objectKey, uploadId)).map((part) => ({ partNumber: part.partNumber, etag: part.eTag })),
@@ -147,7 +147,7 @@ export const createAtlasRuntime = (input: {
     },
     maxToolCalls: config.atlasAgentMaxToolCalls,
   });
-  const storage = atlasStorage((objectKey) => input.enqueueMediaDelete(
+  const storage = createAtlasStorage((objectKey) => input.enqueueMediaDelete(
     objectKey,
     `atlas-delete-${crypto.createHash("sha256").update(objectKey).digest("hex").slice(0, 32)}`,
   ));
@@ -155,9 +155,10 @@ export const createAtlasRuntime = (input: {
     store: projectStore,
     requireAuth: input.requireAuth,
     storage,
-    resolveImportSource,
+    resolveImportSource: resolveAtlasImportSource,
     enabled: config.atlasEnabled,
     agentEnabled: config.atlasAgentEnabled,
+    generateEnabled: config.atlasGenerateEnabled,
     maxUploadBytes: config.atlasMaxUploadBytes,
     registerGlobalAsset: registerAtlasGlobalExport,
   });

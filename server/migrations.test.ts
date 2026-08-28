@@ -23,7 +23,7 @@ describe("versioned database migrations", () => {
     const database = new Database(target, { readonly: true });
     expect(schemaVersion(database)).toBe(CURRENT_SCHEMA_VERSION);
     expect(assertSchemaVersion(database)).toBe(CURRENT_SCHEMA_VERSION);
-    expect((database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number }).count).toBe(12);
+    expect((database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number }).count).toBe(13);
     expect((database.prepare("PRAGMA table_info(generation_tasks)").all() as { name: string }[]).some((column) => column.name === "error_code")).toBe(true);
     expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'media_archive_checkpoints'").get()).toBeTruthy();
     const assetColumns = (database.prepare("PRAGMA table_info(user_assets)").all() as { name: string }[]).map((column) => column.name);
@@ -38,7 +38,7 @@ describe("versioned database migrations", () => {
     expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='creation_snapshot_references'").get() as { name: string }).name).toBe("creation_snapshot_references");
     expect((database.prepare("PRAGMA table_info(creation_snapshot_references)").all() as { name: string }[]).map((column) => column.name)).toContain("provider_asset_id");
     expect((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='reedit_session_links'").get() as { name: string }).name).toBe("reedit_session_links");
-    for (const table of ["atlas_projects", "atlas_project_versions", "atlas_project_assets", "atlas_global_asset_outbox", "atlas_transfers", "atlas_agent_runs", "atlas_agent_events", "atlas_agent_operations"]) {
+    for (const table of ["atlas_projects", "atlas_project_versions", "atlas_project_assets", "atlas_global_asset_outbox", "atlas_transfers", "atlas_agent_runs", "atlas_agent_events", "atlas_agent_operations", "atlas_project_generation_sessions", "generation_destinations"]) {
       expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)).toMatchObject({ name: table });
     }
     database.close();
@@ -121,7 +121,9 @@ describe("versioned database migrations", () => {
     migrateDatabase(target);
     const database = new Database(target);
     database.exec(`
-      DELETE FROM schema_migrations WHERE version = 12;
+      DELETE FROM schema_migrations WHERE version >= 12;
+      DROP TABLE generation_destinations;
+      DROP TABLE atlas_project_generation_sessions;
       DROP TABLE atlas_agent_operations;
       DROP TABLE atlas_agent_events;
       DROP TABLE atlas_agent_runs;
@@ -134,7 +136,7 @@ describe("versioned database migrations", () => {
     const taskSql = (database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='generation_tasks'").get() as { sql: string }).sql;
     database.close();
 
-    expect(migrateDatabase(target)).toBe(12);
+    expect(migrateDatabase(target)).toBe(13);
     const upgraded = new Database(target, { readonly: true });
     expect((upgraded.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='generation_tasks'").get() as { sql: string }).sql).toBe(taskSql);
     for (const table of ["atlas_projects", "atlas_project_versions", "atlas_project_assets", "atlas_global_asset_outbox", "atlas_transfers", "atlas_agent_runs", "atlas_agent_events", "atlas_agent_operations"]) {
@@ -146,7 +148,28 @@ describe("versioned database migrations", () => {
         .toMatchObject({ name: "lease_generation", dflt_value: "0" });
     }
     upgraded.close();
-    expect(migrateDatabase(target)).toBe(12);
+    expect(migrateDatabase(target)).toBe(13);
+  });
+
+  it("upgrades schema twelve with the Atlas generation bridge only", () => {
+    const target = databasePath();
+    migrateDatabase(target);
+    const database = new Database(target);
+    database.exec(`
+      DELETE FROM schema_migrations WHERE version = 13;
+      DROP TABLE generation_destinations;
+      DROP TABLE atlas_project_generation_sessions;
+    `);
+    const atlasAssetSql = (database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='atlas_project_assets'").get() as { sql: string }).sql;
+    database.close();
+
+    expect(migrateDatabase(target)).toBe(13);
+    const upgraded = new Database(target, { readonly: true, fileMustExist: true });
+    expect((upgraded.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='atlas_project_assets'").get() as { sql: string }).sql).toBe(atlasAssetSql);
+    expect(upgraded.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='atlas_project_generation_sessions'").get()).toMatchObject({ name: "atlas_project_generation_sessions" });
+    expect(upgraded.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='generation_destinations'").get()).toMatchObject({ name: "generation_destinations" });
+    upgraded.close();
+    expect(migrateDatabase(target)).toBe(13);
   });
 
   it("rejects a database newer than the rollback compatibility ceiling", () => {
@@ -161,13 +184,13 @@ describe("versioned database migrations", () => {
     incompatible.close();
   });
 
-  it("reopens cleanly after the expand-only schema 12 migration", () => {
+  it("reopens cleanly after the expand-only schema 13 migration", () => {
     const target = databasePath();
-    expect(migrateDatabase(target)).toBe(12);
+    expect(migrateDatabase(target)).toBe(13);
     const database = new Database(target, { readonly: true, fileMustExist: true });
-    expect(assertSchemaVersion(database)).toBe(12);
+    expect(assertSchemaVersion(database)).toBe(13);
     database.close();
-    expect(migrateDatabase(target)).toBe(12);
+    expect(migrateDatabase(target)).toBe(13);
   });
 
   it("adopts the current production schema without rebuilding tables", () => {

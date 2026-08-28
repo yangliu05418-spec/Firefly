@@ -15,6 +15,7 @@ export type CreationReferenceInput = {
   bindingId?: string;
   uploadId?: string;
   assetId?: string;
+  atlasProjectAssetId?: string;
   snapshotReferenceId?: string;
   name: string;
   type: "image" | "video" | "audio";
@@ -25,6 +26,7 @@ export type CreationSnapshotDependencies = {
   readUploadState(uploadId: string): MediaObject | null;
   readUserAsset(assetId: string): UserAsset | null;
   readSnapshotReference(id: string): CreationSnapshotReference | null;
+  readAtlasProjectAsset?(id: string, ownerId: string): { ownerId: string; objectKey: string; contentType: string; size: number; etag: string; status: string } | null;
 };
 
 export class UnresolvedPromptReferenceError extends Error {
@@ -63,6 +65,11 @@ const resolveSource = (reference: CreationReferenceInput, ownerId: string, deps:
     if (!source || source.ownerId !== ownerId || source.status !== "ready" || !source.objectKey) return null;
     return { objectKey: source.objectKey, contentType: source.contentType, size: source.size, etag: source.etag };
   }
+  if (reference.atlasProjectAssetId) {
+    const source = deps.readAtlasProjectAsset?.(reference.atlasProjectAssetId, ownerId);
+    if (!source || source.ownerId !== ownerId || source.status !== "ready") return null;
+    return { objectKey: source.objectKey, contentType: source.contentType, size: source.size, etag: source.etag };
+  }
   let uploadId = reference.uploadId;
   if (reference.assetId) {
     const asset = deps.readUserAsset(reference.assetId);
@@ -95,7 +102,7 @@ export const buildCreationSnapshot = (input: {
       id, sourceType: input.sourceType, sourceId: input.sourceId, ownerId: input.ownerId,
       bindingId: reference.bindingId, position, mediaType: reference.type, role: reference.role,
       displayName: reference.name.slice(0, 180) || "参考素材", originalUploadId: reference.uploadId,
-      originalAssetId: reference.assetId, sourceObjectKey: source?.objectKey,
+      originalAssetId: reference.assetId ?? (reference.atlasProjectAssetId ? `atlas:${reference.atlasProjectAssetId}` : undefined), sourceObjectKey: source?.objectKey,
       objectKey: source ? taskReferenceObjectKey(input.ownerId, input.sourceType, input.sourceId, reference.bindingId, reference.name) : undefined,
       contentType: source?.contentType ?? "", size: source?.size ?? 0, etag: source?.etag ?? "",
       status: source ? "promoting" : "unavailable", lastError: source ? undefined : "素材源文件不可用",

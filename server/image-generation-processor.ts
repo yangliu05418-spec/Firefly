@@ -3,10 +3,12 @@ import type { ImageGenerationTask, MediaObject } from "./db.js";
 import { storeGeneratedImage } from "./generated-media.js";
 import { openRouterResolution } from "./image-models.js";
 import { classifyOpenRouterFailure, downloadGeneratedImage, generateSingleImage, isRetryableOpenRouterFailure, OpenRouterError } from "./openrouter.js";
-import type { ImageGenerationQueuePayload } from "./redis.js";
+import { mediaQueue, type ImageGenerationQueuePayload } from "./redis.js";
 import { users } from "./store.js";
 import { signedProviderObjectUrl } from "./tos.js";
 import { UploadReferencePendingError } from "./asset-upload-admission.js";
+import { AtlasStore } from "./atlas-store.js";
+import { config } from "./config.js";
 
 export type ImageGenerationAttempt = {
   id: string;
@@ -20,6 +22,8 @@ export type ImageGenerationProcessorDependencies = {
   readUpload: typeof users.readUpload;
   readUploadState: typeof users.readUploadState;
   readSnapshotReference: typeof users.readCreationSnapshotReference;
+  readAtlasAsset?: (id: string, ownerId: string) => { ownerId: string; objectKey: string; kind: string; status: string } | null;
+  bindAtlasDestination?: (sourceId: string, outputKey: string, mediaId: string, now: number) => { id: string } | null;
   updateTask: typeof users.updateImageGeneration;
   signReference: (objectKey: string) => string;
   generate: typeof generateSingleImage;
@@ -29,11 +33,15 @@ export type ImageGenerationProcessorDependencies = {
 };
 
 let productionDependencies: ImageGenerationProcessorDependencies | undefined;
+let imageAtlasStore: AtlasStore | undefined;
+const projectStore = () => imageAtlasStore ??= new AtlasStore(config.databasePath);
 const defaultDependencies = () => productionDependencies ??= {
   readTask: (id) => users.readImageGeneration(id),
   readUpload: users.readUpload.bind(users),
   readUploadState: users.readUploadState.bind(users),
   readSnapshotReference: users.readCreationSnapshotReference.bind(users),
+  readAtlasAsset: (id, ownerId) => projectStore().readAsset(id, ownerId),
+  bindAtlasDestination: (sourceId, outputKey, mediaId, now) => projectStore().bindGenerationDestinationOutput(sourceId, outputKey, mediaId, now),
   updateTask: users.updateImageGeneration.bind(users),
   signReference: signedProviderObjectUrl,
   generate: generateSingleImage,
@@ -60,9 +68,16 @@ export const processImageGenerationAttempt = async (
   if (!task || task.status !== "running") return;
   if (task.ownerId !== job.data.ownerId) throw new UnrecoverableError("图片任务所有者校验失败");
 
-  const referenceSources: Array<{ uploadId?: string; snapshotReferenceId?: string }> =
+  const referenceSources: Array<{ uploadId?: string; snapshotReferenceId?: string; atlasProjectAssetId?: string }> =
     job.data.references ?? (job.data.referenceUploadIds ?? []).map((uploadId) => ({ uploadId }));
   const references = referenceSources.map((source) => {
+    if (source.atlasProjectAssetId) {
+      const asset = deps.readAtlasAsset?.(source.atlasProjectAssetId, job.data.ownerId);
+      if (!asset || asset.ownerId !== job.data.ownerId || asset.status !== "ready" || asset.kind !== "image") {
+        throw new UnrecoverableError("Atlas项目图片不存在或尚未就绪");
+      }
+      return deps.signReference(asset.objectKey);
+    }
     if (source.snapshotReferenceId) {
       const snapshotReference = deps.readSnapshotReference(source.snapshotReferenceId);
       if (!snapshotReference || snapshotReference.ownerId !== job.data.ownerId || snapshotReference.status !== "ready" || !snapshotReference.objectKey || snapshotReference.mediaType !== "image") {
@@ -107,6 +122,15 @@ export const processImageGenerationAttempt = async (
         deps.discard(media);
         return;
       }
+      const destination = deps.bindAtlasDestination?.(task.id, `image:${index}`, media.id, Date.now());
+      if (destination) void mediaQueue.add("import-atlas-generation", { destinationId: destination.id }, {
+        jobId: `atlas-destination-${destination.id}`, attempts: 6,
+        backoff: { type: "exponential", delay: 3000, jitter: .5 },
+        removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 },
+      }).catch((error) => console.warn(JSON.stringify({
+        type: "atlas_destination_handoff_failed", at: new Date().toISOString(), taskId: task.id,
+        destinationId: destination.id, code: (error as { code?: string }).code ?? "unknown",
+      })));
       console.info(JSON.stringify({ type: "image_generation_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, mediaId: media.id, index, bytes: body.length, contentType }));
     } catch (error) {
       const rawMessage = errorMessage(error);

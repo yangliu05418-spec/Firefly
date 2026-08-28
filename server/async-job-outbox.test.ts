@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { dispatchPendingAsyncJobs, reconcileDispatchedAsyncJobs, requeueExhaustedAsyncJob, type AsyncJobQueues } from "./async-job-outbox.js";
+import { AtlasStore } from "./atlas-store.js";
 import { UserStore, type StoredTask } from "./db.js";
 import { migrateDatabase } from "./migrations.js";
 
@@ -16,7 +17,7 @@ const createStore = () => {
   migrateDatabase(databasePath);
   const store = new UserStore(databasePath);
   const owner = store.upsertFromFeishu({ openId: "ou_owner", unionId: "on_owner", tenantKey: "tenant", email: "owner@dokuai.tv", name: "Owner", avatarUrl: "" });
-  return { store, owner };
+  return { store, owner, databasePath };
 };
 
 const task = (id: string, ownerId: string, createdAt = 100): StoredTask => ({
@@ -31,6 +32,39 @@ const queues = (add: ReturnType<typeof vi.fn>, getJob = vi.fn(async () => undefi
 };
 
 describe("durable async job outbox", () => {
+  it("commits the Atlas delivery destination in the same transaction as task, snapshot, and queue admission", () => {
+    const { store, owner, databasePath } = createStore();
+    const atlas = new AtlasStore(databasePath);
+    const now = 100;
+    try {
+      const project = atlas.createProject({ id: "atlas-project-1", ownerId: owner.id, title: "剪辑项目", now });
+      const sessionId = "atlas-generation-session-1";
+      expect(atlas.admitGenerationSession({ projectId: project.id, ownerId: owner.id, sessionId, title: "Atlas生成", now })).toMatchObject({ status: "created" });
+      const record = { ...task("task-with-atlas", owner.id, now), sessionId };
+      const intent = { queueName: "generation" as const, jobId: record.id, jobName: "generate", payload: { input: record.request } };
+
+      expect(store.admitTaskWithinLimit(record, 1, intent, undefined, {
+        ownerId: owner.id, projectId: project.id, sessionId, sourceType: "video", sourceId: record.id,
+        outputs: [{ id: "destination-video-1", outputKey: "video" }], now,
+      })).toMatchObject({ status: "created" });
+      expect(atlas.listGenerationDestinationsForSource("video", record.id)).toEqual([
+        expect.objectContaining({ id: "destination-video-1", status: "pending", projectId: project.id }),
+      ]);
+      expect(store.readAsyncJobIntent("generation", record.id)).toMatchObject({ status: "pending" });
+
+      const rejected = task("task-invalid-atlas", owner.id, now + 1);
+      expect(() => store.admitTaskWithinLimit(rejected, 2, { ...intent, jobId: rejected.id }, undefined, {
+        ownerId: owner.id, projectId: "missing-project", sessionId, sourceType: "video", sourceId: rejected.id,
+        outputs: [{ id: "destination-invalid", outputKey: "video" }], now: now + 1,
+      })).toThrow(/destination admission is invalid/);
+      expect(store.readTask(rejected.id)).toBeNull();
+      expect(store.readAsyncJobIntent("generation", rejected.id)).toBeNull();
+    } finally {
+      atlas.close();
+      store.close();
+    }
+  });
+
   it("commits task admission and queue intent in one capacity-checked transaction", () => {
     const { store, owner } = createStore();
     const first = task("task-1", owner.id);

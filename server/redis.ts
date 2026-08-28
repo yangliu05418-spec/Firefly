@@ -29,7 +29,7 @@ export type ImageGenerationQueuePayload = {
   ratio: string;
   resolution: string;
   count: number;
-  references?: { uploadId?: string; snapshotReferenceId?: string }[];
+  references?: { uploadId?: string; snapshotReferenceId?: string; atlasProjectAssetId?: string }[];
   /** Legacy queue payload retained while old jobs drain. */
   referenceUploadIds?: string[];
 };

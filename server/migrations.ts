@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 
-export const CURRENT_SCHEMA_VERSION = 12;
+export const CURRENT_SCHEMA_VERSION = 13;
 // Compatibility release for the Atlas generation bridge. This image still
 // requires schema 12, but can safely run after the expand-only schema 13
 // migration. The feature image advances CURRENT to 13 only after this build is
@@ -714,6 +714,51 @@ const addAtlasProjectTables = (database: Database.Database) => {
   `);
 };
 
+const addAtlasGenerationBridge = (database: Database.Database) => {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS atlas_project_generation_sessions (
+      owner_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (owner_id, project_id),
+      UNIQUE (session_id),
+      FOREIGN KEY (owner_id) REFERENCES users(id),
+      FOREIGN KEY (project_id) REFERENCES atlas_projects(id),
+      FOREIGN KEY (session_id) REFERENCES creation_sessions(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS generation_destinations (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      source_type TEXT NOT NULL CHECK (source_type IN ('image', 'video')),
+      source_id TEXT NOT NULL,
+      output_key TEXT NOT NULL,
+      output_media_id TEXT,
+      atlas_asset_id TEXT,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'copying', 'ready', 'failed', 'skipped')),
+      attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+      last_error_code TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      UNIQUE (owner_id, project_id, source_type, source_id, output_key),
+      FOREIGN KEY (owner_id) REFERENCES users(id),
+      FOREIGN KEY (project_id) REFERENCES atlas_projects(id),
+      FOREIGN KEY (session_id) REFERENCES creation_sessions(id),
+      FOREIGN KEY (atlas_asset_id) REFERENCES atlas_project_assets(id)
+    );
+    CREATE INDEX IF NOT EXISTS generation_destinations_project_updated_idx
+      ON generation_destinations(project_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS generation_destinations_pending_idx
+      ON generation_destinations(status, updated_at)
+      WHERE status IN ('pending', 'failed');
+  `);
+};
+
 export const migrateDatabase = (databasePath: string) => {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const database = new Database(databasePath);
@@ -772,6 +817,10 @@ export const migrateDatabase = (databasePath: string) => {
       if (version < 12) {
         addAtlasProjectTables(database);
         database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(12, "add-atlas-projects", Date.now());
+      }
+      if (version < 13) {
+        addAtlasGenerationBridge(database);
+        database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(13, "add-atlas-generation-bridge", Date.now());
       }
       assertSchemaVersion(database);
     }).exclusive();

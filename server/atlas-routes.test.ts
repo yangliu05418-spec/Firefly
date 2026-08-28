@@ -11,6 +11,17 @@ import { UserStore } from "./db.js";
 import { migrateDatabase } from "./migrations.js";
 
 describe("Atlas project API", () => {
+  // WHATWG fetch rejects a fixed set of unsafe ports. Windows may assign one
+  // of them to listen(0), which makes an otherwise valid integration test fail
+  // before the request reaches Express.
+  const fetchForbiddenPorts = new Set([
+    1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69,
+    77, 79, 87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119,
+    123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515,
+    526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990,
+    993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000,
+    6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080,
+  ]);
   const directories: string[] = [];
   const stores: AtlasStore[] = [];
   const servers: ReturnType<express.Express["listen"]>[] = [];
@@ -94,10 +105,18 @@ describe("Atlas project API", () => {
     app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
       res.status(500).json({ error: error instanceof Error ? error.message : "unexpected" });
     });
-    const server = app.listen(0, "127.0.0.1");
-    servers.push(server);
-    await new Promise<void>((resolve) => server.once("listening", resolve));
-    const { port } = server.address() as AddressInfo;
+    let server: ReturnType<express.Express["listen"]>;
+    let port = 0;
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      server = app.listen(0, "127.0.0.1");
+      await new Promise<void>((resolve) => server.once("listening", resolve));
+      port = (server.address() as AddressInfo).port;
+      if (!fetchForbiddenPorts.has(port)) break;
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      port = 0;
+    }
+    if (!port) throw new Error("Unable to allocate a fetch-safe test port");
+    servers.push(server!);
     const request = async (url: string, init: RequestInit = {}, requester = owner.id) => fetch(`http://127.0.0.1:${port}/api/atlas${url}`, {
       ...init,
       headers: { "content-type": "application/json", "x-test-user": requester, ...init.headers },
@@ -125,6 +144,34 @@ describe("Atlas project API", () => {
     expect(await api.json(renamed)).toMatchObject({ title: "正式片名", revision: 0 });
     expect((await api.request(`/projects/${project.id}`, { method: "DELETE" }, api.other.id)).status).toBe(404);
     expect((await api.request(`/projects/${project.id}`, { method: "DELETE" })).status).toBe(204);
+  });
+
+  it("binds one durable Firefly generation session and isolates destination recovery", async () => {
+    const api = await setup();
+    const project = await api.json<{ id: string }>(await api.request("/projects", {
+      method: "POST", body: JSON.stringify({ title: "生成投递" }),
+    }));
+    const first = await api.request(`/projects/${project.id}/generation-session`, { method: "POST" });
+    expect(first.status).toBe(201);
+    const session = await api.json<{ sessionId: string; projectId: string }>(first);
+    expect(session.projectId).toBe(project.id);
+    expect(await api.json(await api.request(`/projects/${project.id}/generation-session`, { method: "POST" }))).toEqual(session);
+    expect((await api.request(`/projects/${project.id}/generation-session`, { method: "POST" }, api.other.id)).status).toBe(404);
+
+    api.store.createGenerationDestinations({
+      ownerId: api.owner.id, projectId: project.id, sessionId: session.sessionId,
+      sourceType: "video", sourceId: "video-task-1",
+      outputs: [{ id: "destination-1", outputKey: "video" }], now: 1_000,
+    });
+    expect(api.store.claimGenerationDestination("destination-1", 1_001)).toMatchObject({ status: "copying" });
+    api.store.releaseGenerationDestination("destination-1", undefined, "TOS_TEMPORARY_ERROR", 1_002);
+    const list = await api.json<{ items: Array<{ id: string; status: string }> }>(await api.request(`/projects/${project.id}/generation-destinations`));
+    expect(list.items).toEqual([expect.objectContaining({ id: "destination-1", status: "failed" })]);
+    expect((await api.request(`/projects/${project.id}/generation-destinations`, {}, api.other.id)).status).toBe(404);
+    expect((await api.request(`/projects/${project.id}/generation-destinations/destination-1/retry`, { method: "POST" }, api.other.id)).status).toBe(404);
+    const retry = await api.request(`/projects/${project.id}/generation-destinations/destination-1/retry`, { method: "POST" });
+    expect(retry.status).toBe(202);
+    expect(await api.json(retry)).toMatchObject({ id: "destination-1", status: "pending" });
   });
 
   it("returns a conflict for a second editor and supports renew, release and takeover", async () => {

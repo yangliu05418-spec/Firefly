@@ -1,18 +1,14 @@
 import crypto from "node:crypto";
 import express, { type NextFunction, type Request, type RequestHandler, type Response } from "express";
 import { z } from "zod";
-import { AtlasStore, type AtlasGlobalAssetRegistration, type AtlasMediaKind, type AtlasProject, type AtlasProjectAsset, type AtlasTransfer, type AtlasTransferPart } from "./atlas-store.js";
+import { AtlasStore, type AtlasGenerationDestination, type AtlasGlobalAssetRegistration, type AtlasMediaKind, type AtlasProject, type AtlasProjectAsset, type AtlasTransfer, type AtlasTransferPart } from "./atlas-store.js";
+import { AtlasImportError, importFireflySourceIntoAtlasProject } from "./atlas-import-service.js";
 
 const GIB = 1024 * 1024 * 1024;
 const DEFAULT_PART_SIZE = 16 * 1024 * 1024;
 const DEFAULT_TRANSFER_TTL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_LEASE_TTL_MS = 45_000;
 const DEFAULT_MAX_ACTIVE_TRANSFERS_PER_USER = 8;
-// TOS CopyObject accepts source objects up to 5 GiB. Atlas local multipart
-// upload remains 8 GiB; a larger existing Firefly object must be selected from
-// the device until durable UploadPartCopy is implemented.
-const TOS_COPY_OBJECT_MAX_BYTES = 5 * GIB;
-
 export type AtlasVerifiedObject = { size: number; contentType: string; etag: string; metadata?: Record<string, string> };
 export type AtlasImportSource = {
   objectKey: string;
@@ -46,6 +42,7 @@ export type AtlasRouterDependencies = {
   }) => unknown | Promise<unknown>;
   enabled?: boolean;
   agentEnabled?: boolean;
+  generateEnabled?: boolean;
   maxUploadBytes?: number;
   partSize?: number;
   leaseTtlMs?: number;
@@ -61,6 +58,7 @@ const asyncRoute = (handler: (req: Request, res: Response) => Promise<unknown>):
   (req, res, next) => void handler(req, res).catch((error) => {
     if (error instanceof z.ZodError) return res.status(400).json({ error: error.issues[0]?.message ?? "请求参数无效", code: "ATLAS_REQUEST_INVALID" });
     if (error instanceof AtlasRouteError) return res.status(error.status).json({ error: error.message, code: error.code });
+    if (error instanceof AtlasImportError) return res.status(error.status).json({ error: error.message, code: error.code });
     next(error);
   });
 
@@ -91,6 +89,14 @@ const publicAsset = (asset: AtlasProjectAsset) => ({
   kind: asset.kind, fileName: asset.fileName, contentType: asset.contentType, size: asset.size,
   status: asset.status, error: asset.error, createdAt: asset.createdAt, updatedAt: asset.updatedAt,
   mediaUrl: asset.status === "ready" ? `/api/atlas/project-assets/${asset.id}/media` : undefined,
+});
+const publicDestination = (destination: AtlasGenerationDestination) => ({
+  id: destination.id, projectId: destination.projectId, sessionId: destination.sessionId,
+  sourceType: destination.sourceType, sourceId: destination.sourceId, outputKey: destination.outputKey,
+  outputMediaId: destination.outputMediaId, atlasAssetId: destination.atlasAssetId,
+  status: destination.status, attemptCount: destination.attemptCount,
+  errorCode: destination.lastErrorCode, createdAt: destination.createdAt,
+  updatedAt: destination.updatedAt, completedAt: destination.completedAt,
 });
 const publicTransfer = (transfer: AtlasTransfer) => ({
   id: transfer.id, projectId: transfer.projectId, assetId: transfer.assetId, versionId: transfer.versionId,
@@ -277,7 +283,7 @@ export const createAtlasRouter = (dependencies: AtlasRouterDependencies) => {
     const user = res.locals.user as { id: string; email?: string; name?: string; avatarUrl?: string };
     res.json({
       user: { id: user.id, email: user.email ?? "", name: user.name ?? "", avatarUrl: user.avatarUrl ?? "" },
-      capabilities: { agent: dependencies.agentEnabled !== false, maxUploadBytes, partSize, uploadConcurrency: 3 },
+      capabilities: { agent: dependencies.agentEnabled !== false, generate: dependencies.generateEnabled !== false, maxUploadBytes, partSize, uploadConcurrency: 3 },
     });
   }));
 
@@ -529,45 +535,45 @@ export const createAtlasRouter = (dependencies: AtlasRouterDependencies) => {
     if (!dependencies.store.readProject(projectId, ownerId)) throw new AtlasRouteError(404, "ATLAS_PROJECT_NOT_FOUND", "Atlas项目不存在");
     const source = await dependencies.resolveImportSource({ ownerId, sourceType: body.sourceType, sourceId: body.sourceId });
     if (!source) throw new AtlasRouteError(404, "ATLAS_IMPORT_SOURCE_NOT_FOUND", "要导入的素材不存在");
-    if (source.size > TOS_COPY_OBJECT_MAX_BYTES) {
-      throw new AtlasRouteError(422, "ATLAS_IMPORT_TOO_LARGE", "该资产超过5GiB，请从本机直接导入以使用可续传上传");
-    }
-    const assetId = randomId();
-    const objectKey = atlasAssetObjectKey(ownerId, projectId, assetId, source.fileName);
-    const created = dependencies.store.createImportedAsset({
-      id: assetId, ownerId, projectId, sourceType: body.sourceType, sourceId: body.sourceId, kind: source.kind,
-      objectKey, fileName: safeName(source.fileName), contentType: source.contentType, size: source.size, now: now(),
+    const existing = dependencies.store.listAssets(projectId, ownerId, 1000, 0)?.find((asset) =>
+      asset.sourceType === body.sourceType && asset.sourceId === body.sourceId && !asset.deletedAt);
+    const ready = await importFireflySourceIntoAtlasProject({
+      store: dependencies.store, storage, ownerId, projectId, sourceType: body.sourceType,
+      sourceId: body.sourceId, source, now: now(), assetId: randomId(),
     });
-    if (created.status === "missing") throw new AtlasRouteError(404, "ATLAS_PROJECT_NOT_FOUND", "Atlas项目不存在");
-    if (created.status === "existing" && created.asset.status === "ready") return res.json(publicAsset(created.asset));
-    const target = created.status === "existing"
-      ? dependencies.store.prepareImportedAssetRetry(created.asset.id, ownerId, now())!
-      : created.asset;
-    try {
-      let verified: AtlasVerifiedObject | undefined;
-      try {
-        verified = await storage.verifyObject(target.objectKey);
-      } catch (verificationError) {
-        if (!isObjectNotFound(verificationError)) throw verificationError;
-        try {
-          await storage.copyObject({ sourceObjectKey: source.objectKey, destinationObjectKey: target.objectKey, contentType: source.contentType, fileName: source.fileName });
-        } catch (copyError) {
-          try { verified = await storage.verifyObject(target.objectKey); }
-          catch (reconcileError) { if (isObjectNotFound(reconcileError)) throw copyError; throw reconcileError; }
-        }
-        verified ??= await storage.verifyObject(target.objectKey);
-      }
-      if (!verified) throw new AtlasRouteError(502, "ATLAS_IMPORT_VERIFY_FAILED", "导入素材未能完成校验，请重试");
-      if (verified.size !== source.size) throw new AtlasRouteError(422, "ATLAS_IMPORT_SIZE_MISMATCH", "导入素材完整性校验失败");
-      if (verified.contentType.split(";", 1)[0]!.trim().toLowerCase() !== source.contentType.split(";", 1)[0]!.trim().toLowerCase()) {
-        throw new AtlasRouteError(422, "ATLAS_IMPORT_TYPE_MISMATCH", "导入素材类型校验失败");
-      }
-      const ready = dependencies.store.markAssetReady(target.id, ownerId, verified, now())!;
-      res.status(created.status === "created" ? 201 : 200).json(publicAsset(ready));
-    } catch (error) {
-      dependencies.store.markAssetFailed(target.id, ownerId, error instanceof Error ? error.message : "素材导入失败", now());
-      throw error;
-    }
+    res.status(existing ? 200 : 201).json(publicAsset(ready));
+  }));
+
+  router.post("/projects/:id/generation-session", asyncRoute(async (req, res) => {
+    if (dependencies.generateEnabled === false) throw new AtlasRouteError(404, "ATLAS_GENERATE_DISABLED", "Atlas生成能力尚未开放");
+    const ownerId = userId(res);
+    const projectId = param(req.params.id);
+    const project = dependencies.store.readProject(projectId, ownerId);
+    if (!project) throw new AtlasRouteError(404, "ATLAS_PROJECT_NOT_FOUND", "Atlas项目不存在");
+    const result = dependencies.store.admitGenerationSession({
+      projectId, ownerId, sessionId: randomId(), title: `Atlas · ${project.title}`.slice(0, 120), now: now(),
+    });
+    if (result.status === "missing") throw new AtlasRouteError(404, "ATLAS_PROJECT_NOT_FOUND", "Atlas项目不存在");
+    res.status(result.status === "created" ? 201 : 200).json({ sessionId: result.sessionId, projectId });
+  }));
+
+  router.get("/projects/:id/generation-destinations", asyncRoute(async (req, res) => {
+    if (dependencies.generateEnabled === false) throw new AtlasRouteError(404, "ATLAS_GENERATE_DISABLED", "Atlas生成能力尚未开放");
+    const ownerId = userId(res);
+    const projectId = param(req.params.id);
+    const items = dependencies.store.listGenerationDestinations(projectId, ownerId, 200);
+    if (!items) throw new AtlasRouteError(404, "ATLAS_PROJECT_NOT_FOUND", "Atlas项目不存在");
+    res.json({ items: items.map(publicDestination) });
+  }));
+
+  router.post("/projects/:id/generation-destinations/:destinationId/retry", asyncRoute(async (req, res) => {
+    if (dependencies.generateEnabled === false) throw new AtlasRouteError(404, "ATLAS_GENERATE_DISABLED", "Atlas生成能力尚未开放");
+    const ownerId = userId(res);
+    const projectId = param(req.params.id);
+    if (!dependencies.store.readProject(projectId, ownerId)) throw new AtlasRouteError(404, "ATLAS_PROJECT_NOT_FOUND", "Atlas项目不存在");
+    const destination = dependencies.store.retryGenerationDestination(param(req.params.destinationId), ownerId, projectId, now());
+    if (!destination) throw new AtlasRouteError(404, "ATLAS_DESTINATION_NOT_FOUND", "生成结果投递记录不存在或无需重试");
+    res.status(202).json(publicDestination(destination));
   }));
 
   router.delete("/projects/:id/assets/:assetId", asyncRoute(async (req, res) => {

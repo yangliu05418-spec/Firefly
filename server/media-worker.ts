@@ -19,9 +19,17 @@ import { archiveTransferStrategy } from "./archive-state.js";
 import { tosArchiveErrorCode } from "./tos-errors.js";
 import { AtlasStore, type AtlasGlobalAssetRegistration } from "./atlas-store.js";
 import { registerAtlasGlobalExport } from "./atlas-global-assets.js";
+import { createAtlasStorage, resolveAtlasImportSource } from "./atlas-runtime.js";
+import { importFireflySourceIntoAtlasProject } from "./atlas-import-service.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const atlasStore = new AtlasStore(config.databasePath);
+const atlasStorage = createAtlasStorage(async (objectKey) => {
+  await mediaQueue.add("delete-atlas-object", { objectKey }, {
+    jobId: `atlas-delete-${crypto.createHash("sha256").update(objectKey).digest("hex").slice(0, 32)}`,
+    attempts: 8, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: true,
+  });
+});
 const numberHeader = (value: unknown) => Number(value ?? 0) || 0;
 const recoveryBucketMs = 15 * 60 * 1000;
 const archivePollBucketMs = 10 * 1000;
@@ -54,6 +62,16 @@ const enqueueLivePreview = async (taskId: string) => {
   });
   return true;
 };
+const enqueueAtlasVideoDestinations = async (taskId: string) => {
+  for (const destination of atlasStore.listGenerationDestinationsForSource("video", taskId)) {
+    if (!["pending", "failed"].includes(destination.status)) continue;
+    await mediaQueue.add("import-atlas-generation", { destinationId: destination.id }, {
+      jobId: `atlas-destination-${destination.id}`, attempts: 6,
+      backoff: { type: "exponential", delay: 3000, jitter: .5 },
+      removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 },
+    });
+  }
+};
 const finalizeCanvasVideoPreview = async (taskId: string) => {
   users.updateCanvasProjectAssetStatusBySource("generation", taskId, "ready");
   const canvasJob = users.readCanvasJobByProviderTask(taskId);
@@ -68,7 +86,7 @@ const createTaskPreview = async (taskId: string, sourceUrl?: string) => {
   if (!config.tosPreviewTranscodeEnabled) return false;
   const task = await readTask(taskId, true);
   if (!task || task.deletedAt || !task.ownerId) return false;
-  if (users.readTaskMedia(taskId, "preview")) { await finalizeCanvasVideoPreview(taskId); return true; }
+  if (users.readTaskMedia(taskId, "preview")) { await finalizeCanvasVideoPreview(taskId); await enqueueAtlasVideoDestinations(taskId); return true; }
   const leaseKey = `media:preview:lease:${taskId}`;
   const leaseToken = crypto.randomUUID();
   const acquired = await connection.set(leaseKey, leaseToken, "PX", previewLeaseMs, "NX");
@@ -97,6 +115,7 @@ const createTaskPreview = async (taskId: string, sourceUrl?: string) => {
     const committed = users.commitTaskMediaIfActive(task.id, { id: `${task.id}:preview`, ownerId: task.ownerId, taskId: task.id, kind: "preview", objectKey: previewKey, status: "ready", fileName: "preview.mp4", contentType: "video/mp4", size, etag: String(previewData.etag ?? previewHeaders.etag ?? "").replace(/^"|"$/g, ""), createdAt: now, updatedAt: now });
     if (!committed) { await deleteObject(previewKey); return false; }
     await finalizeCanvasVideoPreview(task.id);
+    await enqueueAtlasVideoDestinations(task.id);
     console.info(JSON.stringify({ type: "tos_preview_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, source: sourceUrl ? "provider" : "tos", sourceBytes: output?.size, previewBytes: size, ratio: output?.size ? Number((size / output.size).toFixed(3)) : undefined, atoms: structure.atoms, elapsedMs: Date.now() - startedAt, requestId: previewHead.requestId }));
     return true;
   } catch (error) {
@@ -232,6 +251,7 @@ const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputF
     const contentType = String(dataOut.contentType ?? headers["content-type"] ?? (data.outputFormat === "mov" ? "video/quicktime" : "video/mp4"));
     const committed = users.commitTaskMediaIfActive(task.id, { id: `${task.id}:output`, ownerId: task.ownerId, taskId: task.id, kind: "output", objectKey, status: "ready", fileName: `result.${data.outputFormat}`, contentType, size, etag, createdAt: now, updatedAt: now }, true);
     if (!committed) { await deleteObject(objectKey); return; }
+    if (!config.tosPreviewTranscodeEnabled) await enqueueAtlasVideoDestinations(task.id);
     users.deleteMediaArchiveCheckpoint(task.id);
     let posterReady = false;
     try {
@@ -330,6 +350,54 @@ const deletePendingMedia = async (taskId?: string) => {
   if (firstError) throw firstError;
 };
 
+const processAtlasGenerationDestination = async (destinationId: string) => {
+  const current = atlasStore.readGenerationDestinationById(destinationId);
+  if (!current || current.status === "ready" || current.status === "skipped") return;
+  if (!atlasStore.readProject(current.projectId, current.ownerId)) {
+    atlasStore.skipGenerationDestination(current.id, "ATLAS_PROJECT_DELETED", Date.now());
+    return;
+  }
+  const sourceType = current.sourceType === "video" ? "generation" as const : "generated" as const;
+  const sourceId = current.sourceType === "video" ? current.sourceId : current.outputMediaId;
+  if (!sourceId) {
+    const task = users.readImageGeneration(current.sourceId);
+    if (!task || task.deletedAt) atlasStore.skipGenerationDestination(current.id, "ATLAS_SOURCE_DELETED", Date.now());
+    else if (task.status !== "running") atlasStore.skipGenerationDestination(current.id, "ATLAS_OUTPUT_NOT_CREATED", Date.now());
+    return;
+  }
+  const source = await resolveAtlasImportSource({ ownerId: current.ownerId, sourceType, sourceId });
+  if (!source) {
+    const video = current.sourceType === "video" ? users.readTask(current.sourceId, true) : null;
+    if (video?.deletedAt) atlasStore.skipGenerationDestination(current.id, "ATLAS_SOURCE_DELETED", Date.now());
+    return;
+  }
+  const claimed = atlasStore.claimGenerationDestination(current.id, Date.now());
+  if (!claimed) return;
+  console.info(JSON.stringify({
+    type: "atlas_destination_pending", at: new Date().toISOString(), destinationId: claimed.id,
+    taskId: claimed.sourceId, projectId: claimed.projectId, userId: claimed.ownerId, attempt: claimed.attemptCount,
+  }));
+  try {
+    const asset = await importFireflySourceIntoAtlasProject({
+      store: atlasStore, storage: atlasStorage, ownerId: claimed.ownerId, projectId: claimed.projectId,
+      sourceType, sourceId, source, now: Date.now(),
+    });
+    atlasStore.completeGenerationDestination(claimed.id, current.outputMediaId, asset.id, Date.now());
+    console.info(JSON.stringify({
+      type: "atlas_destination_ready", at: new Date().toISOString(), destinationId: claimed.id,
+      taskId: claimed.sourceId, projectId: claimed.projectId, userId: claimed.ownerId, assetId: asset.id,
+    }));
+  } catch (error) {
+    const code = String((error as { code?: string }).code ?? "ATLAS_IMPORT_FAILED");
+    atlasStore.releaseGenerationDestination(claimed.id, current.outputMediaId, code, Date.now());
+    console.warn(JSON.stringify({
+      type: "atlas_destination_failed", at: new Date().toISOString(), destinationId: claimed.id,
+      taskId: claimed.sourceId, projectId: claimed.projectId, userId: claimed.ownerId, code,
+    }));
+    throw error;
+  }
+};
+
 const worker = new Worker("media", async (job) => {
   if (job.name === "archive-output") {
     const attempt = job.attemptsMade + 1;
@@ -342,6 +410,7 @@ const worker = new Worker("media", async (job) => {
   if (job.name === "copy-canvas-asset") return copyPreparedCanvasAsset(job.data.assetId);
   if (job.name === "promote-creation-reference") return config.taskReferenceArchiveEnabled ? copyCreationSnapshotReference(job.data.referenceId) : undefined;
   if (job.name === "delete-creation-reference") return deleteCreationSnapshotReference(job.data.referenceId);
+  if (job.name === "import-atlas-generation") return processAtlasGenerationDestination(job.data.destinationId);
   if (job.name === "delete-atlas-object") {
     const objectKey = typeof job.data.objectKey === "string" ? job.data.objectKey : "";
     if (!objectKey.startsWith("atlas/")) throw new Error("Atlas delete job contains an invalid object key");
@@ -587,6 +656,14 @@ const registerPendingAtlasGlobalAsset = async (registration: AtlasGlobalAssetReg
 };
 const reconcileAtlasStorage = async () => {
   const now = Date.now();
+  const bucket = Math.floor(now / 60_000);
+  for (const destination of atlasStore.listRecoverableGenerationDestinations(100)) {
+    await mediaQueue.add("import-atlas-generation", { destinationId: destination.id }, {
+      jobId: `atlas-destination-${destination.id}-${bucket}`, attempts: 6,
+      backoff: { type: "exponential", delay: 3000, jitter: .5 },
+      removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 },
+    });
+  }
   for (const registration of atlasStore.listPendingGlobalAssetRegistrations(100)) {
     await registerPendingAtlasGlobalAsset(registration, now);
   }

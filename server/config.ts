@@ -78,6 +78,7 @@ export const config = {
   // Atlas is an optional sub-application. New and rollback environments must
   // fail closed until the operator explicitly enables the matching runtime.
   atlasEnabled: (process.env.ATLAS_ENABLED ?? "false").toLowerCase() === "true",
+  atlasGenerateEnabled: (process.env.ATLAS_GENERATE_ENABLED ?? "true").toLowerCase() === "true",
   atlasAgentEnabled: (process.env.ATLAS_AGENT_ENABLED ?? "false").toLowerCase() === "true",
   atlasMaxUploadBytes: positiveInt("ATLAS_MAX_UPLOAD_BYTES", 8 * 1024 * 1024 * 1024),
   atlasAgentModel: process.env.ATLAS_AGENT_MODEL?.trim() || canvasTextModel,

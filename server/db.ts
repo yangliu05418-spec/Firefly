@@ -50,6 +50,16 @@ export type StoredTask = {
   deletedAt?: number;
 };
 
+export type GenerationDestinationAdmission = {
+  ownerId: string;
+  projectId: string;
+  sessionId: string;
+  sourceType: "image" | "video";
+  sourceId: string;
+  outputs: Array<{ id: string; outputKey: string }>;
+  now: number;
+};
+
 export type MediaArchiveCheckpoint = {
   taskId: string;
   strategy: "url_fetch" | "stream_multipart";
@@ -894,8 +904,32 @@ export class UserStore {
     return row.count;
   }
 
+  private insertGenerationDestinationAdmission(input: GenerationDestinationAdmission) {
+    const project = this.database.prepare(`
+      SELECT 1 AS ok FROM atlas_projects
+      WHERE id = ? AND owner_id = ? AND deleted_at IS NULL
+    `).get(input.projectId, input.ownerId) as { ok: number } | undefined;
+    const session = this.database.prepare(`
+      SELECT 1 AS ok FROM atlas_project_generation_sessions
+      WHERE project_id = ? AND owner_id = ? AND session_id = ?
+    `).get(input.projectId, input.ownerId, input.sessionId) as { ok: number } | undefined;
+    if (!project || !session || input.sourceId !== input.sourceId.trim() || input.outputs.length === 0) {
+      throw new Error("Atlas generation destination admission is invalid");
+    }
+    const insert = this.database.prepare(`
+      INSERT INTO generation_destinations
+        (id, owner_id, project_id, session_id, source_type, source_id, output_key, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+      ON CONFLICT(owner_id, project_id, source_type, source_id, output_key) DO NOTHING
+    `);
+    for (const output of input.outputs) {
+      if (!output.id.trim() || !output.outputKey.trim()) throw new Error("Atlas generation destination output is invalid");
+      insert.run(output.id, input.ownerId, input.projectId, input.sessionId, input.sourceType, input.sourceId, output.outputKey, input.now, input.now);
+    }
+  }
+
   /** Atomically reserves one active generation slot and persists the queued task. */
-  admitTaskWithinLimit(task: StoredTask, limit: number, intent?: AsyncJobIntent, snapshot?: CreationSnapshotBundle) {
+  admitTaskWithinLimit(task: StoredTask, limit: number, intent?: AsyncJobIntent, snapshot?: CreationSnapshotBundle, destination?: GenerationDestinationAdmission) {
     return this.database.transaction(() => {
       const existing = this.readTask(task.id, true);
       if (existing) return { status: "existing" as const, task: existing };
@@ -903,6 +937,7 @@ export class UserStore {
       const created = this.saveTask(task);
       if (snapshot) this.insertCreationSnapshot(snapshot);
       if (intent) this.insertAsyncJobIntent(intent, task.createdAt);
+      if (destination) this.insertGenerationDestinationAdmission(destination);
       return { status: "created" as const, task: created };
     }).immediate();
   }
@@ -1115,7 +1150,7 @@ export class UserStore {
       .map((row) => mapImageGeneration(row)!);
   }
 
-  admitImageGenerationWithinLimit(task: ImageGenerationTask, limit: number, intent?: AsyncJobIntent, snapshot?: CreationSnapshotBundle) {
+  admitImageGenerationWithinLimit(task: ImageGenerationTask, limit: number, intent?: AsyncJobIntent, snapshot?: CreationSnapshotBundle, destination?: GenerationDestinationAdmission) {
     return this.database.transaction(() => {
       const existing = this.readImageGeneration(task.id, true);
       if (existing) return { status: "existing" as const, task: existing };
@@ -1124,6 +1159,7 @@ export class UserStore {
       const created = this.createImageGeneration(task);
       if (snapshot) this.insertCreationSnapshot(snapshot);
       if (intent) this.insertAsyncJobIntent(intent, task.createdAt);
+      if (destination) this.insertGenerationDestinationAdmission(destination);
       return { status: "created" as const, task: created };
     }).immediate();
   }
