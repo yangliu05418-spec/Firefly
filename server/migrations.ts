@@ -3,10 +3,11 @@ import path from "node:path";
 import Database from "better-sqlite3";
 
 export const CURRENT_SCHEMA_VERSION = 12;
-// The feature release requires Atlas schema 12. Rollback safety is provided by
-// the preceding compatibility release, whose independently tested range is
-// CURRENT=11/MAX=12 (see schema-rollback-compatibility.ts).
-export const MAX_SUPPORTED_SCHEMA_VERSION = 12;
+// Compatibility release for the Atlas generation bridge. This image still
+// requires schema 12, but can safely run after the expand-only schema 13
+// migration. The feature image advances CURRENT to 13 only after this build is
+// available as the rollback target.
+export const MAX_SUPPORTED_SCHEMA_VERSION = 13;
 
 const baseSchema = `
   CREATE TABLE IF NOT EXISTS users (
