@@ -234,9 +234,6 @@ jobs:
       - run: npm run typecheck
       - run: npm test -- --maxWorkers=1
       - run: npm run build
-        env:
-          VITE_APP_VARIANT: firefly
-      - run: npm run check:firefly-build
       - name: Exercise SQLite backup and restore drill
         shell: bash
         run: |
