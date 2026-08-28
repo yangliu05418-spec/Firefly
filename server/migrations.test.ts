@@ -125,6 +125,16 @@ describe("versioned database migrations", () => {
     incompatible.close();
   });
 
+  it("remains a valid rollback image after the expand-only schema 12 marker", () => {
+    const target = databasePath();
+    migrateDatabase(target);
+    const database = new Database(target);
+    database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (12, 'add-atlas-projects', ?)").run(Date.now());
+    expect(assertSchemaVersion(database)).toBe(12);
+    database.close();
+    expect(migrateDatabase(target)).toBe(12);
+  });
+
   it("adopts the current production schema without rebuilding tables", () => {
     const target = databasePath();
     migrateDatabase(target);
