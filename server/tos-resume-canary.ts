@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { config } from "./config.js";
-import { tos, tosConfigured } from "./tos.js";
+import { listAllUploadedParts, tos, tosConfigured } from "./tos.js";
 
 if (!tosConfigured()) throw new Error("TOS 配置不完整，无法执行 Multipart 续传权限探测");
 
@@ -14,13 +14,13 @@ try {
     forbidOverwrite: true,
   });
   uploadId = created.data.UploadId;
-  const listed = await tos.listParts({ bucket: config.tosBucket, key, uploadId, maxParts: 1 });
+  const listed = await listAllUploadedParts(key, uploadId);
   console.info(JSON.stringify({
     ok: true,
     type: "tos_multipart_resume_canary",
     at: new Date().toISOString(),
     listParts: true,
-    requestId: listed.requestId,
+    partCount: listed.length,
   }));
 } catch (error) {
   const failure = error as { code?: string; statusCode?: number; requestId?: string };

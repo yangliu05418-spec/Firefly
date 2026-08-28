@@ -24,11 +24,11 @@ describe("resumable TOS archive", () => {
       .mockRejectedValueOnce(Object.assign(new Error("missing"), { statusCode: 404 }))
       .mockResolvedValue({ data: { contentLength: totalSize, contentType: "video/mp4" }, headers: { "content-length": String(totalSize), "content-type": "video/mp4" } } as never);
     vi.spyOn(tos, "getObjectV2").mockResolvedValue({ statusCode: 206, data: { content: Buffer.from([0]) }, headers: { "content-range": `bytes 0-0/${totalSize}` } } as never);
-    const listParts = vi.spyOn(tos, "listParts").mockResolvedValue({ data: { Parts: [{ PartNumber: 1, ETag: '"etag-1"', Size: 5 * 1024 * 1024 }], IsTruncated: false } } as never);
     const create = vi.spyOn(tos, "createMultipartUpload");
     const complete = vi.spyOn(tos, "completeMultipartUpload").mockResolvedValue({} as never);
     const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
       const range = new Headers(init?.headers).get("range");
+      if (init?.method === "GET" && !range) return new Response(JSON.stringify({ Parts: [{ PartNumber: 1, ETag: '"etag-1"', Size: 5 * 1024 * 1024 }], IsTruncated: false }), { status: 200, headers: { "content-type": "application/json" } });
       if (range === "bytes=0-0") return new Response(new Uint8Array([0]), { status: 206, headers: { "content-range": `bytes 0-0/${totalSize}`, "content-type": "video/mp4" } });
       if (range === `bytes=${5 * 1024 * 1024}-${totalSize - 1}`) return new Response(new Uint8Array(5 * 1024 * 1024), { status: 206 });
       if (init?.method === "PUT") return new Response(null, { status: 200, headers: { etag: '"etag-2"' } });
@@ -39,7 +39,7 @@ describe("resumable TOS archive", () => {
 
     await rangedObjectFromUrl("outputs/result.mp4", "https://provider.test/result.mp4", "result.mp4", "video/mp4", undefined, 5 * 1024 * 1024, 3, { uploadId: "upload-existing" }, { resumed });
 
-    expect(listParts).toHaveBeenCalledWith(expect.objectContaining({ uploadId: "upload-existing" }));
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("uploadId=upload-existing"), expect.objectContaining({ method: "GET" }));
     expect(create).not.toHaveBeenCalled();
     expect(resumed).toHaveBeenCalledWith("upload-existing", 1);
     expect(fetchMock.mock.calls.filter(([, init]) => new Headers(init?.headers).get("range")?.startsWith(`bytes=${5 * 1024 * 1024}-`))).toHaveLength(1);
@@ -59,11 +59,11 @@ describe("resumable TOS archive", () => {
       .mockRejectedValueOnce(Object.assign(new Error("missing"), { statusCode: 404 }))
       .mockResolvedValue({ data: { contentLength: totalSize, contentType: "video/mp4" }, headers: { "content-length": String(totalSize), "content-type": "video/mp4" } } as never);
     vi.spyOn(tos, "getObjectV2").mockResolvedValue({ statusCode: 206, data: { content: Buffer.from([0]) }, headers: { "content-range": `bytes 0-0/${totalSize}` } } as never);
-    vi.spyOn(tos, "listParts").mockRejectedValue(Object.assign(new Error("AccessDenied"), { statusCode: 403, code: "AccessDenied" }));
     const create = vi.spyOn(tos, "createMultipartUpload");
     const complete = vi.spyOn(tos, "completeMultipartUpload").mockResolvedValue({} as never);
     const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
       const range = new Headers(init?.headers).get("range");
+      if (init?.method === "GET" && !range) return new Response(JSON.stringify({ Code: "AccessDenied" }), { status: 403, headers: { "content-type": "application/json" } });
       if (range === "bytes=0-0") return new Response(new Uint8Array([0]), { status: 206, headers: { "content-range": `bytes 0-0/${totalSize}`, "content-type": "video/mp4" } });
       if (range === `bytes=${5 * 1024 * 1024}-${totalSize - 1}`) return new Response(new Uint8Array(5 * 1024 * 1024), { status: 206 });
       if (init?.method === "PUT") return new Response(null, { status: 200, headers: { etag: '"etag-2"' } });
@@ -85,5 +85,26 @@ describe("resumable TOS archive", () => {
       uploadId: "upload-existing",
       parts: [{ partNumber: 1, eTag: "etag-1" }, { partNumber: 2, eTag: "etag-2" }],
     }));
+  });
+
+  it("rejects authoritative ListParts entries outside the current source shape", async () => {
+    config.tosAccessKeyId = "test-ak";
+    config.tosSecretAccessKey = "test-sk";
+    config.tosBucket = "test-bucket";
+    config.tosEndpoint = "tos.example.test";
+    const totalSize = 10 * 1024 * 1024;
+    vi.spyOn(tos, "headObject").mockRejectedValue(Object.assign(new Error("missing"), { statusCode: 404 }));
+    const complete = vi.spyOn(tos, "completeMultipartUpload").mockResolvedValue({} as never);
+    vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const range = new Headers(init?.headers).get("range");
+      if (range === "bytes=0-0") return new Response(new Uint8Array([0]), { status: 206, headers: { "content-range": `bytes 0-0/${totalSize}`, "content-type": "video/mp4" } });
+      if (init?.method === "GET" && !range) return new Response(JSON.stringify({ Parts: [{ PartNumber: 3, ETag: "unexpected" }], IsTruncated: false }), { status: 200 });
+      throw new Error("unexpected request");
+    }));
+    await expect(rangedObjectFromUrl(
+      "outputs/result.mp4", "https://provider.test/result.mp4", "result.mp4", "video/mp4", undefined,
+      5 * 1024 * 1024, 3, { uploadId: "upload-existing" },
+    )).rejects.toThrow(/超出当前对象范围/);
+    expect(complete).not.toHaveBeenCalled();
   });
 });

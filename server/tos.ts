@@ -407,15 +407,139 @@ const archiveHttpError = (message: string, statusCode: number, archiveStage: Tos
   return error;
 };
 
-export const listAllUploadedParts = async (key: string, uploadId: string) => {
+export const listPartsSigningInput = (bucket: string, key: string, uploadId: string, marker?: number) => ({
+  bucket,
+  key,
+  method: "GET" as const,
+  expires: 300,
+  query: {
+    uploadId,
+    "max-parts": "1000",
+    ...(marker === undefined ? {} : { "part-number-marker": String(marker) }),
+  },
+});
+
+const xmlText = (value: string) => value
+  .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+  .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+const xmlElement = (xml: string, name: string) => {
+  const match = new RegExp(`<${name}>([\\s\\S]*?)<\\/${name}>`, "i").exec(xml);
+  return match ? xmlText(match[1]!.trim()) : undefined;
+};
+
+export const parseListPartsXml = (xml: string) => {
+  if (!/<(?:[\w-]+:)?ListParts(?:Output|Result)\b/i.test(xml)) throw new Error("TOS ListParts 响应格式无效");
   const parts: { partNumber: number; eTag: string }[] = [];
+  for (const match of xml.matchAll(/<(?:[\w-]+:)?Part>([\s\S]*?)<\/(?:[\w-]+:)?Part>/gi)) {
+    const partNumber = Number(xmlElement(match[1]!, "PartNumber"));
+    const eTag = (xmlElement(match[1]!, "ETag") ?? "").replace(/^"|"$/g, "");
+    if (!Number.isSafeInteger(partNumber) || partNumber < 1 || partNumber > 10_000 || !eTag) {
+      throw new Error("TOS ListParts 分片数据无效");
+    }
+    parts.push({ partNumber, eTag });
+  }
+  const isTruncated = (xmlElement(xml, "IsTruncated") ?? "false").toLowerCase() === "true";
+  const markerText = xmlElement(xml, "NextPartNumberMarker");
+  const nextMarker = markerText === undefined || markerText === "" ? undefined : Number(markerText);
+  if (isTruncated && (!Number.isSafeInteger(nextMarker) || nextMarker! < 1 || nextMarker! > 10_000)) {
+    throw new Error("TOS ListParts 分页游标无效");
+  }
+  return { parts, isTruncated, nextMarker };
+};
+
+export const parseListPartsBody = (body: string) => {
+  if (!body.trimStart().startsWith("{")) return parseListPartsXml(body);
+  let value: unknown;
+  try { value = JSON.parse(body); }
+  catch { throw new Error("TOS ListParts JSON响应格式无效"); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("TOS ListParts JSON响应格式无效");
+  const record = value as Record<string, unknown>;
+  if (record.Parts !== undefined && !Array.isArray(record.Parts)) throw new Error("TOS ListParts JSON中的Parts无效");
+  const parts = (record.Parts ?? []).map((part) => {
+    if (!part || typeof part !== "object" || Array.isArray(part)) throw new Error("TOS ListParts 分片数据无效");
+    const item = part as Record<string, unknown>;
+    const partNumber = Number(item.PartNumber);
+    const eTag = typeof item.ETag === "string" ? item.ETag.trim().replace(/^"|"$/g, "") : "";
+    if (!Number.isSafeInteger(partNumber) || partNumber < 1 || partNumber > 10_000 || !eTag) throw new Error("TOS ListParts 分片数据无效");
+    return { partNumber, eTag };
+  });
+  const isTruncated = record.IsTruncated === true || record.IsTruncated === "true";
+  const nextMarker = record.NextPartNumberMarker === undefined || record.NextPartNumberMarker === null
+    ? undefined : Number(record.NextPartNumberMarker);
+  if (isTruncated && (!Number.isSafeInteger(nextMarker) || nextMarker! < 1 || nextMarker! > 10_000)) {
+    throw new Error("TOS ListParts 分页游标无效");
+  }
+  return { parts, isTruncated, nextMarker };
+};
+
+export const listAllUploadedPartsWith = async (
+  key: string,
+  uploadId: string,
+  dependencies: {
+    sign: (marker?: number) => string;
+    fetch: (url: string, init: RequestInit) => Promise<Pick<Response, "ok" | "status" | "text"> & { headers?: Pick<Headers, "get"> }>;
+  },
+) => {
+  const parts: { partNumber: number; eTag: string }[] = [];
+  const partNumbers = new Set<number>();
   let marker: number | undefined;
+  let pageCount = 0;
   do {
-    const response = await tos.listParts({ bucket: config.tosBucket, key, uploadId, maxParts: 1000, partNumberMarker: marker });
-    parts.push(...(response.data.Parts ?? []).map((part) => ({ partNumber: part.PartNumber, eTag: part.ETag.replace(/^"|"$/g, "") })));
-    marker = response.data.IsTruncated ? response.data.NextPartNumberMarker : undefined;
+    pageCount += 1;
+    if (pageCount > 10) throw new Error("TOS ListParts 分页数量超出上限");
+    let response: Awaited<ReturnType<typeof dependencies.fetch>>;
+    try {
+      response = await dependencies.fetch(dependencies.sign(marker), {
+        method: "GET",
+        signal: AbortSignal.timeout(Math.min(config.tosRequestTimeoutMs, 30_000)),
+      });
+    } catch {
+      // A native fetch error may embed the complete pre-signed URL. Never let
+      // that secret escape through application errors or structured logs.
+      throw Object.assign(new Error("TOS ListParts 网络请求失败"), { code: "TOS_LIST_PARTS_NETWORK_ERROR" });
+    }
+    let body: string;
+    try { body = await response.text(); }
+    catch { throw Object.assign(new Error("TOS ListParts 响应读取失败"), { code: "TOS_LIST_PARTS_RESPONSE_ERROR" }); }
+    if (!response.ok) {
+      let code = xmlElement(body, "Code");
+      if (!code && body.trimStart().startsWith("{")) {
+        try { const parsed = JSON.parse(body) as { Code?: unknown }; if (typeof parsed.Code === "string") code = parsed.Code; } catch { /* controlled below */ }
+      }
+      if (!code || !/^[A-Za-z][A-Za-z0-9_.-]{0,127}$/.test(code)) code = `HTTP_${response.status}`;
+      const rawRequestId = response.headers?.get("x-tos-request-id") ?? "";
+      const requestId = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(rawRequestId) ? rawRequestId : undefined;
+      throw Object.assign(new Error(`TOS ListParts 失败 (${code})`), {
+        statusCode: response.status,
+        code,
+        requestId,
+      });
+    }
+    const page = parseListPartsBody(body);
+    for (const part of page.parts) {
+      if (partNumbers.has(part.partNumber)) throw new Error("TOS ListParts 返回重复分片");
+      partNumbers.add(part.partNumber);
+    }
+    parts.push(...page.parts);
+    if (!page.isTruncated) marker = undefined;
+    else {
+      const nextMarker = page.nextMarker;
+      if (nextMarker === undefined || nextMarker <= (marker ?? 0)) throw new Error("TOS ListParts 分页游标未推进");
+      marker = nextMarker;
+    }
   } while (marker !== undefined);
   return parts;
+};
+
+export const listAllUploadedParts = async (key: string, uploadId: string) => {
+  requireTos();
+  // SDK 2.9.1 serializes extra normalized fields into ListParts on FNS and
+  // produces SignatureDoesNotMatch. Pre-sign only the documented query keys;
+  // the response remains the authoritative TOS part list used for completion.
+  return listAllUploadedPartsWith(key, uploadId, {
+    sign: (marker) => tos.getPreSignedUrl(listPartsSigningInput(config.tosBucket, key, uploadId, marker)),
+    fetch: (url, init) => fetch(url, init),
+  });
 };
 
 export const rangedObjectFromUrl = async (
@@ -461,6 +585,7 @@ export const rangedObjectFromUrl = async (
   if (uploadId) {
     try {
       knownParts = await listAllUploadedParts(key, uploadId);
+      if (knownParts.some((part) => part.partNumber > partCount)) throw new Error("TOS ListParts 分片超出当前对象范围");
       observer.resumed?.(uploadId, knownParts.length);
     } catch (error) {
       const statusCode = Number((error as { statusCode?: number; status?: number }).statusCode ?? (error as { status?: number }).status ?? 0) || undefined;
