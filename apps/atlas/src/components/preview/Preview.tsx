@@ -33,6 +33,7 @@ import { usePreviewSceneNavigation } from './usePreviewSceneNavigation';
 import { usePreviewSourceConfig } from './usePreviewSourceConfig';
 import { usePreviewViewGeometry } from './usePreviewViewGeometry';
 import { usePreviewViewport } from './usePreviewViewport';
+import { originalUi } from '../../firefly/i18n/originalUi';
 import { usePreviewWheelHandler } from './usePreviewWheelHandler';
 import { usePreviewInitialEditCameraView } from './usePreviewInitialEditCameraView';
 import { createPreviewEditorCameraClip } from './usePreviewEditCameraConfig';
@@ -729,7 +730,7 @@ export function Preview({ panelId, source, showTransparencyGrid, initialEdit }: 
       data-preview-panel-id={panelId}
       data-preview-editable={isEditableSource ? 'true' : 'false'}
       role="region"
-      aria-label="Preview"
+      aria-label={originalUi('original.previewRegion', 'Preview')}
       onMouseDownCapture={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}

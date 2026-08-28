@@ -338,6 +338,21 @@ export const MESSAGE_KEYS = [
   'original.inputMonitorOn',
   'original.composition',
   'original.timelineItem',
+  'original.previewRegion',
+  'original.alpha',
+  'original.off',
+  'original.on',
+  'original.currentTime',
+  'original.timelineSplitControls',
+  'original.resizeTrackSections',
+  'original.focusUp',
+  'original.focusDown',
+  'original.hideAdvancedAudio',
+  'original.showAdvancedAudio',
+  'original.playhead',
+  'original.setParent',
+  'original.showTrack',
+  'original.expandProperties',
 ] as const;
 
 export type MessageKey = (typeof MESSAGE_KEYS)[number];

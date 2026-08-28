@@ -70,7 +70,7 @@ export function TimelineToolbarChrome({
         <div
           className={`timeline-ruler-timecode ${timelineTimeDisplayMode === 'frames' ? 'frames' : 'time'}`}
           data-guided-target="timeline-timecode"
-          title="Current time / composition duration"
+          title={originalUi('original.currentTime', 'Current time / composition duration')}
         >
           {timelineTimeDisplayMode === 'frames' && (
             <span className="timeline-ruler-fps-value" title={`Composition frame rate: ${timelineFpsValue} fps`}>
@@ -81,11 +81,11 @@ export function TimelineToolbarChrome({
           <span
             className="timeline-ruler-current-time"
             onDoubleClick={onTimelineTimeDoubleClick}
-            title={timelineTimeDisplayMode === 'frames'
+            title={originalUi('original.currentTime', timelineTimeDisplayMode === 'frames'
               ? 'Double-click to show timecode'
               : hasInOutDisplayRange
                 ? 'Current time from In point - double-click to show frames'
-                : 'Current composition time - double-click to show frames'}
+                : 'Current composition time - double-click to show frames')}
           >
             {timelineTimeDisplayMode === 'frames' ? timelineCurrentFrame : formatTime(timelineRulerCurrentTime)}
           </span>

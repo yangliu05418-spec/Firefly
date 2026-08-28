@@ -1,6 +1,7 @@
 // After Effects-style pick whip for clip parenting.
 
 import { useCallback, useRef, type PointerEvent as ReactPointerEvent } from 'react';
+import { originalUi } from '../../firefly/i18n/originalUi';
 
 interface PickWhipProps {
   clipId: string;
@@ -60,7 +61,7 @@ export function PickWhip({
         ref={iconRef}
         type="button"
         className="pick-whip"
-        aria-label={`Set parent for ${clipName}`}
+        aria-label={`${originalUi('original.setParent', 'Set parent for')} ${clipName}`}
         aria-pressed={isDragging}
         disabled={disabled}
         title={dragTitle}
