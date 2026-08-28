@@ -142,6 +142,14 @@ jobs:
           grep -q 'failed_disk_space' ops/firefly-deploy.sh
           grep -q 'dist-server/reedit-smoke.js' ops/firefly-deploy.sh
           grep -q 'failed_reedit_smoke' ops/firefly-deploy.sh
+          grep -q 'atlas-agent:dist-server/atlas-agent-worker.js' ops/firefly-deploy.sh
+          grep -q 'env_flag_enabled ATLAS_ENABLED.*env_flag_enabled ATLAS_AGENT_ENABLED' ops/firefly-deploy.sh
+          grep -q '^sync_host_runtime' ops/firefly-deploy.sh
+          grep -q '^sync_atlas_assets' ops/firefly-deploy.sh
+          grep -q 'Atlas index references a missing asset' ops/firefly-deploy.sh
+          grep -q 'runtime_container:/app/ops' ops/firefly-deploy.sh
+          grep -q 'api/atlas/projects.*checkpoints.*complete' ops/firefly.nginx.conf
+          grep -q 'api/atlas/projects.*uploads.*complete' ops/firefly.nginx.conf
           grep -q 'FIREFLY_BACKUP_ALLOW_LOCAL_FALLBACK=true TOS_BACKUP_REQUEST_TIMEOUT_MS=60000' ops/firefly-deploy.sh
           grep -q 'ALLOW_LOCAL_BACKUP_FALLBACK' ops/backup-db.mjs
           grep -q 'label=\$firefly_image_label' ops/firefly-deploy.sh
@@ -152,7 +160,7 @@ jobs:
           reedit_smoke_line=$(grep -n 'node dist-server/reedit-smoke.js' ops/firefly-deploy.sh | cut -d: -f1)
           stop_old_line=$(grep -n '^stop_old_workers$' ops/firefly-deploy.sh | cut -d: -f1)
           test "$reedit_smoke_line" -lt "$stop_old_line"
-          grep -q 'web worker image-worker media-worker canvas-worker' ops/firefly-retire-slot.sh
+          grep -q 'web worker image-worker media-worker canvas-worker atlas-agent' ops/firefly-retire-slot.sh
 
       - name: Verify co-hosted Nginx configuration is preserved
         shell: bash
@@ -238,6 +246,54 @@ jobs:
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
 
+  atlas-test-build:
+    name: Atlas Node 24 test and slim build
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/atlas
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24.16.0
+          cache: npm
+          cache-dependency-path: apps/atlas/package-lock.json
+          registry-url: https://registry.npmjs.org
+      - name: Install immutable Atlas dependencies
+        run: |
+          npm install --global npm@11.6.2
+          npm config set registry https://registry.npmjs.org
+          npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Enforce the shipped-editor dependency and bundle budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          if find dist -type f | grep -Ei '(onnx|transformers|ffmpeg|playcanvas|webgpu)' >/dev/null; then
+            echo 'An excluded heavy runtime entered the Atlas production bundle' >&2
+            exit 1
+          fi
+          node --input-type=module <<'NODE'
+          import { readdirSync, readFileSync, statSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { gzipSync } from 'node:zlib';
+          const files = [];
+          const walk = (dir) => { for (const name of readdirSync(dir)) { const path = join(dir, name); statSync(path).isDirectory() ? walk(path) : files.push(path); } };
+          walk('dist');
+          const shipped = files.filter((path) => /\.(?:js|css)$/.test(path));
+          const chunks = shipped.map((path) => ({ path, bytes: gzipSync(readFileSync(path), { level: 9 }).byteLength }));
+          const total = chunks.reduce((sum, chunk) => sum + chunk.bytes, 0);
+          const biggest = chunks.reduce((max, chunk) => Math.max(max, chunk.bytes), 0);
+          console.log(JSON.stringify({ gzipBytes: total, largestChunkGzipBytes: biggest, chunks }, null, 2));
+          if (total > 2 * 1024 * 1024 || biggest > 750 * 1024) process.exit(1);
+          NODE
+      - name: Audit Atlas production dependencies
+        run: npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
+
   browser-e2e:
     name: Authenticated browser journeys
     if: github.event_name != 'push'
@@ -258,7 +314,25 @@ jobs:
           npm ci
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium webkit
+      - name: Switch to Node 24 and build the independent Atlas application
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24.16.0
+          cache: npm
+          cache-dependency-path: apps/atlas/package-lock.json
+          registry-url: https://registry.npmjs.org
+      - name: Build Atlas with its production toolchain
+        run: |
+          npm install --global npm@11.6.2
+          npm --prefix apps/atlas ci
+          npm --prefix apps/atlas run build
+      - name: Restore the Firefly Node 22 runtime for browser journeys
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
       - name: Exercise authenticated browser journeys
+        env:
+          ATLAS_E2E_PREBUILT: "true"
         run: npm run test:e2e
       - name: Upload Playwright report
         if: failure()
@@ -301,7 +375,16 @@ jobs:
             -e DATABASE_PATH=/data/firefly.db \
             -e MEDIA_STORAGE_BACKEND=legacy \
             firefly-ci:${{ github.sha }} node dist-server/migrate.js
-          for role_command in 'worker:dist-server/worker.js' 'image:dist-server/image-worker.js' 'media:dist-server/media-worker.js' 'canvas:dist-server/canvas-worker.js'; do
+          # Exercise the previous compatibility image's exact CURRENT=11/MAX=12
+          # startup contract against the database just migrated to schema 12.
+          docker run --rm --network firefly-ci -v firefly-ci-data:/data \
+            -e PUBLIC_ORIGIN=http://127.0.0.1:18090 \
+            -e REDIS_URL=redis://firefly-ci-redis:6379 \
+            -e SESSION_SECRET=ci-only-session-secret-at-least-32-bytes \
+            -e DATABASE_PATH=/data/firefly.db \
+            -e MEDIA_STORAGE_BACKEND=legacy \
+            firefly-ci:${{ github.sha }} node dist-server/schema-rollback-check.js
+          for role_command in 'worker:dist-server/worker.js' 'image:dist-server/image-worker.js' 'media:dist-server/media-worker.js' 'canvas:dist-server/canvas-worker.js' 'atlas-agent:dist-server/atlas-agent-worker.js'; do
             role=${role_command%%:*}
             command=${role_command#*:}
             docker run -d --name "firefly-ci-$role" --network firefly-ci \
@@ -312,6 +395,9 @@ jobs:
               -e DATABASE_PATH=/data/firefly.db \
               -e UPLOAD_DIR=/data/uploads \
               -e MEDIA_STORAGE_BACKEND=legacy \
+              -e ATLAS_ENABLED=true \
+              -e ATLAS_AGENT_ENABLED=true \
+              -e OPENROUTER_API_KEYS=ci-agent-provider-key \
               firefly-ci:${{ github.sha }} node "$command"
           done
           docker run -d --name firefly-ci-web --network firefly-ci -p 127.0.0.1:18090:8090 \
@@ -322,14 +408,47 @@ jobs:
             -e DATABASE_PATH=/data/firefly.db \
             -e UPLOAD_DIR=/data/uploads \
             -e MEDIA_STORAGE_BACKEND=legacy \
+            -e ATLAS_ENABLED=true \
+            -e ATLAS_AGENT_ENABLED=true \
+            -e OPENROUTER_API_KEYS=ci-agent-provider-key \
             firefly-ci:${{ github.sha }}
+          ready=0
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:18090/api/health/ready >/dev/null && \
-               curl --fail --silent http://127.0.0.1:18090/api/health/workers >/dev/null; then exit 0; fi
+               curl --fail --silent http://127.0.0.1:18090/api/health/workers >/dev/null; then ready=1; break; fi
             sleep 2
           done
-          docker logs firefly-ci-web
-          exit 1
+          if [ "$ready" -ne 1 ]; then docker logs firefly-ci-web; exit 1; fi
+
+          test "$(docker run --rm firefly-ci:${{ github.sha }} sh -c 'test -s /app/dist-atlas/index.html && echo ok')" = ok
+          curl --fail --silent --dump-header /tmp/atlas.headers \
+            http://127.0.0.1:18090/studio/atlas/ --output /tmp/atlas.html
+          grep -Eqi '^cache-control:.*no-cache' /tmp/atlas.headers
+          grep -Eqi '^cross-origin-opener-policy: *same-origin' /tmp/atlas.headers
+          grep -Eqi '^cross-origin-embedder-policy: *credentialless' /tmp/atlas.headers
+          grep -q '/studio/atlas/assets/' /tmp/atlas.html
+          curl --fail --silent -H 'Accept: text/html' \
+            http://127.0.0.1:18090/studio/atlas/projects/deep-link | cmp - /tmp/atlas.html
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            http://127.0.0.1:18090/studio/atlas/assets/does-not-exist.js)" = 404
+
+          docker run -d --name firefly-ci-atlas-disabled --network firefly-ci -p 127.0.0.1:18091:8090 \
+            -v firefly-ci-data:/data \
+            -e PUBLIC_ORIGIN=http://127.0.0.1:18091 \
+            -e REDIS_URL=redis://firefly-ci-redis:6379 \
+            -e SESSION_SECRET=ci-only-session-secret-at-least-32-bytes \
+            -e DATABASE_PATH=/data/firefly.db \
+            -e UPLOAD_DIR=/data/uploads \
+            -e MEDIA_STORAGE_BACKEND=legacy \
+            -e ATLAS_ENABLED=false \
+            -e ATLAS_AGENT_ENABLED=false \
+            firefly-ci:${{ github.sha }}
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:18091/api/health/live >/dev/null && break
+            sleep 1
+          done
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:18091/studio/atlas/)" = 404
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:18091/api/atlas/bootstrap)" = 404
       - name: Gate image on critical vulnerabilities
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:

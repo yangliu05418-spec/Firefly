@@ -1,18 +1,16 @@
-import { createRoot } from 'react-dom/client'
-import './styles/tokens.css'
-import './styles/base.css'
-import RootApp from './RootApp.tsx'
-import { resolveEntryExperience } from './routing/entryExperience'
-import { installChunkLoadRecovery } from './runtime/chunkLoadRecovery'
+import { createRoot } from 'react-dom/client';
+import { FireflyAtlasApp } from './firefly/FireflyAtlasApp';
+import { I18nProvider } from './firefly/i18n';
+import './firefly/styles.css';
 
-installChunkLoadRecovery();
+const root = document.getElementById('root');
 
-const initialExperience = resolveEntryExperience(window.location);
-
-if (initialExperience === 'editor' || initialExperience === 'landing') {
-  void import('./editorBoot');
+if (!root) {
+  throw new Error('Atlas root element is missing.');
 }
 
-// Note: StrictMode disabled for WebGPU compatibility in development
-// StrictMode causes double-mounting which breaks external texture references
-createRoot(document.getElementById('root')!).render(<RootApp initialExperience={initialExperience} />)
+createRoot(root).render(
+  <I18nProvider>
+    <FireflyAtlasApp />
+  </I18nProvider>,
+);

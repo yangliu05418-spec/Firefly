@@ -31,6 +31,14 @@ minimum_free_kb=8388608
 docker_root=$(/usr/bin/docker info --format '{{.DockerRootDir}}' 2>/dev/null || printf '/var/lib/docker')
 [ -d "$docker_root" ] || docker_root=/
 : > "$old_workers_file"
+env_flag_enabled() {
+  flag_name=$1
+  [ -r "$app_env" ] || return 1
+  awk -F= -v name="$flag_name" '
+    $1 == name { value = tolower($2) }
+    END { exit(value == "true" ? 0 : 1) }
+  ' "$app_env"
+}
 if [ -r "$release_env" ]; then
   # shellcheck disable=SC1090
   . "$release_env"
@@ -55,6 +63,61 @@ ensure_deploy_space() {
   fi
   echo "deployment disk recovered: $available KiB available" >&2
 }
+sync_host_runtime() (
+  set -eu
+  runtime_bundle_dir=$(mktemp -d /run/firefly-runtime.XXXXXX)
+  runtime_container=
+  cleanup_runtime_bundle() {
+    [ -z "$runtime_container" ] || /usr/bin/docker rm -f "$runtime_container" >/dev/null 2>&1 || true
+    rm -rf "$runtime_bundle_dir"
+  }
+  trap cleanup_runtime_bundle EXIT
+  runtime_container=$(/usr/bin/docker create "$image")
+  for runtime_file in firefly-deploy.sh firefly-retire-slot.sh firefly.nginx.conf install-nginx-config.sh; do
+    /usr/bin/docker cp "$runtime_container:/app/ops/$runtime_file" "$runtime_bundle_dir/$runtime_file"
+    [ -s "$runtime_bundle_dir/$runtime_file" ] || { echo "runtime bundle is missing $runtime_file" >&2; exit 1; }
+  done
+  sh -n "$runtime_bundle_dir/firefly-deploy.sh"
+  sh -n "$runtime_bundle_dir/firefly-retire-slot.sh"
+  sh -n "$runtime_bundle_dir/install-nginx-config.sh"
+  sh "$runtime_bundle_dir/install-nginx-config.sh" "$runtime_bundle_dir/firefly.nginx.conf"
+  install -o root -g root -m 0755 "$runtime_bundle_dir/firefly-deploy.sh" /usr/local/sbin/.firefly-deploy.new
+  install -o root -g root -m 0755 "$runtime_bundle_dir/firefly-retire-slot.sh" /usr/local/sbin/.firefly-retire-slot.new
+  mv /usr/local/sbin/.firefly-deploy.new /usr/local/sbin/firefly-deploy
+  mv /usr/local/sbin/.firefly-retire-slot.new /usr/local/sbin/firefly-retire-slot
+)
+sync_atlas_assets() (
+  set -eu
+  atlas_bundle_dir=$(mktemp -d /run/firefly-atlas-assets.XXXXXX)
+  atlas_bundle_container=
+  cleanup_atlas_bundle() {
+    [ -z "$atlas_bundle_container" ] || /usr/bin/docker rm -f "$atlas_bundle_container" >/dev/null 2>&1 || true
+    rm -rf "$atlas_bundle_dir"
+  }
+  trap cleanup_atlas_bundle EXIT
+  mkdir -p "$atlas_bundle_dir/assets"
+  atlas_bundle_container=$(/usr/bin/docker create "$image")
+  /usr/bin/docker cp "$atlas_bundle_container:/app/dist-atlas/index.html" "$atlas_bundle_dir/index.html"
+  /usr/bin/docker cp "$atlas_bundle_container:/app/dist-atlas/assets/." "$atlas_bundle_dir/assets/"
+  [ -s "$atlas_bundle_dir/index.html" ] || { echo "Atlas bundle index is missing" >&2; exit 1; }
+  asset_refs=$(grep -Eo '/studio/atlas/assets/[A-Za-z0-9._-]+' "$atlas_bundle_dir/index.html" | sort -u || true)
+  [ -n "$asset_refs" ] || { echo "Atlas index has no immutable asset references" >&2; exit 1; }
+  for asset_ref in $asset_refs; do
+    asset_name=${asset_ref##*/}
+    [ -s "$atlas_bundle_dir/assets/$asset_name" ] || {
+      echo "Atlas index references a missing asset: $asset_name" >&2
+      exit 1
+    }
+  done
+  export_worker_found=0
+  for export_worker in "$atlas_bundle_dir"/assets/export.worker-*.js; do
+    if [ -s "$export_worker" ]; then export_worker_found=1; break; fi
+  done
+  [ "$export_worker_found" -eq 1 ] || { echo "Atlas export worker is missing" >&2; exit 1; }
+  install -d -o root -g root -m 0755 /srv/firefly/atlas-assets
+  cp -a "$atlas_bundle_dir/assets/." /srv/firefly/atlas-assets/
+  chmod -R a=rX /srv/firefly/atlas-assets
+)
 capture_candidate_diagnostics() {
   if ! install -d -o root -g root -m 0700 "$diagnostics_dir"; then
     echo "candidate diagnostics unavailable: cannot create $diagnostics_dir" >&2
@@ -70,7 +133,7 @@ capture_candidate_diagnostics() {
     printf '\nWORKERS\n'
     curl --silent --show-error --max-time 5 --write-out '\nhttp_status=%{http_code}\n' \
       "http://127.0.0.1:$next_port/api/health/workers" || true
-    for role in web worker image-worker media-worker canvas-worker; do
+    for role in web worker image-worker media-worker canvas-worker atlas-agent; do
       container="firefly-$role-$next_slot"
       printf '\nCONTAINER %s\n' "$container"
       /usr/bin/docker inspect --format '{{json .State}}' "$container" 2>&1 || true
@@ -136,7 +199,7 @@ on_exit() {
 }
 trap on_exit EXIT
 cleanup_candidate() {
-  for role in web worker image-worker media-worker canvas-worker; do
+  for role in web worker image-worker media-worker canvas-worker atlas-agent; do
     container_id=$(inspect_container_id "firefly-$role-$next_slot")
     [ -n "$container_id" ] || continue
     assert_slot_container "$container_id" "$role" "$next_slot"
@@ -160,7 +223,7 @@ switch_upstream() {
 }
 stop_old_workers() {
   if [ "$current_slot" = "legacy" ]; then
-    for service in worker image-worker media-worker canvas-worker; do
+    for service in worker image-worker media-worker canvas-worker atlas-agent; do
       for container in $(/usr/bin/docker ps -q \
         --filter "label=com.docker.compose.project=$legacy_project" \
         --filter "label=com.docker.compose.service=$service"); do
@@ -170,7 +233,7 @@ stop_old_workers() {
       done
     done
   else
-    for role in worker image-worker media-worker canvas-worker; do
+    for role in worker image-worker media-worker canvas-worker atlas-agent; do
       container_id=$(inspect_container_id "firefly-$role-$current_slot")
       [ -n "$container_id" ] || continue
       assert_slot_container "$container_id" "$role" "$current_slot"
@@ -184,6 +247,12 @@ notify started
 ensure_deploy_space
 /usr/bin/docker pull "$image" >/dev/null
 /usr/bin/docker image inspect "$image" >/dev/null
+# Preserve content-hashed Atlas assets across blue/green versions. An editor
+# opened before cutover may instantiate its export Worker only afterwards; the
+# old immutable hash must remain available even though HTML now comes from the
+# new slot. Files are content-addressed, so merging versions cannot overwrite
+# different bytes under the same name.
+sync_atlas_assets
 # The local SQLite backup, integrity check and restore drill remain mandatory.
 # A cross-region TOS outage must not leave a healthy production release blocked
 # for the SDK's multi-retry window; the scheduled backup stays strict and alerts.
@@ -206,7 +275,8 @@ fi
   --network "$network" --label com.firefly.role=web --label com.firefly.slot="$next_slot" --security-opt no-new-privileges --cap-drop ALL \
   --log-driver journald --log-opt 'tag=firefly/{{.Name}}' \
   --env-file "$app_env" --env-file "$feishu_env" -e FIREFLY_REVISION="$revision" -e FIREFLY_IMAGE_DIGEST="${image##*@}" \
-  -p "127.0.0.1:$next_port:8090" -v /srv/firefly/uploads:/data/uploads -v /srv/firefly/data:/data "$image" node dist-server/index.js >/dev/null
+  -p "127.0.0.1:$next_port:8090" -v /srv/firefly/uploads:/data/uploads -v /srv/firefly/data:/data \
+  -v /srv/firefly/atlas-assets:/app/dist-atlas/assets:ro "$image" node dist-server/index.js >/dev/null
 
 ready_count=0
 attempt=0
@@ -223,6 +293,16 @@ worker_commands='worker:dist-server/worker.js media-worker:dist-server/media-wor
 if /usr/bin/docker run --rm --entrypoint /bin/sh "$image" -c 'test -f /app/dist-server/image-worker.js'; then
   worker_commands='worker:dist-server/worker.js image-worker:dist-server/image-worker.js media-worker:dist-server/media-worker.js canvas-worker:dist-server/canvas-worker.js'
 fi
+if env_flag_enabled ATLAS_ENABLED && env_flag_enabled ATLAS_AGENT_ENABLED; then
+  if /usr/bin/docker run --rm --entrypoint /bin/sh "$image" -c 'test -f /app/dist-server/atlas-agent-worker.js'; then
+    worker_commands="$worker_commands atlas-agent:dist-server/atlas-agent-worker.js"
+  else
+    failure_event=failed_atlas_agent_entrypoint
+    echo "Atlas Agent is enabled but the immutable image has no Agent worker entrypoint" >&2
+    cleanup_candidate
+    exit 1
+  fi
+fi
 for role_command in $worker_commands; do
   role=${role_command%%:*}; command=${role_command#*:}
   heartbeat_role=$role
@@ -230,6 +310,7 @@ for role_command in $worker_commands; do
   [ "$role" = "image-worker" ] && heartbeat_role=image
   [ "$role" = "media-worker" ] && heartbeat_role=media
   [ "$role" = "canvas-worker" ] && heartbeat_role=canvas
+  [ "$role" = "atlas-agent" ] && heartbeat_role=atlas-agent
   /usr/bin/docker run -d --name "firefly-$role-$next_slot" --restart unless-stopped --stop-timeout 35 \
     --network "$network" --label com.firefly.role="$role" --label com.firefly.slot="$next_slot" --security-opt no-new-privileges --cap-drop ALL \
     --health-cmd "node dist-server/worker-healthcheck.js $heartbeat_role" --health-interval 15s --health-timeout 5s --health-retries 3 \
@@ -301,6 +382,11 @@ while [ "$checks" -lt 6 ]; do
   fi
   sleep 3
 done
+
+# The immutable image is also the truth source for the tightly scoped host
+# runtime. Updating only after the candidate is healthy prevents repository /
+# host drift without giving the deploy account arbitrary root script writes.
+sync_host_runtime
 
 mkdir -p /etc/firefly /var/lib/firefly/releases
 next_release="$release_env.$case_id"

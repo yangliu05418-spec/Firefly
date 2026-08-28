@@ -29,6 +29,7 @@ const main = async () => {
   const images = new Queue("image-generation", { connection: redis });
   const canvas = new Queue("canvas-jobs", { connection: redis });
   const uploads = new Queue("upload-finalization", { connection: redis });
+  const atlasAgent = new Queue("atlas-agent", { connection: redis });
   let database: Database.Database | undefined;
   let queueCounts: Record<string, unknown> = {};
   let outboxCounts = { pending: 0, stalled: 0 };
@@ -75,11 +76,11 @@ const main = async () => {
       if (reeditMetrics.started > 0 && reeditMetrics.failureRate > 0.05) reasons.push("reedit_failure_rate_high");
       journeySlos = await readJourneySlos(redis, 15);
       for (const slo of journeySlos) if (slo.sampleStatus === "breached") reasons.push(`slo_${slo.journey}_breached`);
-      const [generationCounts, archiveCounts, mediaCounts, previewCounts, assetCounts, imageCounts, canvasCounts, uploadCounts] = await Promise.all([
-        generation.getJobCounts("wait", "active", "failed"), archive.getJobCounts("wait", "active", "failed"), media.getJobCounts("wait", "active", "failed"), preview.getJobCounts("wait", "active", "failed"), assets.getJobCounts("wait", "active", "failed"), images.getJobCounts("wait", "active", "failed"), canvas.getJobCounts("wait", "active", "failed"), uploads.getJobCounts("wait", "active", "failed")
+      const [generationCounts, archiveCounts, mediaCounts, previewCounts, assetCounts, imageCounts, canvasCounts, uploadCounts, atlasAgentCounts] = await Promise.all([
+        generation.getJobCounts("wait", "active", "failed"), archive.getJobCounts("wait", "active", "failed"), media.getJobCounts("wait", "active", "failed"), preview.getJobCounts("wait", "active", "failed"), assets.getJobCounts("wait", "active", "failed"), images.getJobCounts("wait", "active", "failed"), canvas.getJobCounts("wait", "active", "failed"), uploads.getJobCounts("wait", "active", "failed"), atlasAgent.getJobCounts("wait", "active", "failed")
       ]);
-      queueCounts = { generation: generationCounts, archive: archiveCounts, media: mediaCounts, preview: previewCounts, assets: assetCounts, images: imageCounts, canvas: canvasCounts, uploads: uploadCounts };
-      if ((generationCounts.failed ?? 0) + (archiveCounts.failed ?? 0) + (mediaCounts.failed ?? 0) + (previewCounts.failed ?? 0) + (assetCounts.failed ?? 0) + (imageCounts.failed ?? 0) + (canvasCounts.failed ?? 0) + (uploadCounts.failed ?? 0) > 0) reasons.push("failed_jobs_present");
+      queueCounts = { generation: generationCounts, archive: archiveCounts, media: mediaCounts, preview: previewCounts, assets: assetCounts, images: imageCounts, canvas: canvasCounts, uploads: uploadCounts, atlasAgent: atlasAgentCounts };
+      if ((generationCounts.failed ?? 0) + (archiveCounts.failed ?? 0) + (mediaCounts.failed ?? 0) + (previewCounts.failed ?? 0) + (assetCounts.failed ?? 0) + (imageCounts.failed ?? 0) + (canvasCounts.failed ?? 0) + (uploadCounts.failed ?? 0) + (atlasAgentCounts.failed ?? 0) > 0) reasons.push("failed_jobs_present");
     } catch { reasons.push("queues_unavailable"); }
     try {
       workerHealth = await readWorkerHealth(redis);
@@ -93,7 +94,7 @@ const main = async () => {
     }
   } finally {
     database?.close();
-    await Promise.allSettled([generation.close(), archive.close(), media.close(), preview.close(), assets.close(), images.close(), canvas.close(), uploads.close()]);
+    await Promise.allSettled([generation.close(), archive.close(), media.close(), preview.close(), assets.close(), images.close(), canvas.close(), uploads.close(), atlasAgent.close()]);
     redis.disconnect();
   }
   const blockingReasons = reasons;

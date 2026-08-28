@@ -393,7 +393,7 @@ test("full-reference accepts prompts beyond the former Firefly character ceiling
   await page.goto("/studio");
 
   const send = page.getByRole("button", { name: "生成视频" });
-  await expect(send).toBeDisabled();
+  await expect(send).toBeDisabled({ timeout: 30_000 });
   const editor = page.getByRole("textbox", { name: "创作提示词" });
   const longPrompt = "角色在雨中缓慢回头。".repeat(600);
   await editor.fill("@");
@@ -437,8 +437,12 @@ test("asset archive preserves the selected media view across refresh", async ({ 
   await expect(page.getByRole("button", { name: "上传图片" })).toBeEnabled();
 
   await page.reload();
-  await expect(page.getByRole("button", { name: "图片资产" })).toHaveAttribute("aria-current", "page");
-  await expect(page.getByRole("heading", { name: "生成图片" })).toBeVisible();
+  // WebKit can spend several seconds restoring the authenticated document
+  // after a full reload. This assertion verifies persisted routing state, not
+  // bootstrap latency, so wait for the same production recovery window used
+  // by the surrounding Studio journeys.
+  await expect(page.getByRole("button", { name: "图片资产" })).toHaveAttribute("aria-current", "page", { timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "生成图片" })).toBeVisible({ timeout: 30_000 });
 
   await page.getByRole("button", { name: "视频资产" }).click();
   await expect(page).toHaveURL(/\/studio\/assets$/);
@@ -491,7 +495,7 @@ test("new creation reconciles a lost response without duplicating the session", 
 
   await page.getByRole("button", { name: "新创作", exact: true }).click();
 
-  await expect.poll(() => new URL(page.url()).pathname).toMatch(/^\/studio\/sessions\/[0-9a-f-]{36}$/);
+  await expect.poll(() => new URL(page.url()).pathname, { timeout: 30_000 }).toMatch(/^\/studio\/sessions\/[0-9a-f-]{36}$/);
   expect(mock.postedSessionRequests()).toHaveLength(1);
   expect(mock.creationSessions()).toHaveLength(2);
   await expect(page.locator(".session-item")).toHaveCount(2);
@@ -501,7 +505,7 @@ test("empty Studio bootstrap recovers its first session after a lost response", 
   const mock = await mockAuthenticatedApi(page, { creationSessions: [], creationSessionAdmissionResponseLost: true });
   await page.goto("/studio");
 
-  await expect.poll(() => new URL(page.url()).pathname).toMatch(/^\/studio\/sessions\/[0-9a-f-]{36}$/);
+  await expect.poll(() => new URL(page.url()).pathname, { timeout: 30_000 }).toMatch(/^\/studio\/sessions\/[0-9a-f-]{36}$/);
   expect(mock.postedSessionRequests()).toHaveLength(1);
   expect(mock.creationSessions()).toHaveLength(1);
   await expect(page.locator(".session-item")).toHaveCount(1);

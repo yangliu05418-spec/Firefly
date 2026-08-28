@@ -2,8 +2,12 @@ import crypto from "node:crypto";
 import type { Redis } from "ioredis";
 import { config } from "./config.js";
 
-export const workerRoles = ["generation", "image", "media", "canvas"] as const;
+export const workerRoles = ["generation", "image", "media", "canvas", "atlas-agent"] as const;
 export type WorkerRole = (typeof workerRoles)[number];
+
+export const requiredWorkerRoles = (): readonly WorkerRole[] => config.atlasEnabled && config.atlasAgentEnabled
+  ? workerRoles
+  : workerRoles.filter((role) => role !== "atlas-agent");
 
 const heartbeatIntervalMs = 10_000;
 const heartbeatTtlMs = 30_000;
@@ -21,6 +25,7 @@ export type WorkerHealthSnapshot = {
   revision: string;
   checkedAt: string;
   workers: Record<WorkerRole, { status: "ready" | "missing" | "stale"; updatedAt?: string }>;
+  required: WorkerRole[];
   missing: WorkerRole[];
 };
 
@@ -38,11 +43,12 @@ const parseHeartbeat = (raw: string | null, revision: string, role: WorkerRole, 
   }
 };
 
-export const readWorkerHealth = async (client: Redis, revision = config.revision, now = Date.now()): Promise<WorkerHealthSnapshot> => {
+export const readWorkerHealth = async (client: Redis, revision = config.revision, now = Date.now(), requiredRoles: readonly WorkerRole[] = requiredWorkerRoles()): Promise<WorkerHealthSnapshot> => {
   const values = await client.mget(...workerRoles.map((role) => keyFor(revision, role)));
   const workers = Object.fromEntries(workerRoles.map((role, index) => [role, parseHeartbeat(values[index] ?? null, revision, role, now)])) as WorkerHealthSnapshot["workers"];
-  const missing = workerRoles.filter((role) => workers[role].status !== "ready");
-  return { ready: missing.length === 0, revision, checkedAt: new Date(now).toISOString(), workers, missing };
+  const required = [...requiredRoles];
+  const missing = required.filter((role) => workers[role].status !== "ready");
+  return { ready: missing.length === 0, revision, checkedAt: new Date(now).toISOString(), workers, required, missing };
 };
 
 export const startWorkerHeartbeat = async (client: Redis, role: WorkerRole) => {

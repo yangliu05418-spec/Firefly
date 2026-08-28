@@ -16,6 +16,7 @@ const boundedInt = (name: string, fallback: number, minimum: number, maximum: nu
   if (value < minimum || value > maximum) throw new Error(`Invalid environment variable: ${name} must be between ${minimum} and ${maximum}`);
   return value;
 };
+const canvasTextModel = process.env.CANVAS_TEXT_MODEL ?? "google/gemini-2.5-flash";
 
 export const config = {
   port: Number(process.env.PORT ?? 8090),
@@ -73,7 +74,16 @@ export const config = {
   openrouterRequestTimeoutMs: positiveInt("OPENROUTER_REQUEST_TIMEOUT_MS", 180_000),
   canvasV2Enabled: (process.env.CANVAS_V2_ENABLED ?? "true").toLowerCase() === "true",
   canvasV2Allowlist: (process.env.CANVAS_V2_ALLOWLIST ?? "").split(",").map((email) => email.trim().toLowerCase()).filter(Boolean),
-  canvasTextModel: process.env.CANVAS_TEXT_MODEL ?? "google/gemini-2.5-flash",
+  canvasTextModel,
+  // Atlas is an optional sub-application. New and rollback environments must
+  // fail closed until the operator explicitly enables the matching runtime.
+  atlasEnabled: (process.env.ATLAS_ENABLED ?? "false").toLowerCase() === "true",
+  atlasAgentEnabled: (process.env.ATLAS_AGENT_ENABLED ?? "false").toLowerCase() === "true",
+  atlasMaxUploadBytes: positiveInt("ATLAS_MAX_UPLOAD_BYTES", 8 * 1024 * 1024 * 1024),
+  atlasAgentModel: process.env.ATLAS_AGENT_MODEL?.trim() || canvasTextModel,
+  atlasAgentMaxRounds: boundedInt("ATLAS_AGENT_MAX_ROUNDS", 8, 1, 24),
+  atlasAgentMaxToolCalls: boundedInt("ATLAS_AGENT_MAX_TOOL_CALLS", 32, 1, 128),
+  atlasAgentRequestTimeoutMs: positiveInt("ATLAS_AGENT_REQUEST_TIMEOUT_MS", 180_000),
   reeditV2Enabled: (process.env.REEDIT_V2_ENABLED ?? "true").toLowerCase() === "true",
   taskReferenceArchiveEnabled: (process.env.TASK_REFERENCE_ARCHIVE_ENABLED ?? "true").toLowerCase() === "true",
   shutdownGraceMs: positiveInt("SHUTDOWN_GRACE_MS", 30_000),
@@ -81,3 +91,7 @@ export const config = {
   revision: process.env.FIREFLY_REVISION ?? "development",
   imageDigest: process.env.FIREFLY_IMAGE_DIGEST ?? "unknown"
 };
+
+if (config.atlasEnabled && config.atlasAgentEnabled && config.openrouterApiKeys.length === 0) {
+  throw new Error("ATLAS_AGENT_ENABLED requires at least one OPENROUTER_API_KEYS entry");
+}

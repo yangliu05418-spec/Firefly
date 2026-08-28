@@ -2,10 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 
-export const CURRENT_SCHEMA_VERSION = 11;
-// Compatibility release for the expand-only Atlas schema. This image still
-// migrates only through v11, but it can remain online (or be restarted during
-// rollback) after the v12 migration has added independent tables.
+export const CURRENT_SCHEMA_VERSION = 12;
+// The feature release requires Atlas schema 12. Rollback safety is provided by
+// the preceding compatibility release, whose independently tested range is
+// CURRENT=11/MAX=12 (see schema-rollback-compatibility.ts).
 export const MAX_SUPPORTED_SCHEMA_VERSION = 12;
 
 const baseSchema = `
@@ -159,11 +159,28 @@ export const schemaVersion = (database: Database.Database) => {
   return Number((database.prepare("SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations").get() as { version: number }).version);
 };
 
-export const assertSchemaVersion = (database: Database.Database) => {
+export const assertSchemaVersionRange = (
+  database: Database.Database,
+  minimumVersion: number,
+  maximumVersion: number,
+  releaseName = "application",
+) => {
+  if (!Number.isSafeInteger(minimumVersion) || !Number.isSafeInteger(maximumVersion) || minimumVersion < 0 || maximumVersion < minimumVersion) {
+    throw new Error(`Invalid schema support range ${minimumVersion}-${maximumVersion} for ${releaseName}`);
+  }
   const version = schemaVersion(database);
-  if (version < CURRENT_SCHEMA_VERSION || version > MAX_SUPPORTED_SCHEMA_VERSION) throw new Error(`Database schema version ${version} is not supported; expected ${CURRENT_SCHEMA_VERSION}-${MAX_SUPPORTED_SCHEMA_VERSION}. Run npm run db:migrate.`);
+  if (version < minimumVersion || version > maximumVersion) {
+    throw new Error(`Database schema version ${version} is not supported by ${releaseName}; expected ${minimumVersion}-${maximumVersion}. Run npm run db:migrate.`);
+  }
   return version;
 };
+
+export const assertSchemaVersion = (database: Database.Database) => assertSchemaVersionRange(
+  database,
+  CURRENT_SCHEMA_VERSION,
+  MAX_SUPPORTED_SCHEMA_VERSION,
+  "this release",
+);
 
 const applyBaseline = (database: Database.Database) => {
   database.exec(baseSchema);
@@ -516,6 +533,186 @@ const addArchiveCheckpoints = (database: Database.Database) => {
   `);
 };
 
+const addAtlasProjectTables = (database: Database.Database) => {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS atlas_projects (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+      latest_version_id TEXT,
+      lease_token_hash TEXT,
+      lease_device_id TEXT,
+      lease_expires_at INTEGER,
+      lease_generation INTEGER NOT NULL DEFAULT 0 CHECK (lease_generation >= 0),
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      deleted_at INTEGER,
+      FOREIGN KEY (owner_id) REFERENCES users(id),
+      FOREIGN KEY (latest_version_id) REFERENCES atlas_project_versions(id)
+    );
+    CREATE INDEX IF NOT EXISTS atlas_projects_owner_updated_idx
+      ON atlas_projects(owner_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS atlas_projects_lease_expiry_idx
+      ON atlas_projects(lease_expires_at) WHERE lease_expires_at IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS atlas_project_versions (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      revision INTEGER NOT NULL CHECK (revision > 0),
+      object_key TEXT NOT NULL UNIQUE,
+      digest TEXT NOT NULL,
+      size INTEGER NOT NULL CHECK (size > 0),
+      lease_generation INTEGER NOT NULL DEFAULT 0 CHECK (lease_generation >= 0),
+      status TEXT NOT NULL CHECK (status IN ('uploading', 'ready', 'failed', 'delete_pending', 'deleted')),
+      error TEXT,
+      created_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      UNIQUE (project_id, revision),
+      FOREIGN KEY (owner_id) REFERENCES users(id),
+      FOREIGN KEY (project_id) REFERENCES atlas_projects(id)
+    );
+    CREATE INDEX IF NOT EXISTS atlas_project_versions_project_created_idx
+      ON atlas_project_versions(project_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS atlas_project_assets (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      source_type TEXT NOT NULL CHECK (source_type IN ('local_upload', 'atlas_export', 'user_asset', 'generation', 'generated', 'canvas_project')),
+      source_id TEXT,
+      kind TEXT NOT NULL CHECK (kind IN ('image', 'video', 'audio')),
+      object_key TEXT NOT NULL UNIQUE,
+      file_name TEXT NOT NULL,
+      content_type TEXT NOT NULL,
+      size INTEGER NOT NULL DEFAULT 0 CHECK (size >= 0),
+      etag TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL CHECK (status IN ('uploading', 'copying', 'ready', 'failed', 'delete_pending', 'deleted')),
+      error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      deleted_at INTEGER,
+      FOREIGN KEY (owner_id) REFERENCES users(id),
+      FOREIGN KEY (project_id) REFERENCES atlas_projects(id)
+    );
+    CREATE INDEX IF NOT EXISTS atlas_project_assets_project_created_idx
+      ON atlas_project_assets(project_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS atlas_project_assets_status_updated_idx
+      ON atlas_project_assets(status, updated_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS atlas_project_assets_source_idx
+      ON atlas_project_assets(project_id, source_type, source_id)
+      WHERE source_id IS NOT NULL AND deleted_at IS NULL;
+
+    CREATE TABLE IF NOT EXISTS atlas_global_asset_outbox (
+      asset_id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      object_key TEXT NOT NULL,
+      content_type TEXT NOT NULL,
+      size INTEGER NOT NULL CHECK (size > 0),
+      etag TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'completed')),
+      attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+      last_error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      FOREIGN KEY (asset_id) REFERENCES atlas_project_assets(id),
+      FOREIGN KEY (owner_id) REFERENCES users(id),
+      FOREIGN KEY (project_id) REFERENCES atlas_projects(id)
+    );
+    CREATE INDEX IF NOT EXISTS atlas_global_asset_outbox_pending_idx
+      ON atlas_global_asset_outbox(status, updated_at)
+      WHERE status = 'pending';
+
+    CREATE TABLE IF NOT EXISTS atlas_transfers (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      asset_id TEXT,
+      version_id TEXT,
+      kind TEXT NOT NULL CHECK (kind IN ('asset_upload', 'checkpoint', 'export', 'import')),
+      object_key TEXT NOT NULL UNIQUE,
+      tos_upload_id TEXT,
+      file_name TEXT NOT NULL,
+      media_kind TEXT NOT NULL CHECK (media_kind IN ('image', 'video', 'audio', 'project')),
+      content_type TEXT NOT NULL,
+      size INTEGER NOT NULL CHECK (size >= 0),
+      part_size INTEGER NOT NULL CHECK (part_size > 0),
+      part_count INTEGER NOT NULL CHECK (part_count >= 0),
+      parts_json TEXT NOT NULL DEFAULT '[]',
+      status TEXT NOT NULL CHECK (status IN ('initiated', 'uploading', 'verifying', 'completed', 'failed', 'cancelled')),
+      error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      FOREIGN KEY (owner_id) REFERENCES users(id),
+      FOREIGN KEY (project_id) REFERENCES atlas_projects(id),
+      FOREIGN KEY (asset_id) REFERENCES atlas_project_assets(id),
+      FOREIGN KEY (version_id) REFERENCES atlas_project_versions(id)
+    );
+    CREATE INDEX IF NOT EXISTS atlas_transfers_owner_status_idx
+      ON atlas_transfers(owner_id, status, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS atlas_transfers_expiry_idx ON atlas_transfers(expires_at);
+
+    CREATE TABLE IF NOT EXISTS atlas_agent_runs (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('queued', 'planning', 'awaiting_confirmation', 'ready', 'running', 'succeeded', 'failed', 'cancelled')),
+      instruction TEXT NOT NULL,
+      base_revision INTEGER NOT NULL CHECK (base_revision >= 0),
+      catalog_version TEXT NOT NULL,
+      catalog_digest TEXT NOT NULL,
+      plan_json TEXT,
+      error_code TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      UNIQUE (owner_id, project_id, idempotency_key),
+      FOREIGN KEY (owner_id) REFERENCES users(id),
+      FOREIGN KEY (project_id) REFERENCES atlas_projects(id)
+    );
+    CREATE INDEX IF NOT EXISTS atlas_agent_runs_project_updated_idx
+      ON atlas_agent_runs(project_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS atlas_agent_runs_status_updated_idx
+      ON atlas_agent_runs(status, updated_at);
+
+    CREATE TABLE IF NOT EXISTS atlas_agent_events (
+      run_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL CHECK (sequence > 0),
+      type TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (run_id, sequence),
+      UNIQUE (run_id, sequence),
+      FOREIGN KEY (run_id) REFERENCES atlas_agent_runs(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS atlas_agent_operations (
+      run_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL CHECK (sequence > 0),
+      plan_digest TEXT NOT NULL,
+      request_digest TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('succeeded', 'failed')),
+      risk TEXT NOT NULL CHECK (risk IN ('low', 'medium', 'destructive', 'external')),
+      requires_confirmation INTEGER NOT NULL CHECK (requires_confirmation IN (0, 1)),
+      result_json TEXT NOT NULL,
+      before_revision INTEGER NOT NULL CHECK (before_revision >= 0),
+      after_revision INTEGER NOT NULL CHECK (after_revision >= before_revision),
+      history_node_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (run_id, sequence),
+      UNIQUE (run_id, sequence),
+      FOREIGN KEY (run_id) REFERENCES atlas_agent_runs(id)
+    );
+  `);
+};
+
 export const migrateDatabase = (databasePath: string) => {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const database = new Database(databasePath);
@@ -570,6 +767,10 @@ export const migrateDatabase = (databasePath: string) => {
       if (version < 11) {
         addArchiveCheckpoints(database);
         database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(11, "add-media-archive-checkpoints", Date.now());
+      }
+      if (version < 12) {
+        addAtlasProjectTables(database);
+        database.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(12, "add-atlas-projects", Date.now());
       }
       assertSchemaVersion(database);
     }).exclusive();

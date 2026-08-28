@@ -11,6 +11,7 @@
     "image-worker": "node dist-server/image-worker.js",
     "media-worker": "node dist-server/media-worker.js",
     "canvas-worker": "node dist-server/canvas-worker.js",
+    "atlas-agent-worker": "node dist-server/atlas-agent-worker.js",
     "tos:configure": "node dist-server/tos-admin.js",
     "tos:audit": "node dist-server/tos-audit.js",
     "tos:resume-canary": "node dist-server/tos-resume-canary.js",

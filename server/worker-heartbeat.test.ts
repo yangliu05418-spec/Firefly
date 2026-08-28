@@ -18,11 +18,12 @@ describe("worker heartbeat readiness", () => {
         record("revision-a", "generation", now),
         record("revision-a", "image", now - 1000),
         record("revision-a", "media", now - 2000),
-        record("revision-a", "canvas", now - 3000)
+        record("revision-a", "canvas", now - 3000),
+        record("revision-a", "atlas-agent", now - 4000)
       ])
     } as unknown as Redis;
 
-    const health = await readWorkerHealth(client, "revision-a", now);
+    const health = await readWorkerHealth(client, "revision-a", now, ["generation", "image", "media", "canvas", "atlas-agent"]);
 
     expect(health.ready).toBe(true);
     expect(health.missing).toEqual([]);
@@ -30,7 +31,8 @@ describe("worker heartbeat readiness", () => {
       "runtime:worker-heartbeat:revision-a:generation",
       "runtime:worker-heartbeat:revision-a:image",
       "runtime:worker-heartbeat:revision-a:media",
-      "runtime:worker-heartbeat:revision-a:canvas"
+      "runtime:worker-heartbeat:revision-a:canvas",
+      "runtime:worker-heartbeat:revision-a:atlas-agent"
     );
   });
 
@@ -41,26 +43,48 @@ describe("worker heartbeat readiness", () => {
         record("old-revision", "generation", now),
         record("revision-b", "image", now - workerHeartbeatTtlMs - 1),
         record("revision-b", "media", now),
+        null,
         null
       ])
     } as unknown as Redis;
 
-    const health = await readWorkerHealth(client, "revision-b", now);
+    const health = await readWorkerHealth(client, "revision-b", now, ["generation", "image", "media", "canvas", "atlas-agent"]);
 
     expect(health.ready).toBe(false);
-    expect(health.missing).toEqual(["generation", "image", "canvas"]);
+    expect(health.missing).toEqual(["generation", "image", "canvas", "atlas-agent"]);
     expect(health.workers.generation.status).toBe("stale");
     expect(health.workers.image.status).toBe("stale");
     expect(health.workers.media.status).toBe("ready");
     expect(health.workers.canvas.status).toBe("missing");
+    expect(health.workers["atlas-agent"].status).toBe("missing");
   });
 
   it("treats malformed heartbeat data as unavailable", async () => {
-    const client = { mget: vi.fn().mockResolvedValue(["not-json", null, null, null]) } as unknown as Redis;
+    const client = { mget: vi.fn().mockResolvedValue(["not-json", null, null, null, null]) } as unknown as Redis;
 
-    const health = await readWorkerHealth(client, "revision-c", Date.now());
+    const health = await readWorkerHealth(client, "revision-c", Date.now(), ["generation", "image", "media", "canvas"]);
 
     expect(health.ready).toBe(false);
     expect(health.workers.generation.status).toBe("stale");
+  });
+
+  it("does not make the core application depend on the optional Agent worker", async () => {
+    const now = Date.now();
+    const client = {
+      mget: vi.fn().mockResolvedValue([
+        record("revision-d", "generation", now),
+        record("revision-d", "image", now),
+        record("revision-d", "media", now),
+        record("revision-d", "canvas", now),
+        null,
+      ])
+    } as unknown as Redis;
+
+    const health = await readWorkerHealth(client, "revision-d", now, ["generation", "image", "media", "canvas"]);
+
+    expect(health.ready).toBe(true);
+    expect(health.required).toEqual(["generation", "image", "media", "canvas"]);
+    expect(health.workers["atlas-agent"].status).toBe("missing");
+    expect(health.missing).toEqual([]);
   });
 });

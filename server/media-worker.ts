@@ -17,8 +17,11 @@ import { coordinateUploadFinalization } from "./upload-finalization-coordinator.
 import { copyCreationSnapshotReference, deleteCreationSnapshotReference } from "./creation-reference-media.js";
 import { archiveTransferStrategy } from "./archive-state.js";
 import { tosArchiveErrorCode } from "./tos-errors.js";
+import { AtlasStore, type AtlasGlobalAssetRegistration } from "./atlas-store.js";
+import { registerAtlasGlobalExport } from "./atlas-global-assets.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
+const atlasStore = new AtlasStore(config.databasePath);
 const numberHeader = (value: unknown) => Number(value ?? 0) || 0;
 const recoveryBucketMs = 15 * 60 * 1000;
 const archivePollBucketMs = 10 * 1000;
@@ -339,6 +342,12 @@ const worker = new Worker("media", async (job) => {
   if (job.name === "copy-canvas-asset") return copyPreparedCanvasAsset(job.data.assetId);
   if (job.name === "promote-creation-reference") return config.taskReferenceArchiveEnabled ? copyCreationSnapshotReference(job.data.referenceId) : undefined;
   if (job.name === "delete-creation-reference") return deleteCreationSnapshotReference(job.data.referenceId);
+  if (job.name === "delete-atlas-object") {
+    const objectKey = typeof job.data.objectKey === "string" ? job.data.objectKey : "";
+    if (!objectKey.startsWith("atlas/")) throw new Error("Atlas delete job contains an invalid object key");
+    await deleteObject(objectKey);
+    return;
+  }
   throw new Error(`Unknown media job: ${job.name}`);
 }, { connection, concurrency: 2, lockDuration: 120000 });
 
@@ -531,6 +540,162 @@ const reconcileCreationReferences = async () => {
   }
 };
 const creationReferenceReconcile = setInterval(() => void reconcileCreationReferences().catch((error) => console.warn(JSON.stringify({ type: "reedit_reference_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" }))), 60_000);
+const atlasObjectMetadata = (response: Awaited<ReturnType<typeof verifyStoredObject>>) => {
+  const data = response.data as unknown as Record<string, string | number | object | undefined>;
+  const headers = response.headers as unknown as Record<string, string | number | undefined>;
+  const value = (name: string, camelCase: string) => data[name] ?? data[camelCase] ?? headers[name] ?? headers[name.toLowerCase()];
+  const metadata: Record<string, string> = {};
+  for (const source of [data, headers]) {
+    for (const [key, raw] of Object.entries(source)) {
+      if (key.toLowerCase().startsWith("x-tos-meta-") && (typeof raw === "string" || typeof raw === "number")) {
+        metadata[key.slice("x-tos-meta-".length).toLowerCase()] = String(raw);
+      }
+    }
+  }
+  for (const candidate of [data.meta, data.metadata]) {
+    if (!candidate || typeof candidate !== "object") continue;
+    for (const [key, raw] of Object.entries(candidate as Record<string, unknown>)) {
+      if (typeof raw === "string" || typeof raw === "number") metadata[key.toLowerCase()] = String(raw);
+    }
+  }
+  return {
+    size: Number(value("content-length", "contentLength")),
+    contentType: String(value("content-type", "contentType") ?? "").split(";", 1)[0]!.trim().toLowerCase(),
+    etag: String(value("etag", "etag") ?? "").replace(/^"|"$/g, ""),
+    metadata,
+  };
+};
+const registerPendingAtlasGlobalAsset = async (registration: AtlasGlobalAssetRegistration, now: number) => {
+  try {
+    await registerAtlasGlobalExport({
+      id: registration.assetId, ownerId: registration.ownerId, name: registration.name,
+      objectKey: registration.objectKey, contentType: registration.contentType,
+      size: registration.size, etag: registration.etag,
+    });
+    atlasStore.markGlobalAssetRegistrationCompleted(registration.assetId, registration.ownerId, now);
+  } catch (error) {
+    atlasStore.recordGlobalAssetRegistrationError(
+      registration.assetId, registration.ownerId,
+      error instanceof Error ? error.message : "全局资产登记失败", now,
+    );
+    console.warn(JSON.stringify({
+      type: "atlas_global_asset_registration_recovery_failed", at: new Date().toISOString(),
+      assetId: registration.assetId, userId: registration.ownerId,
+      code: (error as { code?: string }).code ?? "unknown",
+    }));
+  }
+};
+const reconcileAtlasStorage = async () => {
+  const now = Date.now();
+  for (const registration of atlasStore.listPendingGlobalAssetRegistrations(100)) {
+    await registerPendingAtlasGlobalAsset(registration, now);
+  }
+  for (const asset of atlasStore.listDeletePendingAssets(100)) {
+    try {
+      await deleteObject(asset.objectKey);
+      atlasStore.markAssetDeleted(asset.id, asset.ownerId, now);
+    } catch (error) {
+      console.warn(JSON.stringify({
+        type: "atlas_asset_delete_recovery_failed", at: new Date().toISOString(), assetId: asset.id,
+        userId: asset.ownerId, code: (error as { code?: string }).code ?? "unknown",
+      }));
+    }
+  }
+  for (const version of atlasStore.listDeletePendingVersions(100)) {
+    try {
+      await deleteObject(version.objectKey);
+      atlasStore.markVersionDeleted(version.id, version.ownerId);
+    } catch (error) {
+      console.warn(JSON.stringify({
+        type: "atlas_checkpoint_delete_recovery_failed", at: new Date().toISOString(), checkpointId: version.id,
+        userId: version.ownerId, code: (error as { code?: string }).code ?? "unknown",
+      }));
+    }
+  }
+  for (const transfer of atlasStore.listAbortPendingTransfers(100)) {
+    try {
+      await abortMultipartUpload(transfer.objectKey, transfer.tosUploadId!).catch((error) => {
+        const code = String((error as { code?: string }).code ?? "");
+        if (!/NoSuchUpload|UploadStatusNotUploading|UploadStatusMismatch/.test(code)) throw error;
+      });
+      atlasStore.markTransferAborted(transfer.id, transfer.ownerId, now);
+    } catch (error) {
+      console.warn(JSON.stringify({
+        type: "atlas_multipart_abort_recovery_failed", at: new Date().toISOString(), transferId: transfer.id,
+        userId: transfer.ownerId, code: (error as { code?: string }).code ?? "unknown",
+      }));
+    }
+  }
+  for (const transfer of atlasStore.listExpiredTransfers(now, 100)) {
+    try {
+      // CompleteMultipart can succeed while the response or process is lost.
+      // Reconcile the deterministic final key before aborting durable progress.
+      let finalObject: ReturnType<typeof atlasObjectMetadata> | undefined;
+      try {
+        finalObject = atlasObjectMetadata(await verifyStoredObject(transfer.objectKey, transfer.contentType));
+      } catch (error) {
+        if ((error as { statusCode?: number }).statusCode !== 404) throw error;
+      }
+      if (finalObject) {
+        try {
+        const verified = finalObject;
+        if (!Number.isSafeInteger(verified.size) || verified.size <= 0 || !verified.contentType || !verified.etag) throw new Error("Atlas expired transfer metadata is incomplete");
+        if (verified.size !== transfer.size || verified.contentType !== transfer.contentType.split(";", 1)[0]!.trim().toLowerCase()) {
+          throw new Error("Atlas expired transfer final object does not match its durable declaration");
+        }
+        if (transfer.versionId) {
+          const version = atlasStore.readVersion(transfer.versionId, transfer.ownerId);
+          if (!version || verified.metadata.sha256?.trim().toLowerCase() !== version.digest.trim().toLowerCase()) {
+            throw new Error("Atlas checkpoint digest metadata is missing or invalid");
+          }
+          const completed = atlasStore.completeCheckpoint(transfer.versionId, transfer.ownerId, now);
+          if (completed.status !== "ok") throw new Error(`Atlas checkpoint recovery could not commit: ${completed.status}`);
+        } else if (transfer.assetId) {
+          const asset = atlasStore.readAsset(transfer.assetId, transfer.ownerId);
+          if (!asset) throw new Error("Atlas asset disappeared during transfer recovery");
+          const exportReady = transfer.kind === "export"
+            ? atlasStore.markExportReadyWithOutbox(transfer.assetId, transfer.ownerId, verified, now)
+            : null;
+          const ready = transfer.kind === "export"
+            ? exportReady?.asset ?? null
+            : atlasStore.markAssetReady(transfer.assetId, transfer.ownerId, verified, now);
+          if (!ready) {
+            throw new Error("Atlas asset recovery could not commit");
+          }
+          if (exportReady) await registerPendingAtlasGlobalAsset(exportReady.registration, now);
+        }
+        continue;
+        } catch (error) {
+          // Head succeeded, so this is a deterministic validation/commit
+          // failure rather than a transient TOS outage. Remove the unusable
+          // final key before making the revision retryable.
+          await deleteObject(transfer.objectKey);
+          console.warn(JSON.stringify({
+            type: "atlas_expired_final_object_rejected", at: new Date().toISOString(), transferId: transfer.id,
+            userId: transfer.ownerId, code: (error as { code?: string }).code ?? "ATLAS_FINAL_OBJECT_INVALID",
+          }));
+        }
+      }
+      if (transfer.tosUploadId) {
+        await abortMultipartUpload(transfer.objectKey, transfer.tosUploadId).catch((error) => {
+          const code = String((error as { code?: string }).code ?? "");
+          if (!/NoSuchUpload|UploadStatusNotUploading|UploadStatusMismatch/.test(code)) throw error;
+        });
+      }
+      atlasStore.markTransferCancelled(transfer.id, transfer.ownerId, now);
+    } catch (error) {
+      console.warn(JSON.stringify({
+        type: "atlas_transfer_recovery_failed", at: new Date().toISOString(), transferId: transfer.id,
+        userId: transfer.ownerId, code: (error as { code?: string }).code ?? "unknown",
+      }));
+    }
+  }
+};
+let atlasStorageReconcileInFlight: Promise<void> | undefined;
+const runAtlasStorageReconcile = () => atlasStorageReconcileInFlight ??= reconcileAtlasStorage()
+  .catch((error) => console.warn(JSON.stringify({ type: "atlas_storage_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" })))
+  .finally(() => { atlasStorageReconcileInFlight = undefined; });
+const atlasStorageReconcile = setInterval(() => void runAtlasStorageReconcile(), 60_000);
 void deletePendingMedia().catch((error) => console.warn(JSON.stringify({ type: "tos_delete_recovery_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" })));
 void deleteCanvasAssets().catch((error) => console.warn(JSON.stringify({ type: "canvas_asset_cleanup_scan_failed", at: new Date().toISOString(), code: (error as { code?: string }).code ?? "unknown" })));
 void reconcileArchives().catch(() => undefined);
@@ -540,16 +705,18 @@ void reconcileAssets().catch(() => undefined);
 void reconcileUploadFinalizations().catch(() => undefined);
 void reconcileCanvasCopies().catch(() => undefined);
 void reconcileCreationReferences().catch(() => undefined);
+void runAtlasStorageReconcile();
 
 let shuttingDown = false;
 const shutdown = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
   await heartbeat.stop();
-  clearInterval(reconcile); clearInterval(archiveReconcile); clearInterval(posterReconcile); clearInterval(previewReconcile); clearInterval(assetReconcile); clearInterval(uploadFinalizeReconcile); clearInterval(canvasCopyReconcile); clearInterval(creationReferenceReconcile);
+  clearInterval(reconcile); clearInterval(archiveReconcile); clearInterval(posterReconcile); clearInterval(previewReconcile); clearInterval(assetReconcile); clearInterval(uploadFinalizeReconcile); clearInterval(canvasCopyReconcile); clearInterval(creationReferenceReconcile); clearInterval(atlasStorageReconcile);
+  await atlasStorageReconcileInFlight?.catch(() => undefined);
   const graceful = await closeWorkersWithin([worker, archiveWorker, previewWorker, assetWorker, uploadFinalizationWorker], config.shutdownGraceMs);
   console.info(JSON.stringify({ type: "worker_shutdown", at: new Date().toISOString(), worker: "media", graceful }));
-  await connection.quit(); users.close(); process.exit(0);
+  await connection.quit(); atlasStore.close(); users.close(); process.exit(0);
 };
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);

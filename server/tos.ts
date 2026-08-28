@@ -48,9 +48,9 @@ export const posterObjectKey = (ownerId: string, taskId: string) => `posters/${s
 export const canvasExportObjectKey = (ownerId: string, canvasId: string, exportId: string) =>
   `canvas-exports/${shard(exportId)}/${ownerId}/${canvasId}/${exportId}/montage.mp4`;
 
-export const createMultipartUpload = async (key: string, contentType: string, fileName: string) => {
+export const createMultipartUpload = async (key: string, contentType: string, fileName: string, meta?: Record<string, string>) => {
   requireTos();
-  const response = await tos.createMultipartUpload({ bucket: config.tosBucket, key, contentType, contentDisposition: `inline; filename*=UTF-8''${encodeURIComponent(fileName)}`, forbidOverwrite: true });
+  const response = await tos.createMultipartUpload({ bucket: config.tosBucket, key, contentType, contentDisposition: `inline; filename*=UTF-8''${encodeURIComponent(fileName)}`, forbidOverwrite: true, meta });
   return response.data.UploadId;
 };
 
@@ -407,7 +407,7 @@ const archiveHttpError = (message: string, statusCode: number, archiveStage: Tos
   return error;
 };
 
-const listAllUploadedParts = async (key: string, uploadId: string) => {
+export const listAllUploadedParts = async (key: string, uploadId: string) => {
   const parts: { partNumber: number; eTag: string }[] = [];
   let marker: number | undefined;
   do {

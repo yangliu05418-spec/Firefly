@@ -46,7 +46,7 @@ assert_slot_container() {
 }
 
 if [ "$slot" = "legacy" ]; then
-  for service in web worker image-worker media-worker canvas-worker; do
+  for service in web worker image-worker media-worker canvas-worker atlas-agent; do
     for container in $(/usr/bin/docker ps -aq \
       --filter "label=com.docker.compose.project=$legacy_project" \
       --filter "label=com.docker.compose.service=$service"); do
@@ -59,7 +59,7 @@ if [ "$slot" = "legacy" ]; then
 fi
 
 [ "$slot" != "${FIREFLY_ACTIVE_SLOT:-}" ] || exit 0
-for role in web worker image-worker media-worker canvas-worker; do
+for role in web worker image-worker media-worker canvas-worker atlas-agent; do
   name="firefly-$role-$slot"
   container=$(/usr/bin/docker inspect --format '{{.Id}}' "$name" 2>/dev/null || true)
   [ -n "$container" ] || continue
