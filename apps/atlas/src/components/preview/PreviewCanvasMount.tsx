@@ -9,6 +9,7 @@ import { useEngineStore, type GaussianSplatLoadProgressEntry } from '../../store
 import type { MediaFile } from '../../stores/mediaStore';
 import type { PreviewQuality } from '../../stores/settingsStore';
 import type { SceneCameraConfig, SceneViewport } from '../../engine/scene/types';
+import { originalUi } from '../../firefly/i18n/originalUi';
 import { MaskOverlay } from './MaskOverlay';
 import { FaceAnalysisOverlay } from './FaceAnalysisOverlay';
 import { PreviewBottomControls } from './PreviewBottomControls';
@@ -265,7 +266,7 @@ export function PreviewCanvasMount({
                 data-testid="preview-canvas"
                 data-live-feedback-composition-id={liveFeedbackCompositionId ?? undefined}
                 role="img"
-                aria-label="Composition preview"
+                aria-label={originalUi('original.previewComposition', 'Composition preview')}
                 style={{
                   width: canvasSize.width,
                   height: canvasSize.height,

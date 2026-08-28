@@ -5,6 +5,7 @@ import { WIP_PANEL_TYPES } from '../../../types/dock';
 import type { AudioMixerTabStats, DynamicTabTitleInput } from './layoutMath';
 import { getDynamicTabTitle, getTimelineTabBarStyle } from './layoutMath';
 import type { HoldProgress } from './useDockTabHoldDrag';
+import { originalUi } from '../../../firefly/i18n/originalUi';
 
 interface CompositionTab {
   id: string;
@@ -122,7 +123,7 @@ export function DockTabStrip({
       ref={tabBarRef}
       className={`dock-tab-bar ${isMiddleDragging ? 'middle-dragging' : ''} ${groupContainsMaximizedPanel ? 'is-maximized-bar' : ''}`}
       role="tablist"
-      aria-label="Panel tabs"
+      aria-label={originalUi('original.panelTabs', 'Panel tabs')}
       data-guided-target={`pane-tabs:${group.id}`}
       title="Ctrl+Scroll to zoom | Hold to drag | Middle-click drag to scroll"
       onMouseDown={onTabBarMouseDown}
@@ -134,7 +135,7 @@ export function DockTabStrip({
           {timelinePanel && (
             <div
               className={`dock-tab-handle ${handleHoldClasses.isHolding ? 'hold-glow' : ''} ${handleHoldClasses.isReady ? 'hold-ready' : ''} ${handleHoldClasses.isFading ? 'hold-fade' : ''}`}
-              title="Hold to reposition panel"
+              title={originalUi('original.repositionPanel', 'Hold to reposition panel')}
               onMouseDown={onTimelineHandleMouseDown}
               onMouseUp={onTimelineHandleMouseUp}
               onMouseLeave={onTimelineHandleMouseLeave}
@@ -167,7 +168,7 @@ export function DockTabStrip({
               <button
                 className="dock-tab-close"
                 onClick={(event) => onCompositionClose(comp.id, event)}
-                title="Close"
+                title={originalUi('original.closePanel', 'Close')}
               >
                 &times;
               </button>
@@ -219,8 +220,8 @@ export function DockTabStrip({
         <button
           className={`dock-tab-add ${addMenuOpen ? 'is-open' : ''}`}
           type="button"
-          title="Add panel"
-          aria-label="Add panel"
+          title={originalUi('original.addPanel', 'Add panel')}
+          aria-label={originalUi('original.addPanel', 'Add panel')}
           onClick={onAddButtonClick}
           onMouseDown={(event) => event.stopPropagation()}
         >

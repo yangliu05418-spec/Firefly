@@ -2,6 +2,7 @@
 
 import React from 'react';
 import type { PreviewQuality } from '../../stores/settingsStore';
+import { originalUi } from '../../firefly/i18n/originalUi';
 
 interface PreviewBottomControlsProps {
   showTransparencyGrid: boolean;
@@ -27,7 +28,7 @@ export function PreviewBottomControls({
       <button
         className={`preview-transparency-toggle ${showTransparencyGrid ? 'active' : ''}`}
         onClick={onToggleTransparency}
-        title="Toggle transparency grid (checkerboard)"
+        title={originalUi('original.previewTransparency', 'Toggle transparency grid (checkerboard)')}
       >
         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
           <rect x="0" y="0" width="4" height="4" opacity="0.6" />
@@ -45,19 +46,23 @@ export function PreviewBottomControls({
         <button
           className="preview-quality-dropdown-btn"
           onClick={() => setQualityOpen(!qualityOpen)}
-          title="Preview quality (affects performance)"
+          title={originalUi('original.previewQuality', 'Preview quality (affects performance)')}
         >
           <span className="preview-quality-label">
-            {previewQuality === 1 ? 'Full' : previewQuality === 0.5 ? 'Half' : 'Quarter'}
+            {previewQuality === 1
+              ? originalUi('original.previewFull', 'Full')
+              : previewQuality === 0.5
+                ? originalUi('original.previewHalf', 'Half')
+                : originalUi('original.previewQuarter', 'Quarter')}
           </span>
           <span className="preview-comp-arrow">▼</span>
         </button>
         {qualityOpen && (
           <div className="preview-quality-dropdown">
             {([
-              { value: 1 as PreviewQuality, label: 'Full', desc: '100%' },
-              { value: 0.5 as PreviewQuality, label: 'Half', desc: '50%' },
-              { value: 0.25 as PreviewQuality, label: 'Quarter', desc: '25%' },
+              { value: 1 as PreviewQuality, label: originalUi('original.previewFull', 'Full'), desc: '100%' },
+              { value: 0.5 as PreviewQuality, label: originalUi('original.previewHalf', 'Half'), desc: '50%' },
+              { value: 0.25 as PreviewQuality, label: originalUi('original.previewQuarter', 'Quarter'), desc: '25%' },
             ]).map(({ value, label, desc }) => (
               <button
                 key={value}

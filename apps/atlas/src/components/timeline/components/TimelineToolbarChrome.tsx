@@ -8,6 +8,7 @@ import { TimelineControls } from '../TimelineControls';
 import type { TimelineControlsProps } from '../types';
 import { useLegacyTransitionCompositionUpgrade } from '../hooks/useLegacyTransitionCompositionUpgrade';
 import type { TimelineCurveMode } from '../../../stores/timeline/viewPreferences';
+import { originalUi } from '../../../firefly/i18n/originalUi';
 
 interface TimelineToolbarChromeProps {
   duration: number;
@@ -124,7 +125,7 @@ export function TimelineToolbarChrome({
         <TimelineControls variant="utility" {...timelineControlsProps} />
         <TimelineControls variant="zoom" {...timelineControlsProps} />
         <button
-          aria-label="Toggle Timeline and Graph view"
+          aria-label={originalUi('original.timelineMode', 'Toggle Timeline and Graph view')}
           aria-pressed={timelineCurveMode === 'graph'}
           className={`timeline-curve-mode-toggle${timelineCurveMode === 'graph' ? ' active' : ''}`}
           data-guided-target="button:timeline-graph-toggle"
@@ -132,7 +133,7 @@ export function TimelineToolbarChrome({
           onClick={onToggleTimelineCurveMode}
           title="Toggle Timeline / Graph view (G)"
         >
-          <span>{timelineCurveMode === 'graph' ? 'Graph' : 'Timeline'}</span>
+          <span>{timelineCurveMode === 'graph' ? 'Graph' : originalUi('original.timelineMode', 'Timeline')}</span>
           <kbd>G</kbd>
         </button>
         {upgradeLegacyTransitionComposition && (

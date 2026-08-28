@@ -13,6 +13,7 @@ import {
   MidiTrackTypeIcon,
   TrackHeaderIcon,
 } from './TimelineHeaderTrackIcons';
+import { originalUi } from '../../../firefly/i18n/originalUi';
 
 type HeaderTrack = TimelineHeaderProps['track'];
 type AudioHeaderDensity = 'full' | 'compact' | 'condensed' | null;
@@ -33,7 +34,7 @@ export function TimelineHeaderMixerTypeBadge({ isMidiTrack }: { isMidiTrack: boo
   return (
     <span
       className="track-type-icon-badge"
-      title={isMidiTrack ? 'MIDI track' : 'Audio track'}
+      title={isMidiTrack ? 'MIDI' : originalUi('original.audioTrack', 'Audio track')}
     >
       {isMidiTrack ? <MidiTrackTypeIcon /> : <AudioTrackTypeIcon />}
     </span>
@@ -181,14 +182,14 @@ export function TimelineHeaderMixerControls({
             <button
               className={`btn-icon ${effectiveMuted ? 'muted' : ''}`}
               onClick={(e) => { e.stopPropagation(); onToggleMuted(); }}
-              title={effectiveMuted ? 'Unmute' : 'Mute'}
+              title={effectiveMuted ? originalUi('timeline.unmute', 'Unmute') : originalUi('timeline.mute', 'Mute')}
             >
               M
             </button>
             <button
               className={`btn-icon ${track.locked ? 'locked-active' : ''}`}
               onClick={(e) => { e.stopPropagation(); onToggleLocked?.(); }}
-              title={track.locked ? 'Unlock Track' : 'Lock Track'}
+              title={track.locked ? originalUi('original.unlockTrack', 'Unlock Track') : originalUi('original.lockTrack', 'Lock Track')}
             >
               <TrackHeaderIcon name={track.locked ? 'lock' : 'unlock'} />
             </button>
@@ -220,7 +221,7 @@ export function TimelineHeaderMixerControls({
             <button
               className={`btn-icon ${effectiveMuted ? 'muted' : ''}`}
               onClick={(e) => { e.stopPropagation(); onToggleMuted(); }}
-              title={effectiveMuted ? 'Unmute' : 'Mute'}
+              title={effectiveMuted ? originalUi('timeline.unmute', 'Unmute') : originalUi('timeline.mute', 'Mute')}
             >
               M
             </button>
@@ -230,7 +231,7 @@ export function TimelineHeaderMixerControls({
                 e.stopPropagation();
                 useTimelineStore.getState().updateTrackAudioState(track.id, { inputMonitor: !trackInputMonitor });
               }}
-              title={trackInputMonitor ? 'Input monitor on' : 'Input monitor off'}
+              title={trackInputMonitor ? originalUi('original.inputMonitorOn', 'Input monitor on') : originalUi('original.inputMonitorOff', 'Input monitor off')}
             >
               <TrackHeaderIcon name="speaker" />
             </button>
@@ -255,7 +256,7 @@ export function TimelineHeaderMixerControls({
             <button
               className={`btn-icon ${track.locked ? 'locked-active' : ''}`}
               onClick={(e) => { e.stopPropagation(); onToggleLocked?.(); }}
-              title={track.locked ? 'Unlock Track' : 'Lock Track'}
+              title={track.locked ? originalUi('original.unlockTrack', 'Unlock Track') : originalUi('original.lockTrack', 'Lock Track')}
             >
               <TrackHeaderIcon name={track.locked ? 'lock' : 'unlock'} />
             </button>
@@ -279,14 +280,14 @@ export function TimelineHeaderMixerControls({
             <button
               className={`btn-icon ${effectiveMuted ? 'muted' : ''}`}
               onClick={(e) => { e.stopPropagation(); onToggleMuted(); }}
-              title={effectiveMuted ? 'Unmute' : 'Mute'}
+              title={effectiveMuted ? originalUi('timeline.unmute', 'Unmute') : originalUi('timeline.mute', 'Mute')}
             >
               M
             </button>
             <button
               className={`btn-icon ${track.locked ? 'locked-active' : ''}`}
               onClick={(e) => { e.stopPropagation(); onToggleLocked?.(); }}
-              title={track.locked ? 'Unlock Track' : 'Lock Track'}
+              title={track.locked ? originalUi('original.unlockTrack', 'Unlock Track') : originalUi('original.lockTrack', 'Lock Track')}
             >
               <TrackHeaderIcon name={track.locked ? 'lock' : 'unlock'} />
             </button>

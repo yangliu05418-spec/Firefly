@@ -18,6 +18,7 @@ import {
   TIMELINE_TOOL_GROUPS,
   type TimelineToolDefinition,
 } from './registry';
+import { originalUi } from '../../../firefly/i18n/originalUi';
 
 const PLACEMENT_COMMAND_TOOL_IDS = new Set<string>([
   'insert',
@@ -31,6 +32,14 @@ const PLACEMENT_COMMAND_TOOL_IDS = new Set<string>([
 
 const TOOL_FLYOUT_OWNER_EVENT = 'timelineToolFlyoutOwnerChanged';
 const TOOL_FLYOUT_OWNER_KEY = '__masterselectsTimelineToolFlyoutOwner';
+
+const GROUP_LABELS: Record<TimelineToolGroupId, string> = {
+  selection: originalUi('original.toolSelection', 'Selection'),
+  cut: originalUi('original.toolCut', 'Cut'),
+  trim: originalUi('original.toolTrim', 'Trim'),
+  placement: originalUi('original.toolPlace', 'Place'),
+  navigation: originalUi('original.toolNavigate', 'Navigate'),
+};
 
 declare global {
   interface Window {
@@ -250,7 +259,7 @@ export function TimelineToolPalette() {
   }, []);
 
   return (
-    <div className="timeline-tool-palette" role="toolbar" aria-label="Timeline tools">
+    <div className="timeline-tool-palette" role="toolbar" aria-label={originalUi('original.timelineTools', 'Timeline tools')}>
       {TIMELINE_TOOL_GROUPS.map((group) => {
         const lastToolId = lastTimelineToolByGroup[group.id] ?? group.defaultToolId;
         const displayTool = TIMELINE_TOOL_DEFINITION_BY_ID[lastToolId] ?? TIMELINE_TOOL_DEFINITION_BY_ID[group.defaultToolId];
@@ -263,7 +272,7 @@ export function TimelineToolPalette() {
           <TimelineToolButton
             key={group.id}
             groupId={group.id}
-            label={group.label}
+            label={GROUP_LABELS[group.id]}
             title={title}
             active={active}
             open={open}

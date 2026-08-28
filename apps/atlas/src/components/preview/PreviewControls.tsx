@@ -10,6 +10,7 @@ import {
   getPreviewLayerLabel,
   isSamePreviewPanelSource,
 } from '../../utils/previewPanelSource';
+import { originalUi } from '../../firefly/i18n/originalUi';
 
 interface PreviewControlsProps {
   // Source monitor
@@ -115,15 +116,19 @@ export function PreviewControls({
             title={canEdit ? 'Toggle Edit Mode [Tab]' : 'Edit mode only works on the full active composition'}
             disabled={!canEdit}
           >
-            Edit
+            {originalUi('original.previewEdit', 'Edit')}
           </button>
           {canEdit && (
             <button
               type="button"
               className={`preview-scene-toggle-btn ${sceneObjectOverlayEnabled ? 'active' : ''}`}
               onClick={() => setSceneObjectOverlayEnabled(!sceneObjectOverlayEnabled)}
-              title={sceneObjectOverlayEnabled ? 'Hide scene handles' : 'Show scene handles'}
-              aria-label={sceneObjectOverlayEnabled ? 'Hide scene handles' : 'Show scene handles'}
+              title={sceneObjectOverlayEnabled
+                ? originalUi('original.previewHideHandles', 'Hide scene handles')
+                : originalUi('original.previewShowHandles', 'Show scene handles')}
+              aria-label={sceneObjectOverlayEnabled
+                ? originalUi('original.previewHideHandles', 'Hide scene handles')
+                : originalUi('original.previewShowHandles', 'Show scene handles')}
               aria-pressed={sceneObjectOverlayEnabled}
             >
               <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -152,7 +157,9 @@ export function PreviewControls({
               onClick={() => setSelectorOpen(!selectorOpen)}
               title="Select preview source"
             >
-              <span className="preview-comp-name">{sourceLabel}</span>
+              <span className="preview-comp-name">
+                {sourceLabel === 'Active' ? originalUi('original.previewActive', 'Active') : sourceLabel}
+              </span>
               <span className="preview-comp-arrow">v</span>
             </button>
             {selectorOpen && (
@@ -165,7 +172,7 @@ export function PreviewControls({
                     setSelectorOpen(false);
                   }}
                 >
-                  Active Composition
+                  {originalUi('original.previewActive', 'Active Composition')}
                 </button>
                 {renderLayerOptions(null)}
                 <div className="preview-comp-separator" />

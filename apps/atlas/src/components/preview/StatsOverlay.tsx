@@ -4,6 +4,7 @@ import { useMemo } from 'react';
 import type { EngineStats } from '../../types';
 import { useEngineStore } from '../../stores/engineStore';
 import { useMediaStore } from '../../stores/mediaStore';
+import { originalUi } from '../../firefly/i18n/originalUi';
 
 interface StatsOverlayProps {
   stats: EngineStats;
@@ -161,7 +162,7 @@ export function StatsOverlay({ stats, resolution, expanded, onToggle }: StatsOve
       <div
         className="preview-stats preview-stats-compact"
         onClick={onToggle}
-        title="Click for detailed stats"
+        title={originalUi('original.previewStats', 'Click for detailed stats')}
       >
         {!stats.isIdle && (
           <>
@@ -176,7 +177,7 @@ export function StatsOverlay({ stats, resolution, expanded, onToggle }: StatsOve
           </>
         )}
         {stats.isIdle && (
-          <span style={{ color: '#888', fontWeight: 'bold' }}>IDLE</span>
+          <span style={{ color: '#888', fontWeight: 'bold' }}>{originalUi('original.idle', 'IDLE')}</span>
         )}
         {!stats.isIdle && renderTime > 0 && (
           <span style={{ color: renderTimeColor, marginLeft: 6, fontSize: 10 }}>
