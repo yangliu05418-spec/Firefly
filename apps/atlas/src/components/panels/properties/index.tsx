@@ -20,6 +20,7 @@ import { PropertiesTabStrip } from './PropertiesTabStrip';
 import { liveInputRuntime } from '../../../services/mediaRuntime/liveInputRuntime';
 import { resolveClipTranscriptWords } from '../../../services/transcription/clipTranscriptResolver';
 import { getClipMediaFileId } from '../../../services/mediaArtifacts/mediaSourceArtifacts';
+import { useI18n } from '../../../firefly/i18n';
 import './PropertiesPanel.css';
 import './EffectsTab.css';
 import './AnalysisTranscriptTabs.css';
@@ -29,25 +30,30 @@ import './VolumeBlendshapeTabs.css';
 // Tab type
 type PropertiesTab = 'storyboard' | 'transform' | 'color' | 'effects' | 'audio-edits' | 'masks' | 'transcript' | 'analysis' | 'text' | 'captions' | '3d-text' | 'model-3d' | 'math' | 'motion' | 'adjustment' | 'blendshapes' | 'gaussian-splat' | 'camera' | 'light' | 'splat-effector' | 'lottie' | 'live' | 'slot-clip' | 'transition' | 'track-controls' | 'track-effects' | 'track-sends' | 'track-instrument' | 'master-controls' | 'master-effects';
 
+const IS_FIREFLY_VARIANT = import.meta.env.VITE_APP_VARIANT === 'firefly';
+const UnavailablePropertiesTab = (_props: Record<string, unknown>) => (
+  <div className="panel-empty"><p>此高级功能未在 Firefly Atlas 中开放</p></div>
+);
+
 // Lazy load tab components for code splitting
 const TransformTab = lazy(() => import('./TransformTab').then(m => ({ default: m.TransformTab })));
 const ColorTab = lazy(() => import('./ColorTab').then(m => ({ default: m.ColorTab })));
 const EffectsTab = lazy(() => import('./EffectsTab').then(m => ({ default: m.EffectsTab })));
 const AudioEditStackTab = lazy(() => import('./AudioEditStackTab').then(m => ({ default: m.AudioEditStackTab })));
 const MasksTab = lazy(() => import('./MasksTab').then(m => ({ default: m.MasksTab })));
-const AnalysisTab = lazy(() => import('./AnalysisTab').then(m => ({ default: m.AnalysisTab })));
-const BlendshapesTab = lazy(() => import('./BlendshapesTab').then(m => ({ default: m.BlendshapesTab })));
-const GaussianSplatTab = lazy(() => import('./GaussianSplatTab').then(m => ({ default: m.GaussianSplatTab })));
-const LightTab = lazy(() => import('./LightTab').then(m => ({ default: m.LightTab })));
-const Model3DTab = lazy(() => import('./Model3DTab').then(m => ({ default: m.Model3DTab })));
-const SplatEffectorTab = lazy(() => import('./SplatEffectorTab').then(m => ({ default: m.SplatEffectorTab })));
-const ThreeDTextTab = lazy(() => import('./ThreeDTextTab').then(m => ({ default: m.ThreeDTextTab })));
+const AnalysisTab = IS_FIREFLY_VARIANT ? UnavailablePropertiesTab : lazy(() => import('./AnalysisTab').then(m => ({ default: m.AnalysisTab })));
+const BlendshapesTab = IS_FIREFLY_VARIANT ? UnavailablePropertiesTab : lazy(() => import('./BlendshapesTab').then(m => ({ default: m.BlendshapesTab })));
+const GaussianSplatTab = IS_FIREFLY_VARIANT ? UnavailablePropertiesTab : lazy(() => import('./GaussianSplatTab').then(m => ({ default: m.GaussianSplatTab })));
+const LightTab = IS_FIREFLY_VARIANT ? UnavailablePropertiesTab : lazy(() => import('./LightTab').then(m => ({ default: m.LightTab })));
+const Model3DTab = IS_FIREFLY_VARIANT ? UnavailablePropertiesTab : lazy(() => import('./Model3DTab').then(m => ({ default: m.Model3DTab })));
+const SplatEffectorTab = IS_FIREFLY_VARIANT ? UnavailablePropertiesTab : lazy(() => import('./SplatEffectorTab').then(m => ({ default: m.SplatEffectorTab })));
+const ThreeDTextTab = IS_FIREFLY_VARIANT ? UnavailablePropertiesTab : lazy(() => import('./ThreeDTextTab').then(m => ({ default: m.ThreeDTextTab })));
 const CaptionTab = lazy(() => import('./CaptionTab').then(m => ({ default: m.CaptionTab })));
 const LottieTab = lazy(() => import('./LottieTab').then(m => ({ default: m.LottieTab })));
 const SlotClipTab = lazy(() => import('./SlotClipTab').then(m => ({ default: m.SlotClipTab })));
-const MathSceneTab = lazy(() => import('./MathSceneTab').then(m => ({ default: m.MathSceneTab })));
-const MotionShapeTab = lazy(() => import('./MotionShapeTab').then(m => ({ default: m.MotionShapeTab })));
-const MotionAdjustmentTab = lazy(() => import('./MotionAdjustmentTab').then(m => ({ default: m.MotionAdjustmentTab })));
+const MathSceneTab = IS_FIREFLY_VARIANT ? UnavailablePropertiesTab : lazy(() => import('./MathSceneTab').then(m => ({ default: m.MathSceneTab })));
+const MotionShapeTab = IS_FIREFLY_VARIANT ? UnavailablePropertiesTab : lazy(() => import('./MotionShapeTab').then(m => ({ default: m.MotionShapeTab })));
+const MotionAdjustmentTab = IS_FIREFLY_VARIANT ? UnavailablePropertiesTab : lazy(() => import('./MotionAdjustmentTab').then(m => ({ default: m.MotionAdjustmentTab })));
 const TransitionTab = lazy(() => import('./TransitionTab').then(m => ({ default: m.TransitionTab })));
 const LiveInputTab = lazy(() => import('./LiveInputTab').then(m => ({ default: m.LiveInputTab })));
 const StoryboardPropertiesPanel = lazy(() =>
@@ -56,7 +62,8 @@ const StoryboardPropertiesPanel = lazy(() =>
 
 // Tab loading fallback
 function TabLoading() {
-  return <div className="properties-tab-loading">Loading...</div>;
+  const { t } = useI18n();
+  return <div className="properties-tab-loading">{t('inspector.loading')}</div>;
 }
 
 function getGuidedPropertiesTabAttributes(tab: PropertiesTab) {
@@ -78,6 +85,7 @@ function getSelectionKey(
 }
 
 export function PropertiesPanel() {
+  const { t } = useI18n();
   // Reactive data - subscribe to specific values only
   const clips = useTimelineStore(state => state.clips);
   const tracks = useTimelineStore(state => state.tracks);
@@ -330,8 +338,8 @@ export function PropertiesPanel() {
   if (slotGridProgress > 0.5 && !selectedSlotComposition) {
     return (
       <div className="properties-panel">
-        <div className="panel-header"><h3>Properties</h3></div>
-        <div className="panel-empty"><p>Select a slot to edit slot clip settings</p></div>
+        <div className="panel-header"><h3>{t('inspector.title')}</h3></div>
+        <div className="panel-empty"><p>{t('inspector.selectSlot')}</p></div>
       </div>
     );
   }
@@ -341,7 +349,7 @@ export function PropertiesPanel() {
       <div className="properties-panel">
         <PropertiesTabStrip>
           <button className="tab-btn active" onClick={() => setActiveTab('slot-clip')}>
-            Slot Clip
+            {t('inspector.slotClip')}
           </button>
         </PropertiesTabStrip>
 
@@ -362,7 +370,7 @@ export function PropertiesPanel() {
       <div className="properties-panel">
         <PropertiesTabStrip>
           <button className="tab-btn active" onClick={() => setActiveTab('transition')}>
-            TRANSITION Parameters
+            {t('inspector.transitionParameters')}
           </button>
         </PropertiesTabStrip>
 
@@ -375,7 +383,7 @@ export function PropertiesPanel() {
                 transitionId={selectedTransitionSelection.transitionId}
               />
             ) : (
-              <div className="panel-empty"><p>Select an active transition to edit its parameters.</p></div>
+              <div className="panel-empty"><p>{t('inspector.selectTransition')}</p></div>
             )}
           </Suspense>
         </div>
@@ -400,7 +408,7 @@ export function PropertiesPanel() {
               className={`tab-btn ${activeTab === 'track-controls' ? 'active' : ''}`}
               onClick={() => setActiveTab('track-controls')}
             >
-              Controls
+              {t('inspector.controls')}
             </button>
           )}
           {isMidiTrack && (
@@ -408,7 +416,7 @@ export function PropertiesPanel() {
               className={`tab-btn ${activeTab === 'track-instrument' ? 'active' : ''}`}
               onClick={() => setActiveTab('track-instrument')}
             >
-              Instrument
+              {t('inspector.instrument')}
             </button>
           )}
           {hasBusControls && (
@@ -417,13 +425,13 @@ export function PropertiesPanel() {
                 className={`tab-btn ${activeTab === 'track-effects' ? 'active' : ''}`}
                 onClick={() => setActiveTab('track-effects')}
               >
-                Effects {trackEffectCount > 0 && <span className="badge">{trackEffectCount}</span>}
+                {t('inspector.effects')} {trackEffectCount > 0 && <span className="badge">{trackEffectCount}</span>}
               </button>
               <button
                 className={`tab-btn ${activeTab === 'track-sends' ? 'active' : ''}`}
                 onClick={() => setActiveTab('track-sends')}
               >
-                Sends {trackSendCount > 0 && <span className="badge">{trackSendCount}</span>}
+                {t('inspector.sends')} {trackSendCount > 0 && <span className="badge">{trackSendCount}</span>}
               </button>
             </>
           )}
@@ -438,7 +446,7 @@ export function PropertiesPanel() {
               {hasBusControls && activeTab === 'track-sends' && <AudioTrackSendsTab track={selectedPropertiesTrack} />}
             </>
           ) : (
-            <div className="panel-empty"><p>Track properties are available for audio and MIDI tracks.</p></div>
+            <div className="panel-empty"><p>{t('inspector.trackUnavailable')}</p></div>
           )}
         </div>
       </div>
@@ -455,13 +463,13 @@ export function PropertiesPanel() {
             className={`tab-btn ${activeTab === 'master-controls' ? 'active' : ''}`}
             onClick={() => setActiveTab('master-controls')}
           >
-            Controls
+            {t('inspector.controls')}
           </button>
           <button
             className={`tab-btn ${activeTab === 'master-effects' ? 'active' : ''}`}
             onClick={() => setActiveTab('master-effects')}
           >
-            Effects {masterEffectCount > 0 && <span className="badge">{masterEffectCount}</span>}
+            {t('inspector.effects')} {masterEffectCount > 0 && <span className="badge">{masterEffectCount}</span>}
           </button>
         </PropertiesTabStrip>
 
@@ -479,7 +487,7 @@ export function PropertiesPanel() {
         <div className="properties-panel">
           <PropertiesTabStrip>
             <button className="tab-btn active" type="button">
-              Live <span className="badge">{reconnectRequiredCount}</span>
+              {t('inspector.live')} <span className="badge">{reconnectRequiredCount}</span>
             </button>
           </PropertiesTabStrip>
           <div className="properties-content">
@@ -490,8 +498,8 @@ export function PropertiesPanel() {
     }
     return (
       <div className="properties-panel">
-        <div className="panel-header"><h3>Properties</h3></div>
-        <div className="panel-empty"><p>Select a clip to edit properties</p></div>
+        <div className="panel-header"><h3>{t('inspector.title')}</h3></div>
+        <div className="panel-empty"><p>{t('inspector.noSelection')}</p></div>
       </div>
     );
   }
@@ -571,99 +579,99 @@ export function PropertiesPanel() {
             className={`tab-btn ${activeTab === 'storyboard' ? 'active' : ''}`}
             onClick={() => setActiveTab('storyboard')}
           >
-            Scene
+            {t('inspector.scene')}
           </button>
         ) : isAudioClip ? (
           <>
             <button className={`tab-btn ${activeTab === 'effects' ? 'active' : ''}`} onClick={() => setActiveTab('effects')}>
-              Effects {visualEffects.length > 0 && <span className="badge">{visualEffects.length}</span>}
+              {t('inspector.effects')} {visualEffects.length > 0 && <span className="badge">{visualEffects.length}</span>}
             </button>
             <button className={`tab-btn ${activeTab === 'audio-edits' ? 'active' : ''}`} onClick={() => setActiveTab('audio-edits')}>
-              Audio Edits {audioEditCount > 0 && <span className="badge">{audioEditCount}</span>}
+              {t('inspector.audioEdits')} {audioEditCount > 0 && <span className="badge">{audioEditCount}</span>}
             </button>
-            <button className={`tab-btn ${activeTab === 'analysis' ? 'active' : ''}`} onClick={() => setActiveTab('analysis')}>
-              Analysis
-            </button>
+            {!IS_FIREFLY_VARIANT && <button className={`tab-btn ${activeTab === 'analysis' ? 'active' : ''}`} onClick={() => setActiveTab('analysis')}>
+              {t('inspector.analysis')}
+            </button>}
           </>
         ) : isCameraClip ? (
           <>
-            <button className={`tab-btn ${activeTab === 'transform' ? 'active' : ''}`} {...getGuidedPropertiesTabAttributes('transform')} onClick={() => setActiveTab('transform')}>Transform</button>
+            <button className={`tab-btn ${activeTab === 'transform' ? 'active' : ''}`} {...getGuidedPropertiesTabAttributes('transform')} onClick={() => setActiveTab('transform')}>{t('inspector.transform')}</button>
           </>
         ) : isMathSceneClip ? (
           <>
-            <button className={`tab-btn ${activeTab === 'math' ? 'active' : ''}`} onClick={() => setActiveTab('math')}>Math</button>
-            <button className={`tab-btn ${activeTab === 'transform' ? 'active' : ''}`} {...getGuidedPropertiesTabAttributes('transform')} onClick={() => setActiveTab('transform')}>Transform</button>
-            <button className={`tab-btn ${activeTab === 'color' ? 'active' : ''}`} onClick={() => setActiveTab('color')}>Color</button>
+            <button className={`tab-btn ${activeTab === 'math' ? 'active' : ''}`} onClick={() => setActiveTab('math')}>{t('inspector.math')}</button>
+            <button className={`tab-btn ${activeTab === 'transform' ? 'active' : ''}`} {...getGuidedPropertiesTabAttributes('transform')} onClick={() => setActiveTab('transform')}>{t('inspector.transform')}</button>
+            <button className={`tab-btn ${activeTab === 'color' ? 'active' : ''}`} onClick={() => setActiveTab('color')}>{t('inspector.color')}</button>
             <button className={`tab-btn ${activeTab === 'effects' ? 'active' : ''}`} onClick={() => setActiveTab('effects')}>
-              Effects {visualEffects.length > 0 && <span className="badge">{visualEffects.length}</span>}
+              {t('inspector.effects')} {visualEffects.length > 0 && <span className="badge">{visualEffects.length}</span>}
             </button>
             <button className={`tab-btn ${activeTab === 'masks' ? 'active' : ''}`} {...getGuidedPropertiesTabAttributes('masks')} onClick={() => setActiveTab('masks')}>
-              Masks {selectedClip.masks && selectedClip.masks.length > 0 && <span className="badge">{selectedClip.masks.length}</span>}
+              {t('inspector.masks')} {selectedClip.masks && selectedClip.masks.length > 0 && <span className="badge">{selectedClip.masks.length}</span>}
             </button>
           </>
         ) : isMotionAdjustmentClip ? (
           <>
-            <button className={`tab-btn ${activeTab === 'adjustment' ? 'active' : ''}`} onClick={() => setActiveTab('adjustment')}>Adjustment</button>
+            <button className={`tab-btn ${activeTab === 'adjustment' ? 'active' : ''}`} onClick={() => setActiveTab('adjustment')}>{t('inspector.adjustment')}</button>
             <button className={`tab-btn ${activeTab === 'effects' ? 'active' : ''}`} onClick={() => setActiveTab('effects')}>
-              Effects {visualEffects.length > 0 && <span className="badge">{visualEffects.length}</span>}
+              {t('inspector.effects')} {visualEffects.length > 0 && <span className="badge">{visualEffects.length}</span>}
             </button>
             <button className={`tab-btn ${activeTab === 'masks' ? 'active' : ''}`} {...getGuidedPropertiesTabAttributes('masks')} onClick={() => setActiveTab('masks')}>
-              Masks {selectedClip.masks && selectedClip.masks.length > 0 && <span className="badge">{selectedClip.masks.length}</span>}
+              {t('inspector.masks')} {selectedClip.masks && selectedClip.masks.length > 0 && <span className="badge">{selectedClip.masks.length}</span>}
             </button>
           </>
         ) : isMotionShapeClip ? (
           <>
-            <button className={`tab-btn ${activeTab === 'motion' ? 'active' : ''}`} onClick={() => setActiveTab('motion')}>Motion</button>
-            <button className={`tab-btn ${activeTab === 'transform' ? 'active' : ''}`} onClick={() => setActiveTab('transform')}>Transform</button>
-            <button className={`tab-btn ${activeTab === 'color' ? 'active' : ''}`} onClick={() => setActiveTab('color')}>Color</button>
+            <button className={`tab-btn ${activeTab === 'motion' ? 'active' : ''}`} onClick={() => setActiveTab('motion')}>{t('inspector.motion')}</button>
+            <button className={`tab-btn ${activeTab === 'transform' ? 'active' : ''}`} onClick={() => setActiveTab('transform')}>{t('inspector.transform')}</button>
+            <button className={`tab-btn ${activeTab === 'color' ? 'active' : ''}`} onClick={() => setActiveTab('color')}>{t('inspector.color')}</button>
             <button className={`tab-btn ${activeTab === 'effects' ? 'active' : ''}`} onClick={() => setActiveTab('effects')}>
-              Effects {visualEffects.length > 0 && <span className="badge">{visualEffects.length}</span>}
+              {t('inspector.effects')} {visualEffects.length > 0 && <span className="badge">{visualEffects.length}</span>}
             </button>
             <button className={`tab-btn ${activeTab === 'masks' ? 'active' : ''}`} {...getGuidedPropertiesTabAttributes('masks')} onClick={() => setActiveTab('masks')}>
-              Masks {selectedClip.masks && selectedClip.masks.length > 0 && <span className="badge">{selectedClip.masks.length}</span>}
+              {t('inspector.masks')} {selectedClip.masks && selectedClip.masks.length > 0 && <span className="badge">{selectedClip.masks.length}</span>}
             </button>
           </>
         ) : isCaptionClip ? (
           <>
-            <button className={`tab-btn ${activeTab === 'captions' ? 'active' : ''}`} onClick={() => setActiveTab('captions')}>Captions</button>
-            <button className={`tab-btn ${activeTab === 'transform' ? 'active' : ''}`} onClick={() => setActiveTab('transform')}>Transform</button>
-            <button className={`tab-btn ${activeTab === 'color' ? 'active' : ''}`} onClick={() => setActiveTab('color')}>Color</button>
+            <button className={`tab-btn ${activeTab === 'captions' ? 'active' : ''}`} onClick={() => setActiveTab('captions')}>{t('inspector.captions')}</button>
+            <button className={`tab-btn ${activeTab === 'transform' ? 'active' : ''}`} onClick={() => setActiveTab('transform')}>{t('inspector.transform')}</button>
+            <button className={`tab-btn ${activeTab === 'color' ? 'active' : ''}`} onClick={() => setActiveTab('color')}>{t('inspector.color')}</button>
             <button className={`tab-btn ${activeTab === 'effects' ? 'active' : ''}`} onClick={() => setActiveTab('effects')}>
-              Effects {visualEffects.length > 0 && <span className="badge">{visualEffects.length}</span>}
+              {t('inspector.effects')} {visualEffects.length > 0 && <span className="badge">{visualEffects.length}</span>}
             </button>
             <button className={`tab-btn ${activeTab === 'masks' ? 'active' : ''}`} onClick={() => setActiveTab('masks')}>
-              Masks {selectedClip.masks && selectedClip.masks.length > 0 && <span className="badge">{selectedClip.masks.length}</span>}
+              {t('inspector.masks')} {selectedClip.masks && selectedClip.masks.length > 0 && <span className="badge">{selectedClip.masks.length}</span>}
             </button>
           </>
         ) : isTextClip ? (
           <>
-            <button className={`tab-btn ${activeTab === 'text' ? 'active' : ''}`} onClick={() => setActiveTab('text')}>Text</button>
-            <button className={`tab-btn ${activeTab === 'transform' ? 'active' : ''}`} onClick={() => setActiveTab('transform')}>Transform</button>
-            <button className={`tab-btn ${activeTab === 'color' ? 'active' : ''}`} onClick={() => setActiveTab('color')}>Color</button>
+            <button className={`tab-btn ${activeTab === 'text' ? 'active' : ''}`} onClick={() => setActiveTab('text')}>{t('inspector.text')}</button>
+            <button className={`tab-btn ${activeTab === 'transform' ? 'active' : ''}`} onClick={() => setActiveTab('transform')}>{t('inspector.transform')}</button>
+            <button className={`tab-btn ${activeTab === 'color' ? 'active' : ''}`} onClick={() => setActiveTab('color')}>{t('inspector.color')}</button>
             <button className={`tab-btn ${activeTab === 'effects' ? 'active' : ''}`} onClick={() => setActiveTab('effects')}>
-              Effects {visualEffects.length > 0 && <span className="badge">{visualEffects.length}</span>}
+              {t('inspector.effects')} {visualEffects.length > 0 && <span className="badge">{visualEffects.length}</span>}
             </button>
             <button className={`tab-btn ${activeTab === 'masks' ? 'active' : ''}`} onClick={() => setActiveTab('masks')}>
-              Masks {selectedClip.masks && selectedClip.masks.length > 0 && <span className="badge">{selectedClip.masks.length}</span>}
+              {t('inspector.masks')} {selectedClip.masks && selectedClip.masks.length > 0 && <span className="badge">{selectedClip.masks.length}</span>}
             </button>
           </>
         ) : is3DTextClip ? (
           <>
-            <button className={`tab-btn ${activeTab === '3d-text' ? 'active' : ''}`} onClick={() => setActiveTab('3d-text')}>3D Text</button>
-            <button className={`tab-btn ${activeTab === 'transform' ? 'active' : ''}`} onClick={() => setActiveTab('transform')}>Transform</button>
-            <button className={`tab-btn ${activeTab === 'color' ? 'active' : ''}`} onClick={() => setActiveTab('color')}>Color</button>
+            <button className={`tab-btn ${activeTab === '3d-text' ? 'active' : ''}`} onClick={() => setActiveTab('3d-text')}>{t('inspector.model3d')} {t('inspector.text')}</button>
+            <button className={`tab-btn ${activeTab === 'transform' ? 'active' : ''}`} onClick={() => setActiveTab('transform')}>{t('inspector.transform')}</button>
+            <button className={`tab-btn ${activeTab === 'color' ? 'active' : ''}`} onClick={() => setActiveTab('color')}>{t('inspector.color')}</button>
             <button className={`tab-btn ${activeTab === 'effects' ? 'active' : ''}`} onClick={() => setActiveTab('effects')}>
-              Effects {visualEffects.length > 0 && <span className="badge">{visualEffects.length}</span>}
+              {t('inspector.effects')} {visualEffects.length > 0 && <span className="badge">{visualEffects.length}</span>}
             </button>
             <button className={`tab-btn ${activeTab === 'masks' ? 'active' : ''}`} onClick={() => setActiveTab('masks')}>
-              Masks {selectedClip.masks && selectedClip.masks.length > 0 && <span className="badge">{selectedClip.masks.length}</span>}
+              {t('inspector.masks')} {selectedClip.masks && selectedClip.masks.length > 0 && <span className="badge">{selectedClip.masks.length}</span>}
             </button>
           </>
         ) : (
           <>
             {isLiveInputClip && (
               <button className={`tab-btn ${activeTab === 'live' ? 'active' : ''}`} onClick={() => setActiveTab('live')}>
-                Live
+                {t('inspector.live')}
               </button>
             )}
             {isVectorAnimationClip && (
@@ -671,47 +679,47 @@ export function PropertiesPanel() {
                 {vectorAnimationTabLabel}
               </button>
             )}
-            <button className={`tab-btn ${activeTab === 'transform' ? 'active' : ''}`} {...getGuidedPropertiesTabAttributes('transform')} onClick={() => setActiveTab('transform')}>Transform</button>
+            <button className={`tab-btn ${activeTab === 'transform' ? 'active' : ''}`} {...getGuidedPropertiesTabAttributes('transform')} onClick={() => setActiveTab('transform')}>{t('inspector.transform')}</button>
             {isModelClip && (
-              <button className={`tab-btn ${activeTab === 'model-3d' ? 'active' : ''}`} onClick={() => setActiveTab('model-3d')}>3D</button>
+              <button className={`tab-btn ${activeTab === 'model-3d' ? 'active' : ''}`} onClick={() => setActiveTab('model-3d')}>{t('inspector.model3d')}</button>
             )}
             {!isSplatEffectorClip && (
-              <button className={`tab-btn ${activeTab === 'color' ? 'active' : ''}`} onClick={() => setActiveTab('color')}>Color</button>
+              <button className={`tab-btn ${activeTab === 'color' ? 'active' : ''}`} onClick={() => setActiveTab('color')}>{t('inspector.color')}</button>
             )}
             {isGaussianAvatar && (
               <button className={`tab-btn ${activeTab === 'blendshapes' ? 'active' : ''}`} onClick={() => setActiveTab('blendshapes')}>
-                Blendshapes
+                {t('inspector.blendshapes')}
               </button>
             )}
             {isGaussianSplat && (
               <button className={`tab-btn ${activeTab === 'gaussian-splat' ? 'active' : ''}`} onClick={() => setActiveTab('gaussian-splat')}>
-                Gaussian
+                {t('inspector.gaussian')}
               </button>
             )}
             {isLightClip && (
               <button className={`tab-btn ${activeTab === 'light' ? 'active' : ''}`} onClick={() => setActiveTab('light')}>
-                Light
+                {t('inspector.light')}
               </button>
             )}
             {isSplatEffectorClip && (
               <button className={`tab-btn ${activeTab === 'splat-effector' ? 'active' : ''}`} onClick={() => setActiveTab('splat-effector')}>
-                Effector
+                {t('inspector.effector')}
               </button>
             )}
             {!isLightClip && (
               <>
                 <button className={`tab-btn ${activeTab === 'effects' ? 'active' : ''}`} onClick={() => setActiveTab('effects')}>
-                  Effects {visualEffects.length > 0 && <span className="badge">{visualEffects.length}</span>}
+                  {t('inspector.effects')} {visualEffects.length > 0 && <span className="badge">{visualEffects.length}</span>}
                 </button>
                 <button className={`tab-btn ${activeTab === 'masks' ? 'active' : ''}`} {...getGuidedPropertiesTabAttributes('masks')} onClick={() => setActiveTab('masks')}>
-                  Masks {selectedClip.masks && selectedClip.masks.length > 0 && <span className="badge">{selectedClip.masks.length}</span>}
+                  {t('inspector.masks')} {selectedClip.masks && selectedClip.masks.length > 0 && <span className="badge">{selectedClip.masks.length}</span>}
                 </button>
               </>
             )}
-            {!isSolidClip && !isVectorAnimationClip && !isLightClip && (
+            {!IS_FIREFLY_VARIANT && !isSolidClip && !isVectorAnimationClip && !isLightClip && (
               <>
                 <button className={`tab-btn ${activeTab === 'analysis' ? 'active' : ''}`} onClick={() => setActiveTab('analysis')}>
-                  Analysis {sourceAnalysisStatus === 'ready' && <span className="badge">✓</span>}
+                  {t('inspector.analysis')} {sourceAnalysisStatus === 'ready' && <span className="badge">✓</span>}
                 </button>
               </>
             )}

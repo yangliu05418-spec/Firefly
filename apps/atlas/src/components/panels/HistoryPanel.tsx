@@ -22,6 +22,7 @@ const LIST_CHROME_WIDTH = 24;
 /** Widest a single lane step may get, so two lanes on a full-width tab do not
  *  end up half a screen apart. */
 const MAX_LANE_GAP = 140;
+const IS_FIREFLY_VARIANT = import.meta.env.VITE_APP_VARIANT === 'firefly';
 
 interface GraphGeometry { railPadding: number; laneGap: number; railWidth: number; }
 interface HistoryNode { id: string; parentId: string | null; snapshot: { label: string; timestamp: number }; }
@@ -54,14 +55,14 @@ function createGeometry(panelWidth: number, maxLane: number): GraphGeometry {
   return { railPadding, laneGap, railWidth: railPadding * 2 + Math.max(maxLane, 0) * laneGap };
 }
 
-function formatHistoryLabel(label: string): string { return label.trim() || 'History change'; }
+function formatHistoryLabel(label: string): string { return label.trim() || (IS_FIREFLY_VARIANT ? '历史更改' : 'History change'); }
 function getDayKey(timestamp: number): string { const date = new Date(timestamp); return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`; }
 function formatDayLabel(timestamp: number): string {
   const today = new Date();
   const yesterday = new Date();
   yesterday.setDate(today.getDate() - 1);
-  if (getDayKey(timestamp) === getDayKey(today.getTime())) return 'Today';
-  if (getDayKey(timestamp) === getDayKey(yesterday.getTime())) return 'Yesterday';
+  if (getDayKey(timestamp) === getDayKey(today.getTime())) return IS_FIREFLY_VARIANT ? '今天' : 'Today';
+  if (getDayKey(timestamp) === getDayKey(yesterday.getTime())) return IS_FIREFLY_VARIANT ? '昨天' : 'Yesterday';
   return dateFormatter.format(new Date(timestamp));
 }
 function formatChunkTitle(timestamp: number): string {
@@ -199,13 +200,13 @@ function createGraphLines(groups: HistoryEntryGroup[], geometry: GraphGeometry):
 function isJumpableEntry(entry: HistoryListEntry): boolean { return !entry.active && entry.kind !== 'event'; }
 function entryClassName(entry: HistoryGraphEntry): string { return ['history-panel-entry', `history-panel-entry-${entry.kind}`, entry.eventType ? `history-panel-entry-${entry.eventType}` : '', entry.active ? 'history-panel-entry-active' : '', entry.highlighted ? 'history-panel-entry-highlighted' : ''].filter(Boolean).join(' '); }
 function nodeClassName(entry: HistoryGraphEntry): string { return ['history-panel-node-dot', `history-panel-node-${entry.kind}`, entry.eventType ? `history-panel-node-${entry.eventType}` : '', entry.walked ? 'history-panel-node-walked' : '', entry.active ? 'history-panel-node-active' : ''].filter(Boolean).join(' '); }
-function formatEntryMeta(entry: HistoryGraphEntry): string { return entry.kind === 'event' && entry.eventType !== 'manual-save' ? 'Event' : ''; }
+function formatEntryMeta(entry: HistoryGraphEntry): string { return entry.kind === 'event' && entry.eventType !== 'manual-save' ? (IS_FIREFLY_VARIANT ? '事件' : 'Event') : ''; }
 function formatEntryBadge(entry: HistoryGraphEntry): { text: string; hint: boolean } | null {
-  if (entry.active) return { text: 'Current', hint: false };
-  if (entry.eventType === 'manual-save') return { text: 'Save', hint: false };
-  if (entry.kind === 'undoable') return { text: 'Undo', hint: true };
-  if (entry.kind === 'redoable') return { text: 'Redo', hint: true };
-  if (entry.kind === 'branch') return { text: 'Jump', hint: true };
+  if (entry.active) return { text: IS_FIREFLY_VARIANT ? '当前' : 'Current', hint: false };
+  if (entry.eventType === 'manual-save') return { text: IS_FIREFLY_VARIANT ? '保存' : 'Save', hint: false };
+  if (entry.kind === 'undoable') return { text: IS_FIREFLY_VARIANT ? '撤销至此' : 'Undo', hint: true };
+  if (entry.kind === 'redoable') return { text: IS_FIREFLY_VARIANT ? '重做到此' : 'Redo', hint: true };
+  if (entry.kind === 'branch') return { text: IS_FIREFLY_VARIANT ? '跳转' : 'Jump', hint: true };
   return null;
 }
 
@@ -252,12 +253,17 @@ export function HistoryPanel() {
     const { branchCount } = createLaneMap(entries, historyState.nodes);
     return { undoable: entries.filter((entry) => entry.kind === 'undoable').length, redoable: entries.filter((entry) => entry.kind === 'redoable').length, saves: entries.filter((entry) => entry.eventType === 'manual-save').length, branches: branchCount };
   }, [entries, historyState.nodes]);
-  const summaryText = [`${counts.undoable} undo`, `${counts.redoable} redo`, `${counts.saves} saves`, counts.branches ? `${counts.branches} branches` : ''].filter(Boolean).join(' · ');
+  const summaryText = [
+    `${counts.undoable} ${IS_FIREFLY_VARIANT ? '项可撤销' : 'undo'}`,
+    `${counts.redoable} ${IS_FIREFLY_VARIANT ? '项可重做' : 'redo'}`,
+    `${counts.saves} ${IS_FIREFLY_VARIANT ? '次保存' : 'saves'}`,
+    counts.branches ? `${counts.branches} ${IS_FIREFLY_VARIANT ? '个分支' : 'branches'}` : '',
+  ].filter(Boolean).join(' · ');
   const graphStyle = { '--history-row-height': `${ROW_HEIGHT}px`, '--history-rail-width': `${graphLines.railWidth}px`, '--history-graph-height': `${graphLines.height}px`, minHeight: graphLines.height } as CSSProperties;
 
   return <div className="history-panel" ref={panelRef}>
-    <div className="history-panel-toolbar"><div className="history-panel-heading"><h2>History</h2><span title={summaryText}>{summaryText}</span></div><div className="history-panel-actions"><button type="button" onClick={() => undo()} disabled={!canUndo()} title={canUndo() ? 'Undo last change' : 'Nothing to undo'}><UndoIcon /><span>Undo</span></button><button type="button" onClick={() => redo()} disabled={!canRedo()} title={canRedo() ? 'Redo next change' : 'Nothing to redo'}><RedoIcon /><span>Redo</span></button></div></div>
-    {graphRows.length === 0 ? <div className="history-panel-empty"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /><path d="M12 7v5l3 2" /></svg><strong>No history yet</strong><span>Edits you make show up here as a timeline you can jump back to.</span></div> : <div className="history-panel-list" ref={listRef} onKeyDown={handleListKeyDown}><div className="history-panel-timeline" style={graphStyle}>
+    <div className="history-panel-toolbar"><div className="history-panel-heading"><h2>{IS_FIREFLY_VARIANT ? '历史记录' : 'History'}</h2><span title={summaryText}>{summaryText}</span></div><div className="history-panel-actions"><button type="button" onClick={() => undo()} disabled={!canUndo()} title={canUndo() ? (IS_FIREFLY_VARIANT ? '撤销上一步更改' : 'Undo last change') : (IS_FIREFLY_VARIANT ? '没有可撤销的操作' : 'Nothing to undo')}><UndoIcon /><span>{IS_FIREFLY_VARIANT ? '撤销' : 'Undo'}</span></button><button type="button" onClick={() => redo()} disabled={!canRedo()} title={canRedo() ? (IS_FIREFLY_VARIANT ? '重做下一步更改' : 'Redo next change') : (IS_FIREFLY_VARIANT ? '没有可重做的操作' : 'Nothing to redo')}><RedoIcon /><span>{IS_FIREFLY_VARIANT ? '重做' : 'Redo'}</span></button></div></div>
+    {graphRows.length === 0 ? <div className="history-panel-empty"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /><path d="M12 7v5l3 2" /></svg><strong>{IS_FIREFLY_VARIANT ? '暂无历史记录' : 'No history yet'}</strong><span>{IS_FIREFLY_VARIANT ? '你的编辑会显示在这里，并可随时返回任意历史节点。' : 'Edits you make show up here as a timeline you can jump back to.'}</span></div> : <div className="history-panel-list" ref={listRef} onKeyDown={handleListKeyDown}><div className="history-panel-timeline" style={graphStyle}>
       <svg className="history-panel-graph-lines" viewBox={`0 0 ${graphLines.railWidth} ${graphLines.height}`} preserveAspectRatio="none" aria-hidden="true">{graphLines.lines.map((line) => <path key={line.id} className={`history-panel-graph-line ${line.walked ? 'history-panel-graph-line-walked' : line.main ? 'history-panel-graph-line-main' : 'history-panel-graph-line-branch'}`} d={line.d} />)}</svg>
       {groups.map((group) => <section key={group.id} className="history-panel-group" style={{ containIntrinsicSize: `auto ${GROUP_HEADER_HEIGHT + group.rows.length * ROW_HEIGHT}px` }}><div className="history-panel-group-header"><span className="history-panel-group-title">{group.title}</span><span className="history-panel-group-count">{group.rows.length}</span></div><ol className="history-panel-graph">{group.rows.map((row) => { const entry = row.entry; const jumpable = isJumpableEntry(entry); const label = formatHistoryLabel(entry.label); const meta = formatEntryMeta(entry); const badge = formatEntryBadge(entry); const clock = timeFormatter.format(new Date(row.timestamp)); return <li key={row.id} className="history-panel-graph-row"><span className="history-panel-row-time">{clock}</span><span className="history-panel-node"><span className={nodeClassName(entry)} style={{ left: laneX(entry.lane, geometry) }} aria-hidden="true" /></span><div className={entryClassName(entry)} title={`${label} · ${clock}${meta ? ` · ${meta}` : ''}`} data-history-entry={jumpable ? '' : undefined} role={jumpable ? 'button' : undefined} tabIndex={jumpable ? 0 : undefined} onClick={jumpable ? () => restoreEntry(entry) : undefined} onKeyDown={jumpable ? (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); restoreEntry(entry); } } : undefined}><span className="history-panel-entry-main"><span className="history-panel-entry-label">{label}</span><span className="history-panel-entry-meta"><span className="history-panel-entry-clock">{clock}</span>{meta && <span className="history-panel-entry-detail">{meta}</span>}</span></span>{badge && <span className={`history-panel-entry-badge${badge.hint ? ' history-panel-entry-badge-hint' : ''}`}>{badge.text}</span>}</div></li>; })}</ol></section>)}
     </div></div>}

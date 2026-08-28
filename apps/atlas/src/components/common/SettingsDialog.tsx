@@ -23,7 +23,8 @@ interface CategoryConfig {
   icon: string;
 }
 
-const categories: CategoryConfig[] = [
+const IS_FIREFLY_VARIANT = import.meta.env.VITE_APP_VARIANT === 'firefly';
+const allCategories: CategoryConfig[] = [
   { id: 'general', label: 'General', icon: '\u2699' },
   { id: 'midi', label: 'MIDI', icon: '\u266B' },
   { id: 'shortcuts', label: 'Shortcuts', icon: '\u2328' },
@@ -33,6 +34,13 @@ const categories: CategoryConfig[] = [
   { id: 'nativeHelper', label: 'Native Helper', icon: '\u26A1' },
   { id: 'integrations', label: 'Integrations', icon: '\uD83D\uDD11' },
 ];
+
+const categories = IS_FIREFLY_VARIANT
+  ? allCategories.filter((category) => ['general', 'shortcuts', 'appearance', 'audio'].includes(category.id)).map((category) => ({
+    ...category,
+    label: ({ general: '常规', shortcuts: '快捷键', appearance: '外观', audio: '音频' } as Record<string, string>)[category.id] ?? category.label,
+  }))
+  : allCategories;
 
 export function SettingsDialog({ onClose }: SettingsDialogProps) {
   const settingsInitialCategory = useSettingsStore((s) => s.settingsInitialCategory);
@@ -83,8 +91,8 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
           className="settings-header"
           onMouseDown={handleMouseDown}
         >
-          <h1>Preferences</h1>
-          <button className="settings-close" onClick={onClose} onMouseDown={(e) => e.stopPropagation()}>{'\u00D7'}</button>
+          <h1>{IS_FIREFLY_VARIANT ? '偏好设置' : 'Preferences'}</h1>
+          <button className="settings-close" aria-label={IS_FIREFLY_VARIANT ? '关闭设置' : 'Close settings'} onClick={onClose} onMouseDown={(e) => e.stopPropagation()}>{'\u00D7'}</button>
         </div>
 
         {/* Main content with sidebar */}
@@ -111,8 +119,8 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
 
         {/* Footer */}
         <div className="settings-footer">
-          <button className="btn-cancel" onClick={onClose}>Cancel</button>
-          <button className="btn-save" onClick={handleSave}>OK</button>
+          <button className="btn-cancel" onClick={onClose}>{IS_FIREFLY_VARIANT ? '取消' : 'Cancel'}</button>
+          <button className="btn-save" onClick={handleSave}>{IS_FIREFLY_VARIANT ? '保存' : 'OK'}</button>
         </div>
       </div>
     </div>

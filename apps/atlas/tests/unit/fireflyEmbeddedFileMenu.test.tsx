@@ -33,8 +33,8 @@ describe('Firefly embedded File menu boundary', () => {
   it('keeps original save and autosave but removes legacy storage and destructive cache actions', () => {
     render(<FileMenu {...baseProps} fireflyEmbedded />);
 
-    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
-    expect(screen.getByText('Autosave')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '保存' })).toBeEnabled();
+    expect(screen.getByText('自动保存')).toBeInTheDocument();
     expect(screen.queryByText('Open Recent')).not.toBeInTheDocument();
     expect(screen.queryByText('Save As...')).not.toBeInTheDocument();
     expect(screen.queryByText('Clear All Cache & Reload')).not.toBeInTheDocument();
@@ -46,8 +46,8 @@ describe('Firefly embedded File menu boundary', () => {
     const onOpen = vi.fn();
     render(<FileMenu {...baseProps} fireflyEmbedded onNew={onNew} onOpen={onOpen} />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'New Project...' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Open Project...' }));
+    fireEvent.click(screen.getByRole('button', { name: '返回项目列表…' }));
+    fireEvent.click(screen.getByRole('button', { name: '打开其他项目…' }));
     expect(onNew).toHaveBeenCalledOnce();
     expect(onOpen).toHaveBeenCalledOnce();
   });

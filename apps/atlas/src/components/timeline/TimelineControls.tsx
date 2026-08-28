@@ -29,6 +29,10 @@ import {
   resolveTimelineRecordingRange,
   toggleTimelineAudioRecording,
 } from '../../services/audio/timelineRecordingWorkflow';
+import { translate, type MessageKey } from '../../firefly/i18n';
+
+const IS_FIREFLY_VARIANT = import.meta.env.VITE_APP_VARIANT === 'firefly';
+const label = (key: MessageKey, fallback: string) => IS_FIREFLY_VARIANT ? translate('zh-CN', key) : fallback;
 
 function formatMasterVolumeDb(value: number): string {
   if (!Number.isFinite(value) || value <= -59.95) return '-inf';
@@ -233,8 +237,8 @@ function TimelineControlsComponent({
         <button
           className="btn btn-sm btn-icon timeline-transport-button"
           onClick={onStop}
-          title="Stop"
-          aria-label="Stop"
+          title={label('timeline.stop', 'Stop')}
+          aria-label={label('timeline.stop', 'Stop')}
         >
           <IconPlayerStopFilled className="timeline-transport-icon" aria-hidden="true" />
         </button>
@@ -314,7 +318,7 @@ function TimelineControlsComponent({
             useTimelineStore.getState().selectMasterProperties();
             setMasterDropdownOpen(open => !open);
           }}
-          title="Master audio bus"
+          title={label('timeline.masterBus', 'Master audio bus')}
         >
           Master {formatMasterVolumeDb(masterAudio.volumeDb)}
         </button>
@@ -327,7 +331,7 @@ function TimelineControlsComponent({
           >
             <div className="timeline-master-audio-grid">
               <label>
-                <span>Volume</span>
+                <span>{label('timeline.volume', 'Volume')}</span>
                 <input
                   type="range"
                   min="-60"
@@ -346,7 +350,7 @@ function TimelineControlsComponent({
                 />
               </label>
               <label>
-                <span>Limiter</span>
+                <span>{label('timeline.limiter', 'Limiter')}</span>
                 <input
                   type="checkbox"
                   checked={masterAudio.limiterEnabled}
@@ -354,7 +358,7 @@ function TimelineControlsComponent({
                 />
               </label>
               <label>
-                <span>True Peak</span>
+                <span>{label('timeline.truePeak', 'True Peak')}</span>
                 <input
                   type="number"
                   min="-24"
@@ -365,7 +369,7 @@ function TimelineControlsComponent({
                 />
               </label>
               <label>
-                <span>Target LUFS</span>
+                <span>{label('timeline.targetLufs', 'Target LUFS')}</span>
                 <input
                   type="number"
                   min="-36"
@@ -377,11 +381,11 @@ function TimelineControlsComponent({
               </label>
             </div>
             <AudioEffectStackControl
-              title="Master FX"
+              title={label('timeline.masterFx', 'Master FX')}
               className="audio-effect-stack-compact"
               effects={masterAudio.effectStack ?? []}
               runtimeAnalyzerScope="master"
-              emptyLabel="No master FX"
+              emptyLabel={IS_FIREFLY_VARIANT ? '暂无主轨效果' : 'No master FX'}
               onAddEffect={(descriptorId) => useTimelineStore.getState().addMasterAudioEffectInstance(descriptorId)}
               onUpdateEffect={(effect, paramName, value) => useTimelineStore.getState().updateMasterAudioEffectInstance(effect.id, { [paramName]: value })}
               onSetEffectEnabled={(effectId, enabled) => useTimelineStore.getState().setMasterAudioEffectInstanceEnabled(effectId, enabled)}
@@ -390,20 +394,20 @@ function TimelineControlsComponent({
             />
             <div className="timeline-master-preflight">
               <div className="timeline-master-preflight-header">
-                <span>Export Preflight</span>
+                <span>{label('timeline.exportPreflight', 'Export Preflight')}</span>
                 <div className="timeline-master-preflight-actions">
                   <button
                     className="btn btn-sm"
                     onClick={handleStaticPreflight}
                   >
-                    Check
+                    {label('timeline.check', 'Check')}
                   </button>
                   <button
                     className="btn btn-sm"
                     onClick={handleRenderedPreflight}
                     disabled={preflightMeasuring}
                   >
-                    {preflightMeasuring ? 'Measuring' : 'Measure'}
+                    {preflightMeasuring ? label('timeline.measuring', 'Measuring') : label('timeline.measure', 'Measure')}
                   </button>
                 </div>
               </div>
@@ -447,9 +451,9 @@ function TimelineControlsComponent({
           <button
             className={`btn btn-sm ${viewDropdownOpen ? 'btn-active' : ''}`}
             onClick={() => setViewDropdownOpen(!viewDropdownOpen)}
-            title="View options"
+            title={label('timeline.view', 'View options')}
           >
-            View
+            {label('timeline.view', 'View')}
             <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginLeft: 4 }}>
               <polyline points="6 9 12 15 18 9" />
             </svg>
@@ -462,7 +466,7 @@ function TimelineControlsComponent({
               >
                 <span className={`view-check ${proxyEnabled ? 'checked' : ''}`}>✓</span>
                 <span>
-                  Proxy
+                  {label('timeline.proxy', 'Proxy')}
                   {isProxyGenerating && ` (${proxyGenerationLabel})`}
                   {!isProxyGenerating && proxyReadyLabel && ` (${proxyReadyLabel})`}
                 </span>
@@ -472,21 +476,21 @@ function TimelineControlsComponent({
                 onClick={onToggleThumbnails}
               >
                 <span className={`view-check ${thumbnailsEnabled ? 'checked' : ''}`}>✓</span>
-                <span>Thumbnails</span>
+                <span>{label('timeline.thumbnails', 'Thumbnails')}</span>
               </div>
               <div
                 className="view-dropdown-item"
                 onClick={onToggleWaveforms}
               >
                 <span className={`view-check ${waveformsEnabled ? 'checked' : ''}`}>✓</span>
-                <span>Waveforms</span>
+                <span>{label('timeline.waveforms', 'Waveforms')}</span>
               </div>
               <div
                 className="view-dropdown-item"
                 onClick={toggleFaceRanges}
               >
                 <span className={`view-check ${showFaceRanges ? 'checked' : ''}`}>✓</span>
-                <span>Face Ranges</span>
+                <span>{label('timeline.faceRanges', 'Face Ranges')}</span>
               </div>
               <div className="view-dropdown-divider" />
               <div
@@ -494,21 +498,21 @@ function TimelineControlsComponent({
                 onClick={() => onSetTrackFocusMode('balanced')}
               >
                 <span className={`view-check ${trackFocusMode === 'balanced' ? 'checked' : ''}`}>✓</span>
-                <span>Balanced Tracks</span>
+                <span>{label('timeline.balancedTracks', 'Balanced Tracks')}</span>
               </div>
               <div
                 className={`view-dropdown-item ${trackFocusMode === 'audio' ? 'active' : ''}`}
                 onClick={onToggleAudioFocusMode}
               >
                 <span className={`view-check ${audioFocusMode ? 'checked' : ''}`}>✓</span>
-                <span>Audio Focus</span>
+                <span>{label('timeline.audioFocus', 'Audio Focus')}</span>
               </div>
               <div
                 className={`view-dropdown-item ${trackFocusMode === 'video' ? 'active' : ''}`}
                 onClick={() => onSetTrackFocusMode('video')}
               >
                 <span className={`view-check ${trackFocusMode === 'video' ? 'checked' : ''}`}>✓</span>
-                <span>Video Focus</span>
+                <span>{label('timeline.videoFocus', 'Video Focus')}</span>
               </div>
               <div className="view-dropdown-divider" />
               <div
@@ -516,35 +520,35 @@ function TimelineControlsComponent({
                 onClick={() => onSetAudioDisplayMode('compact')}
               >
                 <span className={`view-check ${audioDisplayMode === 'compact' ? 'checked' : ''}`}>✓</span>
-                <span>Compact Audio</span>
+                <span>{label('timeline.compactAudio', 'Compact Audio')}</span>
               </div>
               <div
                 className={`view-dropdown-item ${audioDisplayMode === 'detailed' ? 'active' : ''}`}
                 onClick={() => onSetAudioDisplayMode('detailed')}
               >
                 <span className={`view-check ${audioDisplayMode === 'detailed' ? 'checked' : ''}`}>✓</span>
-                <span>Detailed Audio</span>
+                <span>{label('timeline.detailedAudio', 'Detailed Audio')}</span>
               </div>
               <div
                 className={`view-dropdown-item ${audioDisplayMode === 'spectral' ? 'active' : ''}`}
                 onClick={() => onSetAudioDisplayMode('spectral')}
               >
                 <span className={`view-check ${audioDisplayMode === 'spectral' ? 'checked' : ''}`}>✓</span>
-                <span>Spectral Audio</span>
+                <span>{label('timeline.spectralAudio', 'Spectral Audio')}</span>
               </div>
               <div
                 className="view-dropdown-item"
                 onClick={onToggleAudioRegionEditMarkers}
               >
                 <span className={`view-check ${showAudioRegionEditMarkers ? 'checked' : ''}`}>✓</span>
-                <span>Audio Region Markers</span>
+                <span>{label('timeline.audioMarkers', 'Audio Region Markers')}</span>
               </div>
               <div
                 className="view-dropdown-item"
                 onClick={onToggleTranscriptMarkers}
               >
                 <span className={`view-check ${showTranscriptMarkers ? 'checked' : ''}`}>✓</span>
-                <span>Transcript Markers</span>
+                <span>{label('timeline.transcriptMarkers', 'Transcript Markers')}</span>
               </div>
             </div>
           )}
@@ -554,8 +558,8 @@ function TimelineControlsComponent({
             type="button"
             className={`timeline-tool-button ${slotGridActive ? 'active' : ''}`}
             onClick={onToggleSlotGrid}
-            title={slotGridActive ? 'Back to Timeline (Ctrl+Shift+Scroll)' : 'Slot Grid View (Ctrl+Shift+Scroll)'}
-            aria-label={slotGridActive ? 'Back to Timeline' : 'Slot Grid View'}
+            title={`${slotGridActive ? label('timeline.backToTimeline', 'Back to Timeline') : label('timeline.slotGrid', 'Slot Grid View')} (Ctrl+Shift+Scroll)`}
+            aria-label={slotGridActive ? label('timeline.backToTimeline', 'Back to Timeline') : label('timeline.slotGrid', 'Slot Grid View')}
             aria-pressed={slotGridActive}
           >
             {slotGridActive
@@ -569,13 +573,13 @@ function TimelineControlsComponent({
       )}
       {showMainControls && (
       <div className="timeline-zoom-controls" data-guided-target="timeline-zoom-controls">
-        <button className="btn btn-sm btn-icon timeline-zoom-button" onClick={() => onSetZoom(zoom - 10)} title="Zoom out">
+        <button className="btn btn-sm btn-icon timeline-zoom-button" onClick={() => onSetZoom(zoom - 10)} title={label('timeline.zoomOut', 'Zoom out')}>
           <IconMinus size={14} stroke={2.4} aria-hidden="true" />
         </button>
-        <button className="btn btn-sm btn-icon timeline-zoom-button" onClick={() => onSetZoom(zoom + 10)} title="Zoom in">
+        <button className="btn btn-sm btn-icon timeline-zoom-button" onClick={() => onSetZoom(zoom + 10)} title={label('timeline.zoomIn', 'Zoom in')}>
           <IconPlus size={14} stroke={2.4} aria-hidden="true" />
         </button>
-        <button className="btn btn-sm btn-icon timeline-zoom-button" onClick={onFitToWindow} title="Fit composition to window">
+        <button className="btn btn-sm btn-icon timeline-zoom-button" onClick={onFitToWindow} title={label('timeline.fitWindow', 'Fit composition to window')}>
           <IconArrowsMaximize size={14} stroke={2.2} aria-hidden="true" />
         </button>
       </div>

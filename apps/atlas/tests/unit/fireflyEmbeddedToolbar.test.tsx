@@ -192,6 +192,8 @@ describe('Firefly embedded Toolbar', () => {
       <Toolbar
         fireflyEmbedded={{
           user: { name: '九久', email: 'jiujiu@dokuai.tv' },
+          projectId: 'atlas-project-1',
+          capabilities: { agent: true, generate: true },
           onBackToProjects,
         }}
       />,
@@ -210,7 +212,7 @@ describe('Firefly embedded Toolbar', () => {
     expect(screen.queryByText('Sign in')).not.toBeInTheDocument();
     expect(screen.queryByText('legacy-credit-meter')).not.toBeInTheDocument();
     expect(screen.queryByText('legacy-native-helper')).not.toBeInTheDocument();
-    expect(screen.getByText('original-tutorial-menu')).toBeInTheDocument();
+    expect(screen.queryByText('original-tutorial-menu')).not.toBeInTheDocument();
     expect(screen.queryByText('legacy-help')).not.toBeInTheDocument();
 
     await waitFor(() => expect(mocks.setupAutoSync).toHaveBeenCalledOnce());

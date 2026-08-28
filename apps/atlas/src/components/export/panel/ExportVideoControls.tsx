@@ -19,6 +19,9 @@ import type {
   ExportBasicsVideoState,
 } from './exportBasicsTypes';
 
+const IS_FIREFLY_VARIANT = import.meta.env.VITE_APP_VARIANT === 'firefly';
+const ui = (zh: string, en: string) => IS_FIREFLY_VARIANT ? zh : en;
+
 interface ExportVideoControlsProps {
   mode: ExportBasicsModeState;
   display: ExportBasicsDisplayState;
@@ -54,7 +57,7 @@ export function ExportVideoControls({
       <div className="export-quick-grid">
         <div className="export-field-card export-subcard" data-export-target="video-resolution">
           <div className="export-field-head">
-            <span>Resolution</span>
+            <span>{ui('分辨率', 'Resolution')}</span>
             <div className="export-resolution-value">
               <button
                 type="button"
@@ -65,8 +68,8 @@ export function ExportVideoControls({
                 }}
                 onMouseLeave={() => setOrientationPreviewLocked(false)}
                 onBlur={() => setOrientationPreviewLocked(false)}
-                aria-label={`Switch to ${isPortrait ? '16:9 landscape' : '9:16 portrait'}`}
-                title={`Switch to ${isPortrait ? '16:9 landscape' : '9:16 portrait'}`}
+                aria-label={ui(`切换为${isPortrait ? '横屏 16:9' : '竖屏 9:16'}`, `Switch to ${isPortrait ? '16:9 landscape' : '9:16 portrait'}`)}
+                title={ui(`切换为${isPortrait ? '横屏 16:9' : '竖屏 9:16'}`, `Switch to ${isPortrait ? '16:9 landscape' : '9:16 portrait'}`)}
               >
                 <span className={`export-orientation-icon${isPortrait ? ' is-portrait' : ''}`} aria-hidden="true" />
                 <svg className="export-orientation-preview" viewBox="0 0 24 24" aria-hidden="true">
@@ -93,7 +96,7 @@ export function ExportVideoControls({
               className={`export-chip${video.useCustomResolution ? ' is-active' : ''}`}
               onClick={() => actions.setUseCustomResolution(true)}
             >
-              Custom
+              {ui('自定义', 'Custom')}
             </button>
           </div>
           {video.useCustomResolution && (
@@ -102,7 +105,7 @@ export function ExportVideoControls({
                 type="number"
                 value={video.customWidth}
                 onChange={(e) => actions.setCustomWidth(Math.max(1, parseInt(e.target.value) || 1920))}
-                placeholder="Width"
+                placeholder={ui('宽度', 'Width')}
                 min="1"
                 max="7680"
               />
@@ -111,7 +114,7 @@ export function ExportVideoControls({
                 type="number"
                 value={video.customHeight}
                 onChange={(e) => actions.setCustomHeight(Math.max(1, parseInt(e.target.value) || 1080))}
-                placeholder="Height"
+                placeholder={ui('高度', 'Height')}
                 min="1"
                 max="4320"
               />
@@ -121,7 +124,7 @@ export function ExportVideoControls({
 
         <div className="export-field-card export-subcard" data-export-target="video-fps">
           <div className="export-field-head">
-            <span>Frame Rate</span>
+            <span>{ui('帧率', 'Frame Rate')}</span>
             <strong>{video.actualFps} fps</strong>
           </div>
           <div className="export-chip-row">
@@ -140,7 +143,7 @@ export function ExportVideoControls({
               className={`export-chip${video.useCustomFps ? ' is-active' : ''}`}
               onClick={() => actions.setUseCustomFps(true)}
             >
-              Custom
+              {ui('自定义', 'Custom')}
             </button>
           </div>
           {video.useCustomFps && (
@@ -161,7 +164,7 @@ export function ExportVideoControls({
       {(mode.isGifMode || mode.isWebCodecsEncoder || mode.showFFmpegQualityControl) && (
         <div className="export-field-card export-subcard" data-export-target={mode.isGifMode ? 'gif-palette' : 'video-rate'}>
           <div className="export-field-head">
-            <span>{mode.isGifMode ? 'Palette' : mode.isWebCodecsEncoder ? 'Rate' : 'Quality'}</span>
+            <span>{mode.isGifMode ? ui('调色板', 'Palette') : mode.isWebCodecsEncoder ? ui('码率', 'Rate') : ui('质量', 'Quality')}</span>
             <strong>
               {mode.isGifMode
                 ? `${gif.gifColors} colors / ${getGifPaletteModeLabel(gif.gifPaletteMode)} / ${gif.gifTransparency ? 'Alpha' : 'Opaque'}`
@@ -243,21 +246,21 @@ export function ExportVideoControls({
                   className={`export-chip${gif.gifLoop === 'forever' ? ' is-active' : ''}`}
                   onClick={() => actions.setGifLoop('forever')}
                 >
-                  Forever
+                  {ui('循环播放', 'Forever')}
                 </button>
                 <button
                   type="button"
                   className={`export-chip${gif.gifLoop === 'once' ? ' is-active' : ''}`}
                   onClick={() => actions.setGifLoop('once')}
                 >
-                  Once
+                  {ui('播放一次', 'Once')}
                 </button>
                 <button
                   type="button"
                   className={`export-chip${gif.gifLoop === 'count' ? ' is-active' : ''}`}
                   onClick={() => actions.setGifLoop('count')}
                 >
-                  Count
+                  {ui('指定次数', 'Count')}
                 </button>
               </div>
               {gif.gifLoop === 'count' && (
@@ -280,14 +283,14 @@ export function ExportVideoControls({
                   onClick={() => actions.setGifOptimize(!gif.gifOptimize)}
                   disabled={mode.isWebCodecsEncoder}
                 >
-                  Optimize
+                  {ui('优化体积', 'Optimize')}
                 </button>
                 <button
                   type="button"
                   className={`export-toggle${gif.gifTransparency ? ' is-active' : ''}`}
                   onClick={() => actions.setGifTransparency(!gif.gifTransparency)}
                 >
-                  {gif.gifTransparency ? 'Transparent' : 'Opaque'}
+                  {gif.gifTransparency ? ui('透明', 'Transparent') : ui('不透明', 'Opaque')}
                 </button>
               </div>
               {gif.gifTransparency && (
@@ -343,7 +346,7 @@ export function ExportVideoControls({
               </div>
               <div className="export-slider-control">
                 <div className="export-slider-head">
-                  <label>Fine Tune</label>
+                  <label>{ui('精细调整', 'Fine Tune')}</label>
                   <span className="export-slider-value">{(video.bitrate / 1_000_000).toFixed(1)} Mbps</span>
                 </div>
                 <input
@@ -390,7 +393,7 @@ export function ExportVideoControls({
 
       <div className="export-field-card export-subcard" data-export-target="video-alpha">
         <div className="export-field-head">
-          <span>{mode.isGifMode ? 'Transparency' : 'Alpha'}</span>
+          <span>{mode.isGifMode ? ui('透明度', 'Transparency') : 'Alpha'}</span>
           <strong>{mode.isGifMode ? (gif.gifTransparency ? `Threshold ${gif.gifAlphaThreshold}` : 'Opaque') : video.stackedAlpha ? 'Stacked' : 'Off'}</strong>
         </div>
         <div className="export-chip-row">
@@ -401,7 +404,7 @@ export function ExportVideoControls({
               onClick={() => actions.setStackedAlpha(!video.stackedAlpha)}
               disabled={!mode.isWebCodecsEncoder}
             >
-              Stacked Alpha
+              {ui('堆叠 Alpha', 'Stacked Alpha')}
             </button>
           )}
           {mode.showRangeInVideo && (
@@ -410,7 +413,7 @@ export function ExportVideoControls({
               className={`export-toggle${useInOut ? ' is-active' : ''}`}
               onClick={() => actions.setUseInOut(!useInOut)}
             >
-              Use In/Out
+              {ui('使用入点/出点', 'Use In/Out')}
             </button>
           )}
         </div>
@@ -422,11 +425,11 @@ export function ExportVideoControls({
         {mode.showRangeInVideo && (
           <div className="export-stats-grid export-stats-grid-compact">
             <div className="export-stat-card">
-              <span>Output</span>
+              <span>{ui('输出', 'Output')}</span>
               <strong>{video.actualWidth}x{video.outputHeight}</strong>
             </div>
             <div className="export-stat-card">
-              <span>Frames</span>
+              <span>{ui('帧数', 'Frames')}</span>
               <strong>{video.frameCount}</strong>
             </div>
             <div className="export-stat-card">

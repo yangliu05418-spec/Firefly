@@ -1,4 +1,5 @@
 import type { DockDragState } from '../../../types/dock';
+import { localizePanelTitle } from '../../../firefly/i18n/panelLabels';
 
 interface DockDragPreviewProps {
   dragState: DockDragState;
@@ -15,7 +16,7 @@ export function DockDragPreview({ dragState }: DockDragPreviewProps) {
         top: dragState.currentPos.y - dragState.dragOffset.y,
       }}
     >
-      {dragState.draggedPanel.title}
+      {localizePanelTitle(dragState.draggedPanel.type, dragState.draggedPanel.title)}
     </div>
   );
 }

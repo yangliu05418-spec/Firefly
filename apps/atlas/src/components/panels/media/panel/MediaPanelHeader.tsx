@@ -52,8 +52,8 @@ export function MediaPanelHeader({
   onNewMotionAdjustment,
 }: MediaPanelHeaderProps) {
   const countLabel = isSearchActive
-    ? `${searchResultCount} of ${totalItems} items`
-    : `${totalItems} items`;
+    ? `${searchResultCount} / ${totalItems} 项`
+    : `${totalItems} 项`;
 
   return (
     <div className="media-panel-header">
@@ -67,25 +67,25 @@ export function MediaPanelHeader({
           <button
             className="btn btn-sm btn-reload-all"
             onClick={onOpenRelinkDialog}
-            title={`Restore access to ${filesNeedReloadCount} file${filesNeedReloadCount > 1 ? 's' : ''}`}
+            title={`重新关联 ${filesNeedReloadCount} 个文件`}
           >
-            Relink ({filesNeedReloadCount})
+            重新关联 ({filesNeedReloadCount})
           </button>
         )}
         <MediaViewModeControls
           viewMode={viewMode}
           onViewModeChange={onViewModeChange}
         />
-        <button className="btn btn-sm media-panel-import-button" onClick={onImport} title="Import Media">
-          Import
+        <button className="btn btn-sm media-panel-import-button" onClick={onImport} title="导入素材">
+          导入
         </button>
         <div className="add-dropdown-container">
           <button
             className={`btn btn-sm add-dropdown-trigger ${addDropdownOpen ? 'active' : ''}`}
             onClick={() => onAddDropdownOpenChange(!addDropdownOpen)}
-            title="Add New Item"
+            title="添加新项目"
           >
-            + Add &#9662;
+            + 添加 &#9662;
           </button>
           {addDropdownOpen && (
             <div className="add-dropdown-menu">

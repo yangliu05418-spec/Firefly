@@ -7,7 +7,7 @@ export function MediaDropOverlay() {
           <polyline points="17 8 12 3 7 8" />
           <line x1="12" y1="3" x2="12" y2="15" />
         </svg>
-        <span>Drop files or folders to import</span>
+        <span>松开即可导入文件或文件夹</span>
       </div>
     </div>
   );

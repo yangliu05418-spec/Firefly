@@ -1,4 +1,7 @@
 import type { CSSProperties, MouseEventHandler, ReactNode } from 'react';
+import { translate } from '../../../firefly/i18n';
+
+const IS_FIREFLY_VARIANT = import.meta.env.VITE_APP_VARIANT === 'firefly';
 
 interface TimelineRootShellProps {
   activeTrackResizeId: string | null;
@@ -35,8 +38,8 @@ export function TimelineRootShell({
     return (
       <div className="timeline-container timeline-empty">
         <div className="timeline-empty-message">
-          <p>No composition open</p>
-          <p className="hint">Double-click a composition in the Media panel to open it</p>
+          <p>{IS_FIREFLY_VARIANT ? translate('zh-CN', 'timeline.noComposition') : 'No composition open'}</p>
+          <p className="hint">{IS_FIREFLY_VARIANT ? translate('zh-CN', 'timeline.noCompositionHint') : 'Double-click a composition in the Media panel to open it'}</p>
         </div>
       </div>
     );

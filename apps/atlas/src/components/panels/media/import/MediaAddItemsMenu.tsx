@@ -2,6 +2,7 @@ import { FileTypeIcon } from '../FileTypeIcon';
 import { handleSubmenuHover, handleSubmenuLeave } from '../submenuPosition';
 import type { MeshPrimitiveType } from '../../../../stores/mediaStore/types';
 import type { ShapePrimitive } from '../../../../types/motionDesign';
+import { useFireflyEmbedding } from '../../../../firefly/FireflyEmbeddingContext';
 
 type MediaAddItemsMenuVariant = 'dropdown' | 'context';
 
@@ -52,6 +53,7 @@ export function MediaAddItemsMenu({
   onNewMotionNull,
   onNewMotionAdjustment,
 }: MediaAddItemsMenuProps) {
+  const firefly = useFireflyEmbedding();
   const itemClass = variant === 'dropdown' ? 'add-dropdown-item' : 'context-menu-item';
   const separatorClass = variant === 'dropdown' ? 'add-dropdown-separator' : 'context-menu-separator';
   const submenuClass = variant === 'dropdown' ? 'add-dropdown-submenu' : 'context-submenu';
@@ -65,26 +67,26 @@ export function MediaAddItemsMenu({
     <>
       <div className={itemClass} onClick={() => run(onNewComposition)}>
         <span className={iconClass}><FileTypeIcon type="composition" /></span>
-        <span>Composition</span>
+        <span>合成</span>
       </div>
       <div className={itemClass} onClick={() => run(onNewFolder)}>
         <span className={iconClass}><span className="media-folder-icon">&#128193;</span></span>
-        <span>Folder</span>
+        <span>文件夹</span>
       </div>
       <div className={itemClass} onClick={() => run(onImport)}>
         <span className={iconClass}><FileTypeIcon /></span>
-        <span>Import files...</span>
+        <span>导入文件…</span>
       </div>
       <div className={separatorClass} />
       <div className={itemClass} onClick={() => run(onNewText)}>
         <span className={iconClass}><FileTypeIcon type="text" /></span>
-        <span>Text</span>
+        <span>文本</span>
       </div>
       <div className={itemClass} onClick={() => run(onNewSolid)}>
         <span className={iconClass}><FileTypeIcon type="solid" /></span>
-        <span>Solid</span>
+        <span>纯色图层</span>
       </div>
-      <div className={itemClass} onClick={() => run(onNewLiveInput)}>
+      {!firefly && <><div className={itemClass} onClick={() => run(onNewLiveInput)}>
         <span className={iconClass}><FileTypeIcon type="video" /></span>
         <span>Live Input...</span>
       </div>
@@ -139,8 +141,8 @@ export function MediaAddItemsMenu({
       <div className={itemClass} onClick={() => run(onNewMathScene)}>
         <span className={iconClass}><FileTypeIcon type="math-scene" /></span>
         <span>Math Scene</span>
-      </div>
-      <div className={`${itemClass} has-submenu`} onMouseEnter={handleSubmenuHover} onMouseLeave={handleSubmenuLeave}>
+      </div></>}
+      {!firefly && <div className={`${itemClass} has-submenu`} onMouseEnter={handleSubmenuHover} onMouseLeave={handleSubmenuLeave}>
         <span className={iconClass}><FileTypeIcon type="motion-shape" /></span>
         <span>Motion Shape</span>
         <span className="submenu-arrow">&#9654;</span>
@@ -158,7 +160,7 @@ export function MediaAddItemsMenu({
             <span>Star</span>
           </div>
         </div>
-      </div>
+      </div>}
     </>
   );
 }

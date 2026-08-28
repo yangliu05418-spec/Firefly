@@ -70,16 +70,16 @@ export function FileMenu({
         onClick={() => onMenuClick('file')}
         onMouseEnter={() => onMenuHover('file')}
       >
-        File
+        {fireflyEmbedded ? '文件' : 'File'}
       </button>
       {openMenu === 'file' && (
         <div className="menu-dropdown">
           <button className="menu-option" onClick={onNew} disabled={isLoading}>
-            <span>New Project...</span>
+            <span>{fireflyEmbedded ? '返回项目列表…' : 'New Project...'}</span>
             <span className="shortcut">{shortcutLabels.new}</span>
           </button>
           <button className="menu-option" onClick={onOpen} disabled={isLoading}>
-            <span>Open Project...</span>
+            <span>{fireflyEmbedded ? '打开其他项目…' : 'Open Project...'}</span>
             <span className="shortcut">{shortcutLabels.open}</span>
           </button>
           {!fireflyEmbedded && (
@@ -124,7 +124,7 @@ export function FileMenu({
           )}
           <div className="menu-separator" />
           <button className="menu-option" onClick={() => onSave()} disabled={isLoading || !isProjectOpen}>
-            <span>Save</span>
+            <span>{fireflyEmbedded ? '保存' : 'Save'}</span>
             <span className="shortcut">{shortcutLabels.save}</span>
           </button>
           {!fireflyEmbedded && (
@@ -137,9 +137,11 @@ export function FileMenu({
             <>
               <div className="menu-separator" />
               <div className="menu-submenu">
-                <span className="menu-label">Project Info</span>
+                <span className="menu-label">{fireflyEmbedded ? '项目状态' : 'Project Info'}</span>
                 <span className="menu-info">
-                  {hasUnsavedChanges() ? '\u25cf Unsaved changes' : '\u2713 All changes saved'}
+                  {hasUnsavedChanges()
+                    ? (fireflyEmbedded ? '\u25cf 有未保存更改' : '\u25cf Unsaved changes')
+                    : (fireflyEmbedded ? '\u2713 所有更改已保存' : '\u2713 All changes saved')}
                 </span>
               </div>
             </>
@@ -147,17 +149,17 @@ export function FileMenu({
           <div className="menu-separator" />
           <div className="menu-item-with-submenu">
             <button className="menu-option">
-              <span>Autosave</span>
+              <span>{fireflyEmbedded ? '自动保存' : 'Autosave'}</span>
             </button>
             <div className="menu-nested-submenu">
               <button
                 className={`menu-option ${autosaveEnabled ? 'checked' : ''}`}
                 onClick={() => { setAutosaveEnabled(!autosaveEnabled); }}
               >
-                <span>{autosaveEnabled ? '\u2713 ' : '   '}Enable Autosave</span>
+                <span>{autosaveEnabled ? '\u2713 ' : '   '}{fireflyEmbedded ? '启用自动保存' : 'Enable Autosave'}</span>
               </button>
               <div className="menu-separator" />
-              <span className="menu-sublabel">Interval</span>
+              <span className="menu-sublabel">{fireflyEmbedded ? '间隔' : 'Interval'}</span>
               {AUTOSAVE_INTERVALS.map(({ value, label }) => (
                 <button
                   key={value}
@@ -165,7 +167,7 @@ export function FileMenu({
                   onClick={() => { setAutosaveInterval(value); }}
                   disabled={!autosaveEnabled}
                 >
-                  <span>{autosaveInterval === value ? '\u2713 ' : '   '}{label}</span>
+                  <span>{autosaveInterval === value ? '\u2713 ' : '   '}{fireflyEmbedded ? `${value} 分钟` : label}</span>
                 </button>
               ))}
             </div>

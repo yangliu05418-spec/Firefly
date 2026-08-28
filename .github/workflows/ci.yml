@@ -234,6 +234,9 @@ jobs:
       - run: npm run typecheck
       - run: npm test -- --maxWorkers=1
       - run: npm run build
+        env:
+          VITE_APP_VARIANT: firefly
+      - run: npm run check:firefly-build
       - name: Exercise SQLite backup and restore drill
         shell: bash
         run: |
@@ -343,7 +346,8 @@ jobs:
         run: |
           npm install --global npm@11.6.2
           npm --prefix apps/atlas ci
-          npm --prefix apps/atlas run build
+          VITE_APP_VARIANT=firefly npm --prefix apps/atlas run build
+          npm --prefix apps/atlas run check:firefly-build
       - name: Restore the Firefly Node 22 runtime for browser journeys
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
