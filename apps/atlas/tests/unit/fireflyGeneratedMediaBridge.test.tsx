@@ -35,21 +35,24 @@ describe('Firefly generated media bridge', () => {
       if (url === '/api/local-media/config') return new Response(JSON.stringify({ enabled: true, atlas: true }), { status: 200 });
       if (url.includes('offset=0')) return new Response(JSON.stringify({ items: firstPage }), { status: 200 });
       if (url.includes('offset=100')) return new Response(JSON.stringify({ items: [
-        { id: 'asset-100', fileName: '成片.png', kind: 'image', size: 2_000, status: 'ready', mediaUrl: '/api/atlas/project-assets/asset-100/media' },
-        { id: 'asset-copying', fileName: '处理中.mp4', kind: 'video', size: 1, status: 'copying' },
+        { id: 'asset-100', fileName: '成片.png', kind: 'image', size: 2_000, status: 'ready', mediaUrl: '/api/atlas/project-assets/asset-100/media', thumbnailUrl: '/api/image-media/result-1?variant=thumbnail' },
+        { id: 'asset-copying', fileName: '处理中.mp4', kind: 'video', size: 8_000_000, status: 'copying', mediaUrl: '/api/generations/task-copying/media', thumbnailUrl: '/api/generations/task-copying/poster', duration: 8, width: 1920, height: 1080 },
       ] }), { status: 200 });
       throw new Error(`unexpected ${url}`);
     });
 
     render(<FireflyEmbeddingProvider value={embedding}><FireflyGeneratedMediaBridge /></FireflyEmbeddingProvider>);
-    await waitFor(() => expect(mocks.register).toHaveBeenCalledTimes(101));
+    await waitFor(() => expect(mocks.register).toHaveBeenCalledTimes(102));
     expect(fetcher).toHaveBeenCalledTimes(3);
     expect(mocks.register).toHaveBeenCalledWith(expect.objectContaining({
-      id: 'asset-100', kind: 'image', mediaUrl: '/api/atlas/project-assets/asset-100/media',
+      id: 'asset-100', kind: 'image', mediaUrl: '/api/atlas/project-assets/asset-100/media', thumbnailUrl: '/api/image-media/result-1?variant=thumbnail',
+    }));
+    expect(mocks.register).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'asset-copying', kind: 'video', mediaUrl: '/api/generations/task-copying/media', duration: 8, width: 1920, height: 1080,
     }));
 
     act(() => window.dispatchEvent(new Event(FIREFLY_ATLAS_MEDIA_REFRESH_EVENT)));
-    await waitFor(() => expect(mocks.register).toHaveBeenCalledTimes(202));
+    await waitFor(() => expect(mocks.register).toHaveBeenCalledTimes(204));
     expect(fetcher).toHaveBeenCalledTimes(5);
   });
 });

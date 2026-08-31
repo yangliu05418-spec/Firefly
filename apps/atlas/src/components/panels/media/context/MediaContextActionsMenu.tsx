@@ -230,25 +230,25 @@ export function MediaContextActionsMenu({
 
           {!multiSelect && selectedItem && (
             <div className="context-menu-item" onClick={() => onStartRename(selectedItem.id, selectedItem.name)}>
-              Rename
+              {import.meta.env.VITE_APP_VARIANT === 'firefly' ? '重命名' : 'Rename'}
             </div>
           )}
 
           {!multiSelect && mediaFile && canDownloadMediaFileInBrowser(mediaFile) && (
             <div className="context-menu-item" onClick={() => { void onDownloadMediaFile(mediaFile); }}>
-              Download
+              {import.meta.env.VITE_APP_VARIANT === 'firefly' ? '下载' : 'Download'}
             </div>
           )}
 
           {!multiSelect && isImageFile && mediaFile && (
             <div className="context-menu-item" onClick={() => onOpenImageCrop(mediaFile)}>
-              Crop
+              {import.meta.env.VITE_APP_VARIANT === 'firefly' ? '裁剪' : 'Crop'}
             </div>
           )}
 
           {!multiSelect && (isVideoFile || isImageFile) && mediaFile?.file && (
             <div className="context-menu-item" onClick={() => { void onCreateCompositionFromMedia(mediaFile); }}>
-              Create Comp
+              {import.meta.env.VITE_APP_VARIANT === 'firefly' ? '创建合成' : 'Create Comp'}
             </div>
           )}
 

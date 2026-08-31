@@ -246,6 +246,12 @@ function App({ fireflyEmbedded }: AppProps) {
   const [activeCampaign, setActiveCampaign] = useState<{ id: string; title: string; steps: CampaignStep[]; interactive?: boolean } | null>(null);
   const completeTutorial = useSettingsStore((s) => s.completeTutorial);
 
+  useEffect(() => {
+    if (!isFireflyEmbedded || !hasStoredProject || hasSeenTutorial) return;
+    const timer = window.setTimeout(() => setShowTutorialSetup(true), 500);
+    return () => window.clearTimeout(timer);
+  }, [hasSeenTutorial, hasStoredProject, isFireflyEmbedded]);
+
   // IndexedDB error dialog state
   const [showIndexedDBError, setShowIndexedDBError] = useState(false);
 
@@ -433,8 +439,13 @@ function App({ fireflyEmbedded }: AppProps) {
 
   const handleTutorialSetupComplete = useCallback(() => {
     setShowTutorialSetup(false);
+    if (isFireflyEmbedded) {
+      setHasSeenTutorial(true);
+      setHasSeenTutorialPart2(true);
+      return;
+    }
     activateTutorialCampaign(STARTUP_GUIDED_TUTORIAL_ID);
-  }, [activateTutorialCampaign]);
+  }, [activateTutorialCampaign, isFireflyEmbedded, setHasSeenTutorial, setHasSeenTutorialPart2]);
 
   const handleTutorialSetupCancel = useCallback(() => {
     setShowTutorialSetup(false);

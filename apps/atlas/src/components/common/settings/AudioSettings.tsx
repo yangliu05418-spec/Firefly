@@ -8,6 +8,9 @@ const latencyOptions: { id: AudioLatencyHint; label: string }[] = [
   { id: 'playback', label: 'Playback' },
 ];
 
+const IS_FIREFLY_VARIANT = import.meta.env.VITE_APP_VARIANT === 'firefly';
+const ui = (zh: string, en: string) => IS_FIREFLY_VARIANT ? zh : en;
+
 function getOutputRoutingSupport(): string {
   const audioContextProto = globalThis.AudioContext?.prototype as { setSinkId?: unknown } | undefined;
   const mediaProto = globalThis.HTMLMediaElement?.prototype as { setSinkId?: unknown } | undefined;
@@ -77,40 +80,40 @@ export function AudioSettings() {
 
   return (
     <div className="settings-category-content">
-      <h2>Audio</h2>
+      <h2>{ui('音频', 'Audio')}</h2>
 
       <div className="settings-group">
-        <div className="settings-group-title">Devices</div>
+        <div className="settings-group-title">{ui('设备', 'Devices')}</div>
 
         <label className="settings-row">
-          <span className="settings-label">Output device</span>
+          <span className="settings-label">{ui('输出设备', 'Output device')}</span>
           <select
             value={audioOutputDeviceId}
             onChange={(event) => setAudioOutputDeviceId(event.target.value)}
             className="settings-select"
             disabled={!canEnumerateDevices || outputDevices.length === 0}
           >
-            <option value="">System default</option>
+            <option value="">{ui('系统默认', 'System default')}</option>
             {outputDevices.map((device, index) => (
               <option key={device.deviceId || `output-${index}`} value={device.deviceId}>
-                {getDeviceLabel(device, `Output ${index + 1}`)}
+                {getDeviceLabel(device, ui(`输出设备 ${index + 1}`, `Output ${index + 1}`))}
               </option>
             ))}
           </select>
         </label>
 
         <label className="settings-row">
-          <span className="settings-label">Recording input</span>
+          <span className="settings-label">{ui('录音输入', 'Recording input')}</span>
           <select
             value={audioInputDeviceId}
             onChange={(event) => setAudioInputDeviceId(event.target.value)}
             className="settings-select"
             disabled={!canEnumerateDevices || inputDevices.length === 0}
           >
-            <option value="">System default</option>
+            <option value="">{ui('系统默认', 'System default')}</option>
             {inputDevices.map((device, index) => (
               <option key={device.deviceId || `input-${index}`} value={device.deviceId}>
-                {getDeviceLabel(device, `Input ${index + 1}`)}
+                {getDeviceLabel(device, ui(`输入设备 ${index + 1}`, `Input ${index + 1}`))}
               </option>
             ))}
           </select>
@@ -123,7 +126,7 @@ export function AudioSettings() {
             onClick={requestInputPermission}
             disabled={!navigator.mediaDevices?.getUserMedia || permissionState === 'requesting'}
           >
-            {permissionState === 'requesting' ? 'Requesting...' : 'Unlock device names'}
+            {permissionState === 'requesting' ? ui('正在请求…', 'Requesting...') : ui('显示设备名称', 'Unlock device names')}
           </button>
           <button
             type="button"
@@ -134,53 +137,53 @@ export function AudioSettings() {
             }}
             disabled={!canEnumerateDevices}
           >
-            Refresh
+            {ui('刷新', 'Refresh')}
           </button>
         </div>
         <p className="settings-hint">
-          Browser privacy hides exact device names until microphone permission is granted.
+          {ui('浏览器会在授予麦克风权限前隐藏具体设备名称。', 'Browser privacy hides exact device names until microphone permission is granted.')}
         </p>
       </div>
 
       <div className="settings-group">
-        <div className="settings-group-title">Browser Audio Pipeline</div>
+        <div className="settings-group-title">{ui('浏览器音频链路', 'Browser Audio Pipeline')}</div>
 
         <label className="settings-row">
-          <span className="settings-label">Latency mode</span>
+          <span className="settings-label">{ui('延迟模式', 'Latency mode')}</span>
           <select
             value={audioLatencyHint}
             onChange={(event) => setAudioLatencyHint(event.target.value as AudioLatencyHint)}
             className="settings-select"
           >
             {latencyOptions.map(option => (
-              <option key={option.id} value={option.id}>{option.label}</option>
+              <option key={option.id} value={option.id}>{IS_FIREFLY_VARIANT ? ({ interactive: '低延迟', balanced: '平衡', playback: '播放优先' } as Record<AudioLatencyHint, string>)[option.id] : option.label}</option>
             ))}
           </select>
         </label>
 
         <div className="settings-status">
           <span className={`status-indicator ${canEnumerateDevices ? 'connected' : 'disconnected'}`} />
-          <span className="status-text">Device API: {canEnumerateDevices ? 'available' : 'not available'}</span>
+          <span className="status-text">{ui('设备接口', 'Device API')}: {canEnumerateDevices ? ui('可用', 'available') : ui('不可用', 'not available')}</span>
         </div>
         <div className="settings-status">
           <span className={`status-indicator ${outputSupport !== 'Browser default output only' ? 'connected' : 'disconnected'}`} />
-          <span className="status-text">Output routing: {outputSupport}</span>
+          <span className="status-text">{ui('输出路由', 'Output routing')}: {IS_FIREFLY_VARIANT ? (outputSupport === 'Browser default output only' ? '仅浏览器默认输出' : outputSupport === 'AudioContext output routing' ? 'AudioContext 输出路由' : '媒体元素输出路由') : outputSupport}</span>
         </div>
         <div className="settings-status">
           <span className={`status-indicator ${activeContext ? 'connected' : 'disconnected'}`} />
           <span className="status-text">
-            AudioContext: {activeContext ? `${activeContext.state}, ${activeContext.sampleRate} Hz` : 'not created yet'}
+            AudioContext: {activeContext ? `${activeContext.state}, ${activeContext.sampleRate} Hz` : ui('尚未创建', 'not created yet')}
           </span>
         </div>
         {activeContext && (
           <p className="settings-hint">
-            Base latency: {Math.round((activeContext.baseLatency ?? 0) * 1000)} ms
+            {ui('基础延迟', 'Base latency')}: {Math.round((activeContext.baseLatency ?? 0) * 1000)} ms
             {' | '}
-            Output latency: {Math.round(((activeContext as AudioContext & { outputLatency?: number }).outputLatency ?? 0) * 1000)} ms
+            {ui('输出延迟', 'Output latency')}: {Math.round(((activeContext as AudioContext & { outputLatency?: number }).outputLatency ?? 0) * 1000)} ms
             {' | '}
-            Routes: {audioRoutingManager.activeRouteCount}
+            {ui('路由', 'Routes')}: {audioRoutingManager.activeRouteCount}
             {' | '}
-            Refresh: {refreshTick}
+            {ui('刷新计数', 'Refresh')}: {refreshTick}
           </p>
         )}
       </div>

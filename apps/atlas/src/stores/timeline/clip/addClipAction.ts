@@ -27,6 +27,7 @@ import {
 } from './unlockedPlacementTrack';
 import { resolveLinkedAudioTrackId } from './linkedAudioPlacement';
 import { projectMediaSourceArtifactsOntoClip } from '../../../services/mediaArtifacts/mediaSourceArtifacts';
+import { useMediaStore } from '../../mediaStore';
 const log = Logger.create('ClipAddAction');
 export async function applyAddClipAction(
   context: ClipActionContext,
@@ -77,8 +78,22 @@ export async function applyAddClipAction(
     set({ clips: updater(get().clips) });
   };
   const sourceMediaFile = await loadSourceMediaFile(mediaFileId);
+  if (
+    hasVisualMediaType(mediaType)
+    && clips.every((clip) => !hasVisualMediaType(clip.source?.type ?? ''))
+    && sourceMediaFile?.width && sourceMediaFile.height
+  ) {
+    const mediaStore = useMediaStore.getState();
+    if (mediaStore.activeCompositionId) {
+      mediaStore.updateComposition(mediaStore.activeCompositionId, {
+        width: Math.round(sourceMediaFile.width),
+        height: Math.round(sourceMediaFile.height),
+      });
+    }
+  }
   const authoritativeNaturalDuration = getPositiveFiniteDuration(options?.source?.naturalDuration)
-    ?? getPositiveFiniteDuration(sourceMediaFile?.duration);
+    ?? getPositiveFiniteDuration(sourceMediaFile?.duration)
+    ?? (sourceMediaFile?.remoteSourcePath ? getPositiveFiniteDuration(providedDuration ?? estimatedDuration) : undefined);
   const sourceTranscript = sourceMediaFile?.transcriptStatus === 'ready' && sourceMediaFile.transcript?.length
     ? sourceMediaFile.transcript
     : undefined;

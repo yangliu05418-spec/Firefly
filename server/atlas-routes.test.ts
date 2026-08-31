@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import express from "express";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createAtlasRouter, type AtlasImportSource, type AtlasStorageDependencies, type AtlasVerifiedObject } from "./atlas-routes.js";
+import { createAtlasRouter, type AtlasAssetPresentation, type AtlasImportSource, type AtlasStorageDependencies, type AtlasVerifiedObject } from "./atlas-routes.js";
 import { AtlasStore, type AtlasTransferPart } from "./atlas-store.js";
 import { UserStore } from "./db.js";
 import { migrateDatabase } from "./migrations.js";
@@ -34,6 +34,7 @@ describe("Atlas project API", () => {
   const setup = async (options: {
     partSize?: number;
     resolveSource?: (ownerId: string, sourceType: string, sourceId: string) => AtlasImportSource | null;
+    describeAsset?: (assetId: string) => AtlasAssetPresentation;
     registerGlobalAsset?: (input: { id: string; objectKey: string; assetType: "Video"; status: "Active" }) => void | Promise<void>;
   } = {}) => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-atlas-routes-"));
@@ -97,6 +98,7 @@ describe("Atlas project API", () => {
       },
       storage,
       resolveImportSource: async ({ ownerId, sourceType, sourceId }) => options.resolveSource?.(ownerId, sourceType, sourceId) ?? null,
+      describeAsset: (asset) => options.describeAsset?.(asset.id) ?? {},
       registerGlobalAsset: options.registerGlobalAsset,
       partSize: options.partSize ?? 4,
       now: () => 1_000,
@@ -600,6 +602,28 @@ describe("Atlas project API", () => {
     expect((await api.request(`/projects/${project.id}/assets/${asset.id}`, { method: "DELETE" }, api.other.id)).status).toBe(404);
     expect((await api.request(`/projects/${project.id}/assets/${asset.id}`, { method: "DELETE" })).status).toBe(204);
     expect(api.deleted).toHaveLength(1);
+  });
+
+  it("exposes a generated video immediately from its stable Firefly route while the project copy is pending", async () => {
+    const api = await setup({
+      describeAsset: () => ({ thumbnailUrl: "/api/generations/video-task/poster", duration: 8, width: 1920, height: 1080, hasAudio: true }),
+    });
+    const project = await api.json<{ id: string }>(await api.request("/projects", { method: "POST", body: JSON.stringify({ title: "立即剪辑" }) }));
+    api.store.createImportedAsset({
+      id: "destination-video", ownerId: api.owner.id, projectId: project.id,
+      sourceType: "generation", sourceId: "video-task", kind: "video",
+      objectKey: "atlas/assets/deferred.mp4", fileName: "雨夜追车-video-ta.mp4",
+      contentType: "video/mp4", size: 8_000_000, now: 1_000,
+    });
+
+    const response = await api.request(`/projects/${project.id}/assets`);
+    expect(response.status).toBe(200);
+    expect(await api.json(response)).toMatchObject({ items: [{
+      id: "destination-video", status: "copying",
+      mediaUrl: "/api/generations/video-task/media",
+      thumbnailUrl: "/api/generations/video-task/poster",
+      duration: 8, width: 1920, height: 1080, hasAudio: true,
+    }] });
   });
 
   it("rejects Firefly server-side copies above the documented 5 GiB CopyObject boundary", async () => {

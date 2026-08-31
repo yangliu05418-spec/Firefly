@@ -17,6 +17,30 @@ const isObjectNotFound = (error: unknown) => Number((error as { statusCode?: num
   || /NoSuchKey|NotFound/i.test(String((error as { code?: string }).code ?? ""));
 const normalizedType = (value: string) => value.split(";", 1)[0]!.trim().toLowerCase();
 
+export const reserveFireflySourceInAtlasProject = (input: {
+  store: AtlasStore;
+  ownerId: string;
+  projectId: string;
+  sourceType: Exclude<AtlasAssetSourceType, "local_upload" | "atlas_export">;
+  sourceId: string;
+  source: AtlasImportSource;
+  now: number;
+  assetId: string;
+}): { status: "created" | "existing"; asset: AtlasProjectAsset } => {
+  if (input.source.size > ATLAS_COPY_OBJECT_MAX_BYTES) {
+    throw new AtlasImportError(422, "ATLAS_IMPORT_TOO_LARGE", "该资产超过5GiB，请从本机直接导入以使用可续传上传");
+  }
+  const result = input.store.createImportedAsset({
+    id: input.assetId, ownerId: input.ownerId, projectId: input.projectId,
+    sourceType: input.sourceType, sourceId: input.sourceId, kind: input.source.kind,
+    objectKey: objectKey(input.ownerId, input.projectId, input.assetId, input.source.fileName),
+    fileName: safeName(input.source.fileName), contentType: input.source.contentType,
+    size: input.source.size, now: input.now,
+  });
+  if (result.status === "missing") throw new AtlasImportError(404, "ATLAS_PROJECT_NOT_FOUND", "Atlas项目不存在");
+  return { status: result.status, asset: result.asset };
+};
+
 export const importFireflySourceIntoAtlasProject = async (input: {
   store: AtlasStore;
   storage: AtlasStorageDependencies;
@@ -35,14 +59,7 @@ export const importFireflySourceIntoAtlasProject = async (input: {
     throw new AtlasImportError(422, "ATLAS_IMPORT_TOO_LARGE", "该资产超过5GiB，请从本机直接导入以使用可续传上传");
   }
   const assetId = input.assetId ?? crypto.randomUUID();
-  const created = input.store.createImportedAsset({
-    id: assetId, ownerId: input.ownerId, projectId: input.projectId,
-    sourceType: input.sourceType, sourceId: input.sourceId, kind: input.source.kind,
-    objectKey: objectKey(input.ownerId, input.projectId, assetId, input.source.fileName),
-    fileName: safeName(input.source.fileName), contentType: input.source.contentType,
-    size: input.source.size, now: input.now,
-  });
-  if (created.status === "missing") throw new AtlasImportError(404, "ATLAS_PROJECT_NOT_FOUND", "Atlas项目不存在");
+  const created = reserveFireflySourceInAtlasProject({ ...input, assetId });
   if (created.status === "existing" && created.asset.status === "ready") return created.asset;
   const target = created.status === "existing"
     ? input.store.prepareImportedAssetRetry(created.asset.id, input.ownerId, input.now)!

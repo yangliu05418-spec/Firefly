@@ -17,6 +17,18 @@ export type AtlasImportSource = {
   kind: AtlasMediaKind;
   contentType: string;
   size: number;
+  duration?: number;
+  width?: number;
+  height?: number;
+  hasAudio?: boolean;
+};
+
+export type AtlasAssetPresentation = {
+  thumbnailUrl?: string;
+  duration?: number;
+  width?: number;
+  height?: number;
+  hasAudio?: boolean;
 };
 
 export type AtlasStorageDependencies = {
@@ -37,6 +49,7 @@ export type AtlasRouterDependencies = {
   requireAuth: RequestHandler;
   storage: AtlasStorageDependencies;
   resolveImportSource: (input: { ownerId: string; sourceType: "user_asset" | "generation" | "generated" | "canvas_project"; sourceId: string }) => Promise<AtlasImportSource | null>;
+  describeAsset?: (asset: AtlasProjectAsset) => AtlasAssetPresentation;
   registerGlobalAsset?: (input: {
     id: string; ownerId: string; name: string; objectKey: string; contentType: string; size: number; etag: string;
     category: "material"; assetType: "Video"; status: "Active";
@@ -85,14 +98,31 @@ const publicProject = (project: AtlasProject) => ({
   hasCheckpoint: Boolean(project.latestVersionId), leaseDeviceId: project.leaseDeviceId,
   leaseExpiresAt: project.leaseExpiresAt, createdAt: project.createdAt, updatedAt: project.updatedAt,
 });
-const publicAsset = (asset: AtlasProjectAsset) => {
-  const mediaUrl = asset.status === "ready" ? `/api/atlas/project-assets/${asset.id}/media` : undefined;
+const publicAsset = (asset: AtlasProjectAsset, presentation: AtlasAssetPresentation = {}) => {
+  const sourceMediaUrl = asset.sourceType === "generation" && asset.sourceId
+    ? `/api/generations/${encodeURIComponent(asset.sourceId)}/media`
+    : asset.sourceType === "generated" && asset.sourceId
+      ? `/api/image-media/${encodeURIComponent(asset.sourceId)}`
+      : asset.sourceType === "user_asset" && asset.sourceId
+        ? `/api/assets/${encodeURIComponent(asset.sourceId)}/source`
+        : undefined;
+  // The project-owned copy is the durable source of truth. While the same-TOS
+  // copy is being verified, the already-ready Firefly source is safe to edit
+  // from and avoids an unnecessary blocking state in the Media Pool.
+  const mediaUrl = asset.status === "ready"
+    ? `/api/atlas/project-assets/${asset.id}/media`
+    : asset.status === "copying" ? sourceMediaUrl : undefined;
   return {
     id: asset.id, projectId: asset.projectId, sourceType: asset.sourceType, sourceId: asset.sourceId,
     kind: asset.kind, fileName: asset.fileName, contentType: asset.contentType, size: asset.size,
     status: asset.status, error: asset.error, createdAt: asset.createdAt, updatedAt: asset.updatedAt,
+    thumbnailUrl: presentation.thumbnailUrl,
+    duration: presentation.duration,
+    width: presentation.width,
+    height: presentation.height,
+    hasAudio: presentation.hasAudio,
     mediaUrl,
-    localMedia: mediaUrl ? publicLocalMediaFromSource({
+    localMedia: asset.status === "ready" && mediaUrl ? publicLocalMediaFromSource({
       sourceId: asset.objectKey,
       revision: `${asset.etag}\0${asset.size}\0${asset.contentType}\0identity`,
       variant: asset.kind === "image" ? "original" : "preview",
@@ -287,6 +317,7 @@ export const createAtlasRouter = (dependencies: AtlasRouterDependencies) => {
   const partSize = dependencies.partSize ?? DEFAULT_PART_SIZE;
   const leaseTtlMs = dependencies.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS;
   const storage = dependencies.storage;
+  const presentAsset = (asset: AtlasProjectAsset) => publicAsset(asset, dependencies.describeAsset?.(asset));
 
   router.use((_req, res, next) => dependencies.enabled === false
     ? res.status(404).json({ error: "Atlas 尚未开放", code: "ATLAS_DISABLED" })
@@ -536,7 +567,7 @@ export const createAtlasRouter = (dependencies: AtlasRouterDependencies) => {
     const query = pagination.parse(req.query);
     const items = dependencies.store.listAssets(param(req.params.id), userId(res), query.limit, query.offset);
     if (!items) throw new AtlasRouteError(404, "ATLAS_PROJECT_NOT_FOUND", "Atlas项目不存在");
-    res.json({ items: items.map(publicAsset) });
+    res.json({ items: items.map(presentAsset) });
   }));
 
   router.post("/projects/:id/assets/import", asyncRoute(async (req, res) => {
@@ -555,7 +586,7 @@ export const createAtlasRouter = (dependencies: AtlasRouterDependencies) => {
       store: dependencies.store, storage, ownerId, projectId, sourceType: body.sourceType,
       sourceId: body.sourceId, source, now: now(), assetId: randomId(),
     });
-    res.status(existing ? 200 : 201).json(publicAsset(ready));
+    res.status(existing ? 200 : 201).json(presentAsset(ready));
   }));
 
   router.post("/projects/:id/generation-session", asyncRoute(async (req, res) => {
@@ -663,7 +694,7 @@ export const createAtlasRouter = (dependencies: AtlasRouterDependencies) => {
     if (reserved.transfer.status === "completed" && reserved.asset.status === "ready") {
       return res.status(200).json({
         uploadId: reserved.transfer.id, partSize: reserved.transfer.partSize,
-        asset: publicAsset(reserved.asset), transfer: publicTransfer(reserved.transfer),
+        asset: presentAsset(reserved.asset), transfer: publicTransfer(reserved.transfer),
         concurrency: 3, completedParts: reserved.transfer.parts, parts: [], completed: true,
       });
     }
@@ -707,7 +738,7 @@ export const createAtlasRouter = (dependencies: AtlasRouterDependencies) => {
       }
       res.status(reserved.status === "created" ? 201 : 200).json({
         uploadId: transfer.id, partSize: transfer.partSize,
-        asset: publicAsset(reserved.asset), transfer: publicTransfer(transfer), concurrency: 3,
+        asset: presentAsset(reserved.asset), transfer: publicTransfer(transfer), concurrency: 3,
         completedParts, parts, initialSigningPending,
       });
     } catch (error) {
@@ -790,7 +821,7 @@ export const createAtlasRouter = (dependencies: AtlasRouterDependencies) => {
           now,
         );
       }
-      return res.json(publicAsset(existing));
+      return res.json(presentAsset(existing));
     }
     if (transfer.status !== "uploading" && transfer.status !== "verifying") throw new AtlasRouteError(409, "ATLAS_UPLOAD_STATE_INVALID", "上传会话当前无法完成");
     if (body.purpose && body.purpose !== (transfer.kind === "export" ? "export" : "asset")) {
@@ -818,7 +849,7 @@ export const createAtlasRouter = (dependencies: AtlasRouterDependencies) => {
       if (exportReady) {
         await tryRegisterGlobalAsset(dependencies.store, exportReady.registration, dependencies.registerGlobalAsset, now);
       }
-      res.json(publicAsset(ready));
+      res.json(presentAsset(ready));
     } catch (error) {
       dependencies.store.recordTransferError(transfer.id, ownerId, error instanceof Error ? error.message : "上传完成失败", now());
       throw error;

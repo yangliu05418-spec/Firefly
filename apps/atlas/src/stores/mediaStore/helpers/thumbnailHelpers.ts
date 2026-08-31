@@ -35,13 +35,11 @@ export async function createThumbnail(
 }
 
 function getVideoThumbnailTargetTime(duration: number): number {
-  if (!Number.isFinite(duration) || duration <= 0) {
-    return 0;
-  }
-
-  const safeEnd = Math.max(0, duration - 0.05);
-  const preferred = Math.max(0.12, duration * 0.5);
-  return Math.min(safeEnd, preferred);
+  // A poster should be available as soon as the first decodable frame arrives.
+  // Seeking to the midpoint forces remote/range-backed media to wait for extra
+  // data and made the Media Pool feel empty even though the asset was usable.
+  void duration;
+  return 0;
 }
 
 function createVideoThumbnail(file: File): Promise<string | undefined> {

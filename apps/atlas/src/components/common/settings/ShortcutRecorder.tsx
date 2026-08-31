@@ -43,6 +43,7 @@ export function ShortcutRecorder({
   onReset,
   conflictLabel,
 }: ShortcutRecorderProps) {
+  const firefly = import.meta.env.VITE_APP_VARIANT === 'firefly';
   const [recording, setRecording] = useState(false);
   const recorderRef = useRef<HTMLDivElement>(null);
 
@@ -99,7 +100,7 @@ export function ShortcutRecorder({
         title={recording ? 'Press a key combo (Esc to cancel)' : 'Click to change shortcut'}
       >
         {recording ? (
-          <span className="shortcut-recording-text">Press key...</span>
+          <span className="shortcut-recording-text">{firefly ? '请按快捷键…' : 'Press key...'}</span>
         ) : combos.length > 0 ? (
           combos.map((combo, i) => (
             <span key={i} className="shortcut-keycap">
@@ -107,7 +108,7 @@ export function ShortcutRecorder({
             </span>
           ))
         ) : (
-          <span className="shortcut-unbound">Not set</span>
+          <span className="shortcut-unbound">{firefly ? '未设置' : 'Not set'}</span>
         )}
       </div>
 
@@ -115,7 +116,7 @@ export function ShortcutRecorder({
         <button
           className="shortcut-reset-btn"
           onClick={(e) => { e.stopPropagation(); onReset(); }}
-          title="Reset to preset default"
+          title={firefly ? '恢复预设默认值' : 'Reset to preset default'}
         >
           &#x21BA;
         </button>
@@ -123,7 +124,7 @@ export function ShortcutRecorder({
 
       {conflictLabel && (
         <span className="shortcut-conflict">
-          Conflicts with: {conflictLabel}
+          {firefly ? '与以下操作冲突：' : 'Conflicts with: '}{conflictLabel}
         </span>
       )}
     </div>

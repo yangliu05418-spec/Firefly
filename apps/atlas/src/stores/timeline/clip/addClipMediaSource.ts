@@ -2,6 +2,8 @@ import { hydrateAndProjectMediaSourceArtifacts } from '../../../services/mediaAr
 
 export type SourceMediaFile = {
   duration?: number;
+  width?: number;
+  height?: number;
   transcript?: import('../../../types').TranscriptWord[];
   transcriptStatus?: string;
   modelSequence?: import('../../../types').ModelSequenceData;
@@ -12,6 +14,7 @@ export type SourceMediaFile = {
   projectPath?: string;
   absolutePath?: string;
   filePath?: string;
+  remoteSourcePath?: string;
 };
 
 export function getPositiveFiniteDuration(value: number | undefined): number | undefined {

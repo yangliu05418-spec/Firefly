@@ -144,7 +144,6 @@ export function Preview({ panelId, source, showTransparencyGrid, initialEdit }: 
     sourceMonitorFile,
     sourceMonitorPlaybackRequestId,
     stableRenderSource,
-    toggleTransparency,
   } = usePreviewSourceConfig({
     panelId,
     source,
@@ -178,10 +177,7 @@ export function Preview({ panelId, source, showTransparencyGrid, initialEdit }: 
   const {
     dropdownRef,
     dropdownStyle,
-    qualityDropdownRef,
-    qualityOpen,
     selectorOpen,
-    setQualityOpen,
     setSelectorOpen,
   } = usePreviewDropdownState();
 
@@ -710,14 +706,14 @@ export function Preview({ panelId, source, showTransparencyGrid, initialEdit }: 
     maskEditMode, maskNavigationMode,
     maskPanelActive, overlayRef, playbackWaiterVideoCount, previewCameraOverride,
     motionPathOverlayProps, motionNullViewportOverlayProps,
-    previewQuality, qualityDropdownRef, qualityOpen, sam2Active, sceneGizmoToolbarTarget,
+    previewQuality, sam2Active, sceneGizmoToolbarTarget,
     sceneNavClipId, sceneNavEnabled, sceneObjectOverlaySelectedClipId, selectClip,
     selectedClip, selectedTextBounds, selectedTextLayer, setPropertyValue, setPreviewQuality,
-    setQualityOpen, setSceneGizmoToolbarTarget, setTextTyping, showPlaybackWaiter,
+    setSceneGizmoToolbarTarget, setTextTyping, showPlaybackWaiter,
     showSceneObjectOverlay, showTransparencyGrid, sourceMonitorActive, sourceMonitorFile,
     sourceMonitorPlaybackRequestId, statsExpanded, textClipEditMode, textPreviewEditorEnabled,
-    textTypingActive, toggleTransparency, tracks, updateTextBoundsVertex,
-    updateTextBoundsVertices, updateTextProperties, viewTransform, viewZoom,
+    textTypingActive, tracks, updateTextBoundsVertex,
+    updateTextBoundsVertices, updateTextProperties, viewTransform, viewZoom, setViewZoom,
     editCameraClip: activeCameraClipAtPlayhead,
     worldGridPlane: sceneObjectWorldGridPlane,
     onToggleStats: () => setStatsExpanded(!statsExpanded),
