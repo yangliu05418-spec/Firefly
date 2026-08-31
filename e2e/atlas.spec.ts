@@ -25,6 +25,16 @@ const originalPreview = (page: Page) => page.locator(
   '.dock-panel-content[data-panel-type="preview"] .preview-container',
 );
 
+async function completeAtlasShortcutOnboarding(page: Page) {
+  const onboarding = page.getByRole('dialog').filter({
+    has: page.getByRole('heading', { name: '你之前使用哪款剪辑软件？' }),
+  });
+  await expect(onboarding).toBeVisible();
+  await onboarding.getByRole('button', { name: 'DaVinci Resolve' }).click();
+  await onboarding.getByRole('button', { name: '开始使用' }).click();
+  await expect(onboarding).toBeHidden();
+}
+
 async function expectOriginalEditorLayout(page: Page) {
   const dock = page.locator('.dock-container');
   const timeline = originalTimeline(page);
@@ -165,6 +175,7 @@ test.describe("Atlas production SPA", () => {
     const dialog = page.getByRole("dialog", { name: "新建项目" });
     await dialog.getByLabel("重命名项目").fill("首支中文剪辑");
     await dialog.getByRole("button", { name: "新建项目" }).click();
+    await completeAtlasShortcutOnboarding(page);
 
     await expect(page).toHaveURL(new RegExp(`/studio/atlas/\\?project=${projectId}$`));
     await expect(page.getByRole("button", { name: "返回 Atlas 项目" })).toBeVisible();
@@ -173,6 +184,7 @@ test.describe("Atlas production SPA", () => {
 
     await page.reload();
     await expect(page.locator(".project-name")).toContainText("首支中文剪辑");
+    await expect(page.getByRole('heading', { name: '你之前使用哪款剪辑软件？' })).toHaveCount(0);
     await page.getByRole("button", { name: "返回 Atlas 项目" }).click();
     await expect(page.getByRole("heading", { name: "你的剪辑项目" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "首支中文剪辑" })).toBeVisible();
@@ -186,6 +198,7 @@ test.describe("Atlas production SPA", () => {
     const dialog = page.getByRole("dialog", { name: "新建项目" });
     await dialog.getByLabel("重命名项目").fill("本地优先返回");
     await dialog.getByRole("button", { name: "新建项目" }).click();
+    await completeAtlasShortcutOnboarding(page);
     await expect(page.getByRole("button", { name: "返回 Atlas 项目" })).toBeVisible();
 
     await page.getByRole("button", { name: "返回 Atlas 项目" }).click();
@@ -205,6 +218,7 @@ test.describe("Atlas production SPA", () => {
     const dialog = page.getByRole("dialog", { name: "新建项目" });
     await dialog.getByLabel("重命名项目").fill("缩放回归");
     await dialog.getByRole("button", { name: "新建项目" }).click();
+    await completeAtlasShortcutOnboarding(page);
 
     await expectOriginalEditorLayout(page);
     const layout = await page.evaluate(() => {
