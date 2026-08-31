@@ -118,16 +118,34 @@
 
 .tutorial-setup-choice-icon {
   align-items: center;
+  background: rgba(24, 31, 41, 0.94);
+  border: 1px solid rgba(174, 191, 209, 0.36);
+  border-radius: 12px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 8px 20px rgba(0, 0, 0, 0.22);
+  color: rgba(235, 242, 248, 0.96);
   display: flex;
+  font-size: 17px;
+  font-weight: 760;
   height: 48px;
   justify-content: center;
+  letter-spacing: -0.04em;
   width: 48px;
 }
 
-.tutorial-setup-choice-icon img {
-  height: 100%;
-  object-fit: contain;
-  width: 100%;
+.tutorial-setup-choice-icon--premiere,
+.tutorial-setup-choice-icon--aftereffects {
+  border-color: rgba(126, 112, 255, 0.52);
+  color: rgb(190, 181, 255);
+}
+
+.tutorial-setup-choice-icon--davinci {
+  border-color: rgba(93, 201, 189, 0.52);
+  color: rgb(147, 225, 211);
+}
+
+.tutorial-setup-choice-icon--finalcut {
+  border-color: rgba(242, 174, 79, 0.52);
+  color: rgb(250, 202, 133);
 }
 
 .tutorial-setup-beginner {

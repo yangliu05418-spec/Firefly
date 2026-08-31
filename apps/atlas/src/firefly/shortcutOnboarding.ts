@@ -1,14 +1,14 @@
 import type { ShortcutPresetId } from '../services/shortcutTypes';
 
 export const FIREFLY_SHORTCUT_ONBOARDING_PRESETS = [
-  { id: 'premiere', label: 'Premiere Pro', logo: '/logo-premiere.svg' },
-  { id: 'davinci', label: 'DaVinci Resolve', logo: '/logo-davinci.svg' },
-  { id: 'finalcut', label: 'Final Cut Pro', logo: '/logo-finalcut.png' },
-  { id: 'aftereffects', label: 'After Effects', logo: '/logo-aftereffects.svg' },
+  { id: 'premiere', label: 'Premiere Pro', monogram: 'Pr' },
+  { id: 'davinci', label: 'DaVinci Resolve', monogram: 'Dr' },
+  { id: 'finalcut', label: 'Final Cut Pro', monogram: 'Fc' },
+  { id: 'aftereffects', label: 'After Effects', monogram: 'Ae' },
 ] as const satisfies ReadonlyArray<{
   id: ShortcutPresetId;
   label: string;
-  logo: string;
+  monogram: string;
 }>;
 
 export type FireflyShortcutPresetId = typeof FIREFLY_SHORTCUT_ONBOARDING_PRESETS[number]['id'];

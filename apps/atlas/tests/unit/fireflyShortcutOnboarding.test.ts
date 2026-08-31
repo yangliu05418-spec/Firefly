@@ -15,6 +15,9 @@ describe('Firefly shortcut onboarding', () => {
       'finalcut',
       'aftereffects',
     ]);
+    expect(FIREFLY_SHORTCUT_ONBOARDING_PRESETS.every((preset) => (
+      preset.monogram.length === 2 && !('logo' in preset)
+    ))).toBe(true);
   });
 
   it('persists the completed choice independently for each Firefly user', () => {
