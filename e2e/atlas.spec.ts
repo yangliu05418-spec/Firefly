@@ -65,6 +65,7 @@ async function expectOriginalEditorLayout(page: Page) {
 async function mockAtlasApi(page: Page) {
   const projects: Project[] = [];
   const bootstrapCookies: string[] = [];
+  let checkpointCount = 0;
 
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -95,6 +96,7 @@ async function mockAtlasApi(page: Page) {
     }
     if (pathname === `/api/atlas/projects/${projectId}/lease` && method === "DELETE") return route.fulfill({ status: 204 });
     if (pathname === `/api/atlas/projects/${projectId}/checkpoints` && method === "POST") {
+      checkpointCount += 1;
       const input = request.postDataJSON() as { expectedRevision: number };
       if (projects[0]) {
         projects[0].revision = input.expectedRevision + 1;
@@ -108,7 +110,7 @@ async function mockAtlasApi(page: Page) {
     return json(route, { code: "E2E_ROUTE_UNHANDLED", error: `${method} ${pathname}` }, 501);
   });
 
-  return { bootstrapCookies, projects };
+  return { bootstrapCookies, projects, checkpointCount: () => checkpointCount };
 }
 
 test.describe("Atlas production SPA", () => {
@@ -172,8 +174,9 @@ test.describe("Atlas production SPA", () => {
   });
 
   test("keeps the editor usable at the effective 150 percent desktop viewport", async ({ page }) => {
+    test.setTimeout(45_000);
     await page.setViewportSize({ width: 960, height: 600 });
-    await mockAtlasApi(page);
+    const api = await mockAtlasApi(page);
     await page.context().addCookies([{ name: "firefly_session", value: "existing-session", url: atlasOrigin }]);
     await page.goto("/studio/atlas/");
     await page.getByRole("button", { name: "新建项目" }).first().click();
@@ -224,6 +227,8 @@ test.describe("Atlas production SPA", () => {
     await page.mouse.up();
     const timelineAfter = await originalTimeline(page).boundingBox();
     expect(Math.abs((timelineAfter?.height ?? 0) - (timelineBefore?.height ?? 0))).toBeGreaterThan(20);
+    await expect.poll(api.checkpointCount, { timeout: 10_000 }).toBeGreaterThan(0);
+    const checkpointsBeforePanelMove = api.checkpointCount();
 
     const previewTab = page.locator('[data-guided-panel-tab="preview"]');
     const leftPane = page.locator('.dock-tab-pane[data-group-id="left-group"]');
@@ -250,6 +255,10 @@ test.describe("Atlas production SPA", () => {
     const movedPreviewTabBox = await page.locator('[data-guided-panel-tab="preview"]').boundingBox();
     expect(movedPreviewTabBox).not.toBeNull();
     expect(movedPreviewTabBox!.x).toBeLessThan(previewTabBox!.x - 40);
+
+    // Reload only after the actual debounced cloud checkpoint has accepted the
+    // panel mutation. Waiting on a fixed delay made this test race on slower CI.
+    await expect.poll(api.checkpointCount, { timeout: 10_000 }).toBeGreaterThan(checkpointsBeforePanelMove);
 
     await page.reload();
     await expect.poll(async () => Math.abs(
