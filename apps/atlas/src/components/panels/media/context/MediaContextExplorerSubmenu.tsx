@@ -18,16 +18,17 @@ export function MediaContextExplorerSubmenu({
   onShowProxy,
   onClose,
 }: MediaContextExplorerSubmenuProps) {
+  const firefly = import.meta.env.VITE_APP_VARIANT === 'firefly';
   return (
     <div className="context-menu-item has-submenu" onMouseEnter={handleSubmenuHover} onMouseLeave={handleSubmenuLeave}>
-      <span>Show in Explorer</span>
+      <span>{firefly ? '在文件管理器中显示' : 'Show in Explorer'}</span>
       <span className="submenu-arrow">&#9654;</span>
       <div className="context-submenu">
         <div
           className="context-menu-item"
           onClick={() => { void onShowRaw(mediaFile); }}
         >
-          Raw {mediaFile.hasFileHandle && '(has path)'}
+          {firefly ? '原始文件' : 'Raw'} {mediaFile.hasFileHandle && (firefly ? '（已有路径）' : '(has path)')}
         </div>
         <div
           className={`context-menu-item ${!hasProxy ? 'disabled' : ''}`}
@@ -39,7 +40,11 @@ export function MediaContextExplorerSubmenu({
             }
           }}
         >
-          Proxy {!hasProxy ? '(not available)' : proxyFolderName ? `(${proxyFolderName})` : '(IndexedDB)'}
+          {firefly ? '代理文件' : 'Proxy'} {!hasProxy
+            ? (firefly ? '（不可用）' : '(not available)')
+            : proxyFolderName
+              ? `(${proxyFolderName})`
+              : '(IndexedDB)'}
         </div>
       </div>
     </div>

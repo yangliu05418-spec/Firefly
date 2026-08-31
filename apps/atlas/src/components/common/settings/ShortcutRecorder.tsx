@@ -97,7 +97,9 @@ export function ShortcutRecorder({
       <div
         className={`shortcut-keycaps ${recording ? 'recording' : ''}`}
         onClick={recording ? cancelRecording : startRecording}
-        title={recording ? 'Press a key combo (Esc to cancel)' : 'Click to change shortcut'}
+        title={recording
+          ? (firefly ? '请按快捷键（按 Esc 取消）' : 'Press a key combo (Esc to cancel)')
+          : (firefly ? '点击修改快捷键' : 'Click to change shortcut')}
       >
         {recording ? (
           <span className="shortcut-recording-text">{firefly ? '请按快捷键…' : 'Press key...'}</span>

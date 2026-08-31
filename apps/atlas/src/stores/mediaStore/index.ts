@@ -174,9 +174,11 @@ export const useMediaStore = create<MediaStoreState>()(
     registerFireflyRemoteAsset: (asset) => {
       const existing = get().files.find((file) => file.fireflyProjectAssetId === asset.id);
       if (existing) {
+        const legacyGeneratedName = /^(?:preview|result|output)(?:[-_.]|$)/i.test(existing.name.trim());
         set((state) => ({
           files: state.files.map((file) => file.id !== existing.id ? file : {
             ...file,
+            name: legacyGeneratedName && asset.name ? asset.name : file.name,
             url: asset.mediaUrl,
             remoteSourcePath: asset.mediaUrl,
             localMediaDescriptor: asset.localMedia ?? file.localMediaDescriptor,

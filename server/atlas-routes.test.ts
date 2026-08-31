@@ -606,13 +606,13 @@ describe("Atlas project API", () => {
 
   it("exposes a generated video immediately from its stable Firefly route while the project copy is pending", async () => {
     const api = await setup({
-      describeAsset: () => ({ thumbnailUrl: "/api/generations/video-task/poster", duration: 8, width: 1920, height: 1080, hasAudio: true }),
+      describeAsset: () => ({ displayName: "雨夜追车-video-ta.mp4", thumbnailUrl: "/api/generations/video-task/poster", duration: 8, width: 1920, height: 1080, hasAudio: true }),
     });
     const project = await api.json<{ id: string }>(await api.request("/projects", { method: "POST", body: JSON.stringify({ title: "立即剪辑" }) }));
     api.store.createImportedAsset({
       id: "destination-video", ownerId: api.owner.id, projectId: project.id,
       sourceType: "generation", sourceId: "video-task", kind: "video",
-      objectKey: "atlas/assets/deferred.mp4", fileName: "雨夜追车-video-ta.mp4",
+      objectKey: "atlas/assets/deferred.mp4", fileName: "preview.mp4",
       contentType: "video/mp4", size: 8_000_000, now: 1_000,
     });
 
@@ -620,6 +620,7 @@ describe("Atlas project API", () => {
     expect(response.status).toBe(200);
     expect(await api.json(response)).toMatchObject({ items: [{
       id: "destination-video", status: "copying",
+      fileName: "雨夜追车-video-ta.mp4",
       mediaUrl: "/api/generations/video-task/media",
       thumbnailUrl: "/api/generations/video-task/poster",
       duration: 8, width: 1920, height: 1080, hasAudio: true,

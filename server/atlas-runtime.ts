@@ -48,6 +48,8 @@ const generatedFileName = (prompt: string, id: string, extension: string) => {
   return `${title || "Firefly生成素材"}-${id.slice(0, 8)}.${extension}`;
 };
 
+const isLegacyGeneratedFileName = (fileName: string) => /^(?:preview|result|output)(?:[-_.]|$)/i.test(fileName.trim());
+
 const videoDimensions = (ratio: string, resolution: string) => {
   const shortEdge = resolution === "1080p" ? 1080 : resolution === "720p" ? 720 : resolution === "480p" ? 480 : 0;
   const match = /^(\d+):(\d+)$/.exec(ratio);
@@ -102,6 +104,9 @@ const describeAtlasAsset = (asset: import("./atlas-store.js").AtlasProjectAsset)
     const poster = users.readTaskMedia(asset.sourceId, "poster");
     const request = task?.request && typeof task.request === "object" ? task.request as Record<string, unknown> : {};
     return {
+      displayName: task && isLegacyGeneratedFileName(asset.fileName)
+        ? generatedFileName(task.prompt, task.id, asset.contentType === "video/quicktime" ? "mov" : "mp4")
+        : undefined,
       thumbnailUrl: poster?.status === "ready" ? `/api/generations/${encodeURIComponent(asset.sourceId)}/poster` : undefined,
       duration: task?.duration,
       ...(task ? videoDimensions(task.ratio, task.resolution) : {}),
@@ -109,7 +114,15 @@ const describeAtlasAsset = (asset: import("./atlas-store.js").AtlasProjectAsset)
     };
   }
   if (asset.sourceType === "generated" && asset.sourceId) {
-    return { thumbnailUrl: `/api/image-media/${encodeURIComponent(asset.sourceId)}?variant=thumbnail` };
+    const media = users.readMedia(asset.sourceId);
+    const task = media?.taskId ? users.readImageGeneration(media.taskId) : null;
+    const extension = asset.contentType === "image/png" ? "png" : asset.contentType === "image/webp" ? "webp" : "jpg";
+    return {
+      displayName: isLegacyGeneratedFileName(asset.fileName)
+        ? generatedFileName(task?.prompt ?? "Firefly生成图片", task?.id ?? asset.sourceId, extension)
+        : undefined,
+      thumbnailUrl: `/api/image-media/${encodeURIComponent(asset.sourceId)}?variant=thumbnail`,
+    };
   }
   if (asset.sourceType === "user_asset" && asset.sourceId && asset.kind === "image") {
     return { thumbnailUrl: `/api/assets/${encodeURIComponent(asset.sourceId)}/source?variant=thumbnail` };

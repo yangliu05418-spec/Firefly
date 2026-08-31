@@ -158,6 +158,8 @@ export function MediaContextActionsMenu({
   onNewMotionNull,
   onNewMotionAdjustment,
 }: MediaContextActionsMenuProps) {
+  const firefly = import.meta.env.VITE_APP_VARIANT === 'firefly';
+  const text = (zh: string, en: string) => firefly ? zh : en;
   const generationPrompt = mediaFile ? (flashBoardMediaBridge.getMetadata(mediaFile.id)?.prompt.trim() ?? '') : '';
   const canCopyGenerationPrompt = !multiSelect && generationPrompt.length > 0;
 
@@ -166,13 +168,13 @@ export function MediaContextActionsMenu({
       {showBoardAnnotationAction && (
         <>
           <div className="context-menu-item" onClick={onNewBoardAnnotation}>
-            <span>Annotation</span>
+            <span>{text('注释', 'Annotation')}</span>
           </div>
           <div className="context-menu-separator" />
         </>
       )}
       <div className="context-menu-item has-submenu" onMouseEnter={handleSubmenuHover} onMouseLeave={handleSubmenuLeave}>
-        <span>Add</span>
+        <span>{text('添加', 'Add')}</span>
         <span className="submenu-arrow">&#9654;</span>
         <div className="context-submenu">
           <MediaAddItemsMenu
@@ -198,11 +200,11 @@ export function MediaContextActionsMenu({
         </div>
       </div>
       <div className="context-menu-item" onClick={onImport}>
-        Import Media...
+        {text('导入素材…', 'Import Media...')}
       </div>
       {hasClipboard && (
         <div className="context-menu-item" onClick={onPaste}>
-          Paste
+          {text('粘贴', 'Paste')}
         </div>
       )}
       {hasSelection && (
@@ -214,7 +216,9 @@ export function MediaContextActionsMenu({
               className="context-menu-item"
               onClick={() => onToggleAiPromptReferences([...aiReferenceMediaFileIds])}
             >
-              {allContextMediaReferenced ? 'Unreference from AI Prompt' : 'Reference in AI Prompt'}
+              {allContextMediaReferenced
+                ? text('移除 AI 提示词引用', 'Unreference from AI Prompt')
+                : text('添加到 AI 提示词引用', 'Reference in AI Prompt')}
               {aiReferenceMediaFileIds.length > 1 ? ` (${aiReferenceMediaFileIds.length})` : ''}
             </div>
           )}
@@ -225,7 +229,7 @@ export function MediaContextActionsMenu({
               if (canCopyGenerationPrompt) onCopyPrompt(generationPrompt);
             }}
           >
-            Copy Prompt
+            {text('复制提示词', 'Copy Prompt')}
           </div>
 
           {!multiSelect && selectedItem && (
@@ -255,10 +259,10 @@ export function MediaContextActionsMenu({
           {!multiSelect && isVideoFile && mediaFile && (
             <>
               <div className="context-menu-item" onClick={() => { void onExtractVideoFrame(mediaFile, 'first'); }}>
-                Extract First Frame
+                {text('提取首帧', 'Extract First Frame')}
               </div>
               <div className="context-menu-item" onClick={() => { void onExtractVideoFrame(mediaFile, 'last'); }}>
-                Extract Last Frame
+                {text('提取尾帧', 'Extract Last Frame')}
               </div>
             </>
           )}
@@ -273,13 +277,13 @@ export function MediaContextActionsMenu({
 
           {!multiSelect && composition && (
             <div className="context-menu-item" onClick={() => onOpenCompositionSettings(composition)}>
-              Composition Settings...
+              {text('合成设置…', 'Composition Settings...')}
             </div>
           )}
 
           {!multiSelect && solidItem && (
             <div className="context-menu-item" onClick={() => onOpenSolidSettings(solidItem)}>
-              Solid Settings...
+              {text('纯色图层设置…', 'Solid Settings...')}
             </div>
           )}
 
@@ -323,20 +327,20 @@ export function MediaContextActionsMenu({
               className="context-menu-item"
               onClick={() => { void onPickProxyFolder(); }}
             >
-              Set Proxy Folder... {proxyFolderName && `(${proxyFolderName})`}
+              {text('设置代理文件夹…', 'Set Proxy Folder...')} {proxyFolderName && `(${proxyFolderName})`}
             </div>
           )}
 
           <div className="context-menu-separator" />
           <div className="context-menu-item" onClick={onCopy}>
-            Copy{multiSelect ? ` (${selectedCount} items)` : ''}
+            {text('复制', 'Copy')}{multiSelect ? text(`（${selectedCount} 项）`, ` (${selectedCount} items)`) : ''}
           </div>
           <div className="context-menu-item" onClick={onDuplicate}>
-            Duplicate{multiSelect ? ` (${selectedCount} items)` : ''}
+            {text('创建副本', 'Duplicate')}{multiSelect ? text(`（${selectedCount} 项）`, ` (${selectedCount} items)`) : ''}
           </div>
           <div className="context-menu-separator" />
           <div className="context-menu-item danger" onClick={onDelete}>
-            Delete{multiSelect ? ` (${selectedCount} items)` : ''}
+            {text('删除', 'Delete')}{multiSelect ? text(`（${selectedCount} 项）`, ` (${selectedCount} items)`) : ''}
           </div>
         </>
       )}

@@ -42,6 +42,14 @@ describe("private media service worker scope", () => {
       },
     };
     vm.runInNewContext(source, scope);
+    let posterIntercepted = false;
+    handlers.get("fetch")?.({
+      request: { method: "GET", destination: "image", url: "https://firefly.test/api/generations/task-1/poster" },
+      clientId: "client-a",
+      respondWith: () => { posterIntercepted = true; },
+    });
+    expect(posterIntercepted).toBe(false);
+
     const request = { method: "GET", destination: "image", url: "https://firefly.test/api/assets/asset-1/source?variant=thumbnail" };
     const dispatchFetch = async (clientId: string) => {
       let response: Promise<Response> | undefined;
