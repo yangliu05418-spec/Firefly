@@ -19,13 +19,28 @@ import { ListItemNode, ListNode } from "@lexical/list";
 import { Bold, Eraser, Expand, Heading1, Heading2, Heading3, Italic, Minus, Palette, Quote, Underline, X } from "lucide-react";
 import { $createParagraphNode, $getRoot, $getSelection, $isRangeSelection, COMMAND_PRIORITY_LOW, FORMAT_TEXT_COMMAND, SELECTION_CHANGE_COMMAND, type EditorState } from "lexical";
 
+function hasRenderableEditorState(value: Record<string, unknown> | undefined) {
+  if (!value) return false;
+  const root = value.root;
+  if (!root || typeof root !== "object" || Array.isArray(root)) return false;
+  return Array.isArray((root as { children?: unknown }).children)
+    && ((root as { children: unknown[] }).children.length > 0);
+}
+
+function replaceEditorMarkdown(value: string) {
+  const root = $getRoot();
+  root.clear();
+  if (value) $convertFromMarkdownString(value, TRANSFORMERS);
+  if (root.getChildrenSize() === 0) root.append($createParagraphNode());
+}
+
 function ExternalStatePlugin({ value, readOnly, latestMarkdown }: { value: string; readOnly: boolean; latestMarkdown: React.MutableRefObject<string> }) {
   const [editor] = useLexicalComposerContext();
   useEffect(() => { editor.setEditable(!readOnly); }, [editor, readOnly]);
   useEffect(() => {
     if (value === latestMarkdown.current) return;
     latestMarkdown.current = value;
-    editor.update(() => { $getRoot().clear(); if (value) $convertFromMarkdownString(value, TRANSFORMERS); });
+    editor.update(() => replaceEditorMarkdown(value));
   }, [editor, latestMarkdown, value]);
   return null;
 }
@@ -81,7 +96,9 @@ export function CanvasRichText({ value, richText, readOnly, expanded, onExpanded
     editable: !readOnly,
     nodes: [HeadingNode, QuoteNode, HorizontalRuleNode, CodeNode, LinkNode, ListNode, ListItemNode],
     onError(error: Error) { throw error; },
-    editorState: richText && Object.keys(richText).length ? JSON.stringify(richText) : () => { if (value) $convertFromMarkdownString(value, TRANSFORMERS); else $getRoot().clear(); },
+    editorState: hasRenderableEditorState(richText)
+      ? JSON.stringify(richText)
+      : () => replaceEditorMarkdown(value),
     theme: { paragraph: "canvas-v2-richtext__paragraph", heading: { h1: "canvas-v2-richtext__h1", h2: "canvas-v2-richtext__h2", h3: "canvas-v2-richtext__h3" }, quote: "canvas-v2-richtext__quote", text: { bold: "canvas-v2-richtext__bold", italic: "canvas-v2-richtext__italic", underline: "canvas-v2-richtext__underline" } },
   // Serialized rich text is the initial display truth. Later model updates intentionally arrive as Markdown.
   // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -11,6 +11,17 @@ function Harness() {
   return <CanvasRichText value="" readOnly={false} expanded={expanded} onExpandedChange={setExpanded} onChange={() => undefined} />;
 }
 
+const legacyEmptyState = {
+  root: {
+    children: [],
+    direction: null,
+    format: "",
+    indent: 0,
+    type: "root",
+    version: 1,
+  },
+};
+
 describe("CanvasRichText expanded editor", () => {
   let container: HTMLDivElement;
   let root: ReturnType<typeof createRoot>;
@@ -37,5 +48,20 @@ describe("CanvasRichText expanded editor", () => {
     await act(async () => expand?.click());
     expect(document.querySelector('[role="dialog"][aria-label="放大编辑文本"]')).not.toBeNull();
     expect(document.querySelector<HTMLButtonElement>('button[title="退出放大编辑"]')).not.toBeNull();
+  });
+
+  it("recovers a legacy empty serialized state from its Markdown mirror", async () => {
+    await act(async () => root.render(
+      <CanvasRichText
+        value="旧画布里的镜头说明"
+        richText={legacyEmptyState}
+        readOnly={false}
+        expanded={false}
+        onExpandedChange={() => undefined}
+        onChange={() => undefined}
+      />,
+    ));
+
+    expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain("旧画布里的镜头说明");
   });
 });
