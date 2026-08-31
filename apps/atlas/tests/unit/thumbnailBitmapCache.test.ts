@@ -64,6 +64,25 @@ describe('thumbnailBitmapCache', () => {
     expect(getThumbnailBitmap('blob:frame-url')).toBeNull();
   });
 
+  it('rejects an unsuccessful thumbnail response before bitmap decoding', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 404,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      blob: vi.fn(),
+    } as unknown as Response);
+    const createImageBitmapMock = vi.fn();
+    vi.stubGlobal('createImageBitmap', createImageBitmapMock);
+
+    ensureThumbnailBitmap('/missing-poster.webp', vi.fn(), 'media-missing');
+    await vi.waitFor(() => {
+      expect(timelineRuntimeCoordinator.getBridgeStats().policies.thumbnail.budgetReport.usage.jobs).toBe(0);
+    });
+
+    expect(createImageBitmapMock).not.toHaveBeenCalled();
+    expect(hasThumbnailBitmap('/missing-poster.webp')).toBe(false);
+  });
+
   it('closes a bitmap that finishes decoding after its URL was invalidated', async () => {
     let resolveBitmap: ((bitmap: ImageBitmap) => void) | undefined;
     const bitmapPromise = new Promise<ImageBitmap>((resolve) => {

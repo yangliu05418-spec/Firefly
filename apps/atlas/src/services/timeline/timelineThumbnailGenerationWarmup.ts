@@ -3,6 +3,7 @@ import { useTimelineStore } from '../../stores/timeline';
 import type { TimelineClipDragPreview } from '../../stores/timeline/types';
 import {
   thumbnailCacheService,
+  type ThumbnailGenerationSecondRange,
   type ThumbnailStatus,
 } from '../thumbnailCacheService';
 import {
@@ -37,9 +38,13 @@ export interface TimelineThumbnailGenerationClipRef {
 
 export interface TimelineThumbnailGenerationMediaFileRef {
   id: string;
+  file?: File;
   url?: string;
   duration?: number;
   fileHash?: string;
+  fireflyProjectAssetId?: string;
+  remoteSourcePath?: string;
+  remoteCacheStatus?: 'idle' | 'downloading' | 'ready' | 'error';
 }
 
 export interface TimelineThumbnailGenerationState {
@@ -52,13 +57,19 @@ export interface TimelineThumbnailGenerationState {
 export interface TimelineThumbnailGenerationWarmupDeps {
   getState: () => TimelineThumbnailGenerationState;
   getStatus: (mediaFileId: string) => ThumbnailStatus;
+  getCount?: (mediaFileId: string) => number;
   generateForSourceUrl: (
     mediaFileId: string,
     sourceUrl: string,
     duration: number,
     fileHash?: string,
     crossOrigin?: string,
+    prioritySecondRanges?: readonly ThumbnailGenerationSecondRange[],
   ) => Promise<void>;
+  prioritizeSourceSeconds?: (
+    mediaFileId: string,
+    prioritySecondRanges?: readonly ThumbnailGenerationSecondRange[],
+  ) => void;
   maxConcurrentGenerations?: number;
   setTimeout: typeof setTimeout;
   clearTimeout: typeof clearTimeout;
@@ -68,6 +79,7 @@ export type TimelineThumbnailGenerationWarmupStatus =
   | 'generated'
   | 'ready'
   | 'generating'
+  | 'error'
   | 'blocked'
   | 'skipped';
 
@@ -82,7 +94,12 @@ interface TimelineThumbnailGenerationRequest {
   sourceUrl: string;
   crossOrigin?: string;
   duration: number;
+  prioritySecondRanges?: readonly ThumbnailGenerationSecondRange[];
   requestKey: string;
+}
+
+export interface VisibleTimelineThumbnailGenerationRef extends VisibleTimelineThumbnailRef {
+  prioritySecondRanges?: readonly ThumbnailGenerationSecondRange[];
 }
 
 const scheduledThumbnailGenerationTimers = new Map<string, TimerHandle>();
@@ -102,9 +119,27 @@ function getDefaultDeps(): TimelineThumbnailGenerationWarmupDeps {
       };
     },
     getStatus: (mediaFileId) => thumbnailCacheService.getStatus(mediaFileId),
-    generateForSourceUrl: (mediaFileId, sourceUrl, duration, fileHash, crossOrigin) => (
-      thumbnailCacheService.generateForSourceUrl(mediaFileId, sourceUrl, duration, fileHash, crossOrigin)
+    getCount: (mediaFileId) => thumbnailCacheService.getCount(mediaFileId),
+    generateForSourceUrl: (
+      mediaFileId,
+      sourceUrl,
+      duration,
+      fileHash,
+      crossOrigin,
+      prioritySecondRanges,
+    ) => (
+      thumbnailCacheService.generateForSourceUrl(
+        mediaFileId,
+        sourceUrl,
+        duration,
+        fileHash,
+        crossOrigin,
+        prioritySecondRanges,
+      )
     ),
+    prioritizeSourceSeconds: (mediaFileId, prioritySecondRanges) => {
+      thumbnailCacheService.prioritizeSourceSeconds(mediaFileId, prioritySecondRanges);
+    },
     ...getTimelineWarmupTimerDeps(),
   };
 }
@@ -148,17 +183,24 @@ function getFinitePositiveDuration(...values: Array<number | undefined>): number
 }
 
 function normalizeThumbnailGenerationRefs(
-  refs: readonly VisibleTimelineThumbnailRef[],
-): VisibleTimelineThumbnailRef[] {
-  const unique = new Map<string, VisibleTimelineThumbnailRef>();
+  refs: readonly VisibleTimelineThumbnailGenerationRef[],
+): VisibleTimelineThumbnailGenerationRef[] {
+  const unique = new Map<string, VisibleTimelineThumbnailGenerationRef>();
 
   for (const ref of refs) {
     if (!ref.mediaFileId) continue;
     const key = getThumbnailGenerationKey(ref.mediaFileId, ref.fileHash);
-    if (unique.has(key)) continue;
+    const existing = unique.get(key);
+    const prioritySecondRanges = [
+      ...(existing?.prioritySecondRanges ?? []),
+      ...(ref.prioritySecondRanges ?? []),
+    ];
     unique.set(key, {
       mediaFileId: ref.mediaFileId,
       fileHash: ref.fileHash,
+      prioritySecondRanges: prioritySecondRanges.length > 0
+        ? prioritySecondRanges
+        : undefined,
     });
   }
 
@@ -166,7 +208,7 @@ function normalizeThumbnailGenerationRefs(
 }
 
 function resolveThumbnailGenerationRequest(
-  ref: VisibleTimelineThumbnailRef,
+  ref: VisibleTimelineThumbnailGenerationRef,
   state: TimelineThumbnailGenerationState,
 ): TimelineThumbnailGenerationRequest | null {
   const mediaFile = state.mediaFiles.find((file) => file.id === ref.mediaFileId);
@@ -191,8 +233,22 @@ function resolveThumbnailGenerationRequest(
     sourceUrl,
     crossOrigin: video?.crossOrigin || 'anonymous',
     duration,
+    prioritySecondRanges: ref.prioritySecondRanges,
     requestKey: getThumbnailGenerationKey(ref.mediaFileId, fileHash),
   };
+}
+
+function isWaitingForFireflyLocalSource(
+  ref: VisibleTimelineThumbnailRef,
+  state: TimelineThumbnailGenerationState,
+): boolean {
+  const mediaFile = state.mediaFiles.find((file) => file.id === ref.mediaFileId);
+  return Boolean(
+    mediaFile?.fireflyProjectAssetId
+    && mediaFile.remoteSourcePath
+    && mediaFile.remoteCacheStatus === 'downloading'
+    && !mediaFile.file
+  );
 }
 
 async function acquireThumbnailGenerationSlot(limit: number): Promise<void> {
@@ -229,22 +285,39 @@ async function runThumbnailGenerationRequest(
       return { mediaFileId: request.mediaFileId, status: 'blocked' };
     }
 
-    await deps.generateForSourceUrl(
-      request.mediaFileId,
-      request.sourceUrl,
-      request.duration,
-      request.fileHash,
-      request.crossOrigin,
-    );
-
-    return { mediaFileId: request.mediaFileId, status: 'generated' };
+    if (request.prioritySecondRanges?.length) {
+      await deps.generateForSourceUrl(
+        request.mediaFileId,
+        request.sourceUrl,
+        request.duration,
+        request.fileHash,
+        request.crossOrigin,
+        request.prioritySecondRanges,
+      );
+    } else {
+      await deps.generateForSourceUrl(
+        request.mediaFileId,
+        request.sourceUrl,
+        request.duration,
+        request.fileHash,
+        request.crossOrigin,
+      );
+    }
+    const finalStatus = deps.getStatus(request.mediaFileId);
+    if (finalStatus === 'ready') {
+      return { mediaFileId: request.mediaFileId, status: 'generated' };
+    }
+    if (finalStatus === 'error' || finalStatus === 'generating') {
+      return { mediaFileId: request.mediaFileId, status: finalStatus };
+    }
+    return { mediaFileId: request.mediaFileId, status: 'skipped' };
   } finally {
     releaseThumbnailGenerationSlot();
   }
 }
 
 export async function warmVisibleTimelineThumbnailGeneration(
-  refs: readonly VisibleTimelineThumbnailRef[],
+  refs: readonly VisibleTimelineThumbnailGenerationRef[],
   options: { deps?: TimelineThumbnailGenerationWarmupDeps } = {},
 ): Promise<TimelineThumbnailGenerationWarmupResult[]> {
   const deps = options.deps ?? getDefaultDeps();
@@ -261,10 +334,19 @@ export async function warmVisibleTimelineThumbnailGeneration(
   const results: TimelineThumbnailGenerationWarmupResult[] = [];
   for (const ref of normalizedRefs) {
     const currentStatus = deps.getStatus(ref.mediaFileId);
-    if (currentStatus === 'ready' || currentStatus === 'generating') {
+    if (currentStatus === 'generating') {
+      deps.prioritizeSourceSeconds?.(ref.mediaFileId, ref.prioritySecondRanges);
       results.push({
         mediaFileId: ref.mediaFileId,
         status: currentStatus,
+      });
+      continue;
+    }
+
+    if (isWaitingForFireflyLocalSource(ref, state)) {
+      results.push({
+        mediaFileId: ref.mediaFileId,
+        status: 'blocked',
       });
       continue;
     }
@@ -278,6 +360,17 @@ export async function warmVisibleTimelineThumbnailGeneration(
       continue;
     }
 
+    if (
+      currentStatus === 'ready'
+      && (!deps.getCount || deps.getCount(ref.mediaFileId) >= Math.ceil(request.duration))
+    ) {
+      results.push({
+        mediaFileId: ref.mediaFileId,
+        status: 'ready',
+      });
+      continue;
+    }
+
     let generation = inFlightThumbnailGenerations.get(request.requestKey);
     if (!generation) {
       generation = runThumbnailGenerationRequest(request, deps)
@@ -285,6 +378,8 @@ export async function warmVisibleTimelineThumbnailGeneration(
           inFlightThumbnailGenerations.delete(request.requestKey);
         });
       inFlightThumbnailGenerations.set(request.requestKey, generation);
+    } else {
+      deps.prioritizeSourceSeconds?.(request.mediaFileId, request.prioritySecondRanges);
     }
 
     results.push(await generation);
@@ -294,7 +389,7 @@ export async function warmVisibleTimelineThumbnailGeneration(
 }
 
 export function scheduleVisibleTimelineThumbnailGeneration(
-  refs: readonly VisibleTimelineThumbnailRef[],
+  refs: readonly VisibleTimelineThumbnailGenerationRef[],
   options: {
     deps?: TimelineThumbnailGenerationWarmupDeps;
     delayMs?: number;

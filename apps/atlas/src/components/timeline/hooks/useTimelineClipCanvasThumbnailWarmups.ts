@@ -6,7 +6,10 @@ import {
   scheduleVisibleTimelineThumbnailDbWarmup,
   type VisibleTimelineThumbnailRef,
 } from '../../../services/timeline/timelineThumbnailDbWarmup';
-import { scheduleVisibleTimelineThumbnailGeneration } from '../../../services/timeline/timelineThumbnailGenerationWarmup';
+import {
+  scheduleVisibleTimelineThumbnailGeneration,
+  type VisibleTimelineThumbnailGenerationRef,
+} from '../../../services/timeline/timelineThumbnailGenerationWarmup';
 import type { TimelinePaintSourceClip } from '../../../timeline';
 import {
   collectTimelineClipCanvasVisibleThumbnailSecondRanges,
@@ -78,6 +81,12 @@ export function useTimelineClipCanvasThumbnailWarmups(
     }),
     [clips, resolveGeometry, scrollX, thumbnailViewportOverscanPx, timeToPixel, viewportWidth],
   );
+  const visibleThumbnailGenerationRefs = useMemo<VisibleTimelineThumbnailGenerationRef[]>(() => (
+    visibleThumbnailRefs.map((ref) => ({
+      ...ref,
+      prioritySecondRanges: visibleThumbnailSecondRanges.get(ref.mediaFileId),
+    }))
+  ), [visibleThumbnailRefs, visibleThumbnailSecondRanges]);
 
   useEffect(() => {
     if (missingBitmapRefs.length === 0) return;
@@ -114,7 +123,7 @@ export function useTimelineClipCanvasThumbnailWarmups(
   }, [visibleThumbnailRefs]);
 
   useEffect(() => {
-    if (visibleThumbnailRefs.length === 0) return;
-    return scheduleVisibleTimelineThumbnailGeneration(visibleThumbnailRefs);
-  }, [visibleThumbnailRefs]);
+    if (visibleThumbnailGenerationRefs.length === 0) return;
+    return scheduleVisibleTimelineThumbnailGeneration(visibleThumbnailGenerationRefs);
+  }, [visibleThumbnailGenerationRefs]);
 }

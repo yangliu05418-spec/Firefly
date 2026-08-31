@@ -5,6 +5,7 @@ import type { LocalMediaDescriptor, LocalMediaEvent, LocalMediaManifest, LocalMe
 export type { LocalMediaDescriptor, LocalMediaEvent, LocalMediaManifest, LocalMediaStats } from './types';
 
 const DEFAULT_MAX_BYTES = 50 * 1024 ** 3;
+const DEFAULT_TRANSFER_INACTIVITY_TIMEOUT_MS = 30_000;
 const HIGH_WATER = 0.8;
 const LOW_WATER = 0.65;
 const channelName = (userId: string) => `firefly-local-media-v1:${userId}`;
@@ -40,6 +41,7 @@ const transferScheduler = (descriptor: LocalMediaDescriptor) => descriptor.media
 export interface LocalMediaCacheOptions {
   report?: (event: LocalMediaEvent) => void;
   maxBytes?: number;
+  transferInactivityTimeoutMs?: number;
 }
 
 export class LocalMediaCache {
@@ -50,12 +52,14 @@ export class LocalMediaCache {
   private readonly channel?: BroadcastChannel;
   private readonly report?: (event: LocalMediaEvent) => void;
   private readonly maxBytes: number;
+  private readonly transferInactivityTimeoutMs: number;
   private closed = false;
 
   constructor(userId: string, options: LocalMediaCacheOptions = {}) {
     this.userId = userId;
     this.report = options.report;
     this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+    this.transferInactivityTimeoutMs = Math.max(1, options.transferInactivityTimeoutMs ?? DEFAULT_TRANSFER_INACTIVITY_TIMEOUT_MS);
     this.channel = typeof BroadcastChannel === 'undefined' ? undefined : new BroadcastChannel(channelName(userId));
   }
 
@@ -217,15 +221,46 @@ export class LocalMediaCache {
     let lastCheckpointBytes = 0;
     this.activeWorkers.set(descriptor.cacheKey, { id, worker, mediaType: descriptor.mediaType });
     await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let watchdog: ReturnType<typeof setTimeout> | undefined;
+      let lastProgressBytes = -1;
+      const clearWatchdog = () => {
+        if (watchdog !== undefined) clearTimeout(watchdog);
+        watchdog = undefined;
+      };
+      const finish = (result: { ok: true } | { ok: false; error: Error }) => {
+        if (settled) return;
+        settled = true;
+        clearWatchdog();
+        if (result.ok) resolve(); else reject(result.error);
+      };
+      const armWatchdog = () => {
+        clearWatchdog();
+        watchdog = setTimeout(() => {
+          if (settled) return;
+          try { worker.postMessage({ id, type: 'cancel' }); } catch { /* worker will be terminated in finally */ }
+          this.emit('local_media_fallback', descriptor, {
+            bytes: Math.max(0, lastProgressBytes),
+            errorCode: 'LOCAL_MEDIA_TRANSFER_STALLED',
+          });
+          finish({ ok: false, error: new Error('LOCAL_MEDIA_TRANSFER_STALLED') });
+        }, this.transferInactivityTimeoutMs);
+      };
+      armWatchdog();
       worker.onmessage = (event: MessageEvent<{ id: string; type: string; downloadedBytes?: number; errorCode?: string }>) => {
-        if (event.data.id !== id) return;
+        if (settled || event.data.id !== id) return;
         const bytes = event.data.downloadedBytes ?? 0;
         if (event.data.type === 'started' || event.data.type === 'resumed') {
+          lastProgressBytes = bytes;
+          armWatchdog();
           void this.store.markPartial(this.userId, descriptor, bytes);
           lastCheckpointAt = performance.now();
           lastCheckpointBytes = bytes;
           this.emit(event.data.type === 'resumed' ? 'local_media_fetch_resumed' : 'local_media_fetch_started', descriptor, { bytes });
         } else if (event.data.type === 'progress') {
+          if (bytes <= lastProgressBytes) return;
+          lastProgressBytes = bytes;
+          armWatchdog();
           const now = performance.now();
           if (bytes - lastCheckpointBytes >= 4 * 1024 ** 2 || now - lastCheckpointAt >= 1_000) {
             lastCheckpointAt = now;
@@ -234,21 +269,28 @@ export class LocalMediaCache {
             this.channel?.postMessage({ type: 'progress', cacheKey: descriptor.cacheKey, revision: descriptor.revision, bytes });
           }
         } else if (event.data.type === 'ready') {
+          lastProgressBytes = bytes;
+          armWatchdog();
           void this.store.markReady(this.userId, descriptor, bytes).then(() => {
+            if (settled) return;
             this.channel?.postMessage({ type: 'ready', cacheKey: descriptor.cacheKey, revision: descriptor.revision });
             this.emit('local_media_ready', descriptor, { bytes, elapsedMs: Math.round(performance.now() - startedAt) });
-            resolve();
-          }, reject);
+            finish({ ok: true });
+          }, (error) => finish({ ok: false, error: error instanceof Error ? error : new Error('LOCAL_MEDIA_MANIFEST_FAILED') }));
         } else if (event.data.type === 'failed') {
           void this.store.markPartial(this.userId, descriptor, bytes);
           if (event.data.errorCode !== 'AbortError') {
             this.emit('local_media_fallback', descriptor, { bytes, errorCode: event.data.errorCode });
           }
-          reject(new Error(event.data.errorCode ?? 'LOCAL_MEDIA_DOWNLOAD_FAILED'));
+          finish({ ok: false, error: new Error(event.data.errorCode ?? 'LOCAL_MEDIA_DOWNLOAD_FAILED') });
         }
       };
-      worker.onerror = () => reject(new Error('LOCAL_MEDIA_WORKER_CRASHED'));
-      worker.postMessage({ id, userId: this.userId, ...request });
+      worker.onerror = () => finish({ ok: false, error: new Error('LOCAL_MEDIA_WORKER_CRASHED') });
+      try {
+        worker.postMessage({ id, userId: this.userId, ...request });
+      } catch (error) {
+        finish({ ok: false, error: error instanceof Error ? error : new Error('LOCAL_MEDIA_WORKER_POST_FAILED') });
+      }
     }).finally(() => {
       if (this.activeWorkers.get(descriptor.cacheKey)?.id === id) this.activeWorkers.delete(descriptor.cacheKey);
       worker.terminate();

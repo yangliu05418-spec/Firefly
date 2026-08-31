@@ -12,10 +12,181 @@ import { materializeFireflyRemoteMedia } from '../project/firefly/FireflyRemoteM
 
 const log = Logger.create('TimelineExternalDropMediaResolver');
 const TIMELINE_DROP_IMPORT_PLACEHOLDER_TIMEOUT_MS = 750;
+const fireflyTimelineMaterializations = new Map<string, Promise<File | null>>();
+const fireflyTimelineMaterializationSources = new Map<string, MediaFile>();
 
 type FileWithPath = File & { path?: string };
 
 const CLIP_TYPED_MEDIA_TYPES = new Set<MediaFile['type']>(['gaussian-splat', 'lottie', 'rive', 'model']);
+
+async function warmMaterializedVideoFilmstrip(
+  mediaFile: MediaFile,
+  localUrl: string,
+): Promise<void> {
+  if (mediaFile.type !== 'video' || !mediaFile.duration || mediaFile.duration <= 0) return;
+
+  const { thumbnailCacheService } = await import('../thumbnailCacheService');
+  const status = thumbnailCacheService.getStatus(mediaFile.id);
+  if (status === 'generating' || status === 'error') {
+    // A remote extraction may have raced the OPFS transfer. Reset that source
+    // before starting from the now-authoritative local file.
+    await thumbnailCacheService.clearSource(mediaFile.id);
+  }
+  await thumbnailCacheService.generateForSourceUrl(
+    mediaFile.id,
+    localUrl,
+    mediaFile.duration,
+    mediaFile.fileHash,
+    'anonymous',
+  );
+}
+
+function getFireflyTimelineMaterializationKey(mediaFile: MediaFile): string {
+  const descriptor = mediaFile.localMediaDescriptor;
+  const revision = descriptor
+    ? `${descriptor.cacheKey}:${descriptor.revision}`
+    : `${mediaFile.fireflyProjectAssetId ?? ''}:${mediaFile.remoteSourcePath ?? ''}:${mediaFile.fileSize ?? ''}`;
+  return `${mediaFile.id}:${revision}`;
+}
+
+function isSameFireflyTimelineContent(left: MediaFile, right: MediaFile): boolean {
+  if (
+    left.id !== right.id
+    || left.fireflyProjectAssetId !== right.fireflyProjectAssetId
+  ) {
+    return false;
+  }
+
+  const leftDescriptor = left.localMediaDescriptor;
+  const rightDescriptor = right.localMediaDescriptor;
+  if (!leftDescriptor || !rightDescriptor) {
+    // A copying asset can gain its durable descriptor and media route while an
+    // existing transfer is running. That is a metadata upgrade, not new bytes.
+    return true;
+  }
+
+  return leftDescriptor.cacheKey === rightDescriptor.cacheKey
+    && leftDescriptor.revision === rightDescriptor.revision;
+}
+
+function getCurrentFireflyTimelineMedia(mediaFile: MediaFile): MediaFile | undefined {
+  const current = useMediaStore.getState().files.find((file) => file.id === mediaFile.id);
+  return current && isSameFireflyTimelineContent(mediaFile, current) ? current : undefined;
+}
+
+function materializeFireflyTimelineMedia(mediaFile: MediaFile): Promise<File | null> {
+  const materializationKey = getFireflyTimelineMaterializationKey(mediaFile);
+  const existing = fireflyTimelineMaterializations.get(materializationKey);
+  if (existing) return existing;
+  for (const [key, source] of fireflyTimelineMaterializationSources) {
+    if (isSameFireflyTimelineContent(source, mediaFile)) {
+      const sameContentMaterialization = fireflyTimelineMaterializations.get(key);
+      if (sameContentMaterialization) return sameContentMaterialization;
+    }
+  }
+
+  useMediaStore.setState((state) => ({
+    files: state.files.map((currentFile) => (
+      isSameFireflyTimelineContent(mediaFile, currentFile)
+        ? { ...currentFile, remoteCacheStatus: 'downloading', remoteCacheProgress: 0 }
+        : currentFile
+    )),
+  }));
+
+  let shouldMaterializeCurrentRevision = false;
+  const promise = (async (): Promise<File | null> => {
+    try {
+      const materialized = await materializeFireflyRemoteMedia(mediaFile, {
+        onProgress: (progress) => {
+          useMediaStore.setState((state) => ({
+            files: state.files.map((currentFile) => (
+              isSameFireflyTimelineContent(mediaFile, currentFile)
+                ? { ...currentFile, remoteCacheProgress: progress }
+                : currentFile
+            )),
+          }));
+        },
+      });
+      const current = getCurrentFireflyTimelineMedia(mediaFile);
+      if (!current) {
+        // A genuinely newer content revision replaced this transfer. Never
+        // publish stale bytes, but immediately continue with the current one.
+        shouldMaterializeCurrentRevision = true;
+        return materialized.file;
+      }
+      const expectedSize = current.localMediaDescriptor?.size ?? current.fileSize;
+      if (expectedSize && expectedSize > 0 && materialized.file.size !== expectedSize) {
+        throw new Error('Materialized Firefly media does not match the ready asset size');
+      }
+
+      const url = createPrimaryMediaObjectUrl(current.id, materialized.file);
+      useMediaStore.setState((state) => ({
+        files: state.files.map((currentFile) => (
+          isSameFireflyTimelineContent(current, currentFile)
+            ? {
+                ...currentFile,
+                file: materialized.file,
+                url,
+                projectPath: materialized.relativePath,
+                hasFileHandle: true,
+                remoteCacheStatus: 'ready',
+                remoteCacheProgress: 100,
+              }
+            : currentFile
+        )),
+      }));
+      await warmMaterializedVideoFilmstrip(current, url).catch((error) => {
+        log.warn('Could not warm timeline filmstrip from materialized Firefly media', {
+          mediaFileId: current.id,
+          fireflyProjectAssetId: current.fireflyProjectAssetId,
+          error,
+        });
+      });
+      return materialized.file;
+    } catch (error) {
+      const current = useMediaStore.getState().files.find((file) => file.id === mediaFile.id);
+      const sameContentSourceUpgraded = current
+        && isSameFireflyTimelineContent(mediaFile, current)
+        && (
+          current.remoteSourcePath !== mediaFile.remoteSourcePath
+          || getFireflyTimelineMaterializationKey(current) !== materializationKey
+        );
+      shouldMaterializeCurrentRevision = Boolean(current && (
+        !isSameFireflyTimelineContent(mediaFile, current)
+        || sameContentSourceUpgraded
+      ));
+      useMediaStore.setState((state) => ({
+        files: state.files.map((currentFile) => (
+          isSameFireflyTimelineContent(mediaFile, currentFile)
+          && !sameContentSourceUpgraded
+            ? { ...currentFile, remoteCacheStatus: 'error' }
+            : currentFile
+        )),
+      }));
+      log.warn('Could not materialize Firefly project asset for timeline drop', {
+        mediaFileId: mediaFile.id,
+        fireflyProjectAssetId: mediaFile.fireflyProjectAssetId,
+        error,
+      });
+      return null;
+    }
+  })().finally(() => {
+    if (fireflyTimelineMaterializations.get(materializationKey) === promise) {
+      fireflyTimelineMaterializations.delete(materializationKey);
+      fireflyTimelineMaterializationSources.delete(materializationKey);
+    }
+    if (shouldMaterializeCurrentRevision) {
+      const current = useMediaStore.getState().files.find((file) => file.id === mediaFile.id);
+      if (current?.fireflyProjectAssetId && current.remoteSourcePath && !current.file) {
+        void materializeFireflyTimelineMedia(current);
+      }
+    }
+  });
+
+  fireflyTimelineMaterializations.set(materializationKey, promise);
+  fireflyTimelineMaterializationSources.set(materializationKey, mediaFile);
+  return promise;
+}
 
 export function setTimelineDroppedFilePath(file: File, filePath?: string): void {
   if (filePath) {
@@ -165,51 +336,7 @@ export async function resolveMediaFileForTimelineDrop(mediaFile: MediaFile): Pro
   }
 
   if (mediaFile.fireflyProjectAssetId && mediaFile.remoteSourcePath) {
-    useMediaStore.setState((state) => ({
-      files: state.files.map((currentFile) => currentFile.id === mediaFile.id
-        ? { ...currentFile, remoteCacheStatus: 'downloading', remoteCacheProgress: 0 }
-        : currentFile),
-    }));
-    const materialize = async () => {
-      try {
-        const materialized = await materializeFireflyRemoteMedia(mediaFile, {
-        onProgress: (progress) => {
-          useMediaStore.setState((state) => ({
-            files: state.files.map((currentFile) => currentFile.id === mediaFile.id
-              ? { ...currentFile, remoteCacheProgress: progress }
-              : currentFile),
-          }));
-        },
-      });
-      const url = createPrimaryMediaObjectUrl(mediaFile.id, materialized.file, { revokeExisting: false });
-      useMediaStore.setState((state) => ({
-        files: state.files.map((currentFile) => currentFile.id === mediaFile.id
-          ? {
-              ...currentFile,
-              file: materialized.file,
-              url,
-              projectPath: materialized.relativePath,
-              hasFileHandle: true,
-              remoteCacheStatus: 'ready',
-              remoteCacheProgress: 100,
-            }
-          : currentFile),
-      }));
-        return materialized.file;
-      } catch (error) {
-        useMediaStore.setState((state) => ({
-          files: state.files.map((currentFile) => currentFile.id === mediaFile.id
-            ? { ...currentFile, remoteCacheStatus: 'error' }
-            : currentFile),
-        }));
-        log.warn('Could not materialize Firefly project asset for timeline drop', {
-          mediaFileId: mediaFile.id,
-          fireflyProjectAssetId: mediaFile.fireflyProjectAssetId,
-          error,
-        });
-        return null;
-      }
-    };
+    const materialization = materializeFireflyTimelineMedia(mediaFile);
 
     // Firefly project assets already have a stable, authenticated remote URL.
     // Creating the timeline clip must not wait for the complete object to be
@@ -217,14 +344,14 @@ export async function resolveMediaFileForTimelineDrop(mediaFile: MediaFile): Pro
     // play that URL immediately; the original file is materialized in the
     // background for subsequent scrubbing and offline editing.
     if (mediaFile.type === 'video' || mediaFile.type === 'image') {
-      void materialize();
+      void materialization;
       const contentType = mediaFile.type === 'image'
         ? (mediaFile.name.toLowerCase().endsWith('.png') ? 'image/png' : mediaFile.name.toLowerCase().endsWith('.webp') ? 'image/webp' : 'image/jpeg')
         : mediaFile.name.toLowerCase().endsWith('.mov') ? 'video/quicktime' : 'video/mp4';
       return new File([], mediaFile.name, { type: contentType });
     }
 
-    return materialize();
+    return materialization;
   }
 
   if (mediaFile.type === 'model' || mediaFile.type === 'gaussian-splat') {

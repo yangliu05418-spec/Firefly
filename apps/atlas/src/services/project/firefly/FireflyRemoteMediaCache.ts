@@ -5,7 +5,12 @@ import { buildRawTargetPath } from '../core/rawPath';
 import { materializeAtlasLocalMedia } from '../../../firefly/local-media';
 
 const CACHE_FOLDER = 'FireflyGenerated';
-const inFlight = new Map<string, Promise<MaterializedFireflyMedia>>();
+const DEFAULT_TRANSFER_INACTIVITY_TIMEOUT_MS = 30_000;
+const inFlightByProject = new WeakMap<
+  FileSystemDirectoryHandle,
+  Map<string, Promise<MaterializedFireflyMedia>>
+>();
+const sharedKernelInFlight = new Map<string, Promise<MaterializedFireflyMedia>>();
 
 export interface MaterializedFireflyMedia {
   file: File;
@@ -17,12 +22,65 @@ interface MaterializeDependencies {
   fetcher?: typeof fetch;
   projectHandle?: FileSystemDirectoryHandle;
   onProgress?: (progress: number) => void;
+  requestInactivityTimeoutMs?: number;
+}
+
+async function waitForTransferActivity<T>(
+  operation: Promise<T>,
+  controller: AbortController,
+  timeoutMs: number,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error('FIREFLY_MEDIA_DOWNLOAD_STALLED');
+          controller.abort(error);
+          reject(error);
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 function safeAssetSegment(assetId: string): string {
   const value = assetId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 160);
   if (!value || value === '.' || value === '..') throw new Error('Firefly asset id is invalid');
   return value;
+}
+
+function getMaterializationIdentity(mediaFile: MediaFile): string {
+  const assetId = mediaFile.fireflyProjectAssetId;
+  if (!assetId) return '';
+  const descriptor = mediaFile.localMediaDescriptor;
+  return descriptor
+    ? `${assetId}\u0000${descriptor.cacheKey}\u0000${descriptor.revision}`
+    : assetId;
+}
+
+function getMaterializationFolder(mediaFile: MediaFile, assetId: string): string {
+  const descriptor = mediaFile.localMediaDescriptor;
+  if (!descriptor) return `${CACHE_FOLDER}/${safeAssetSegment(assetId)}`;
+  return [
+    CACHE_FOLDER,
+    safeAssetSegment(assetId),
+    safeAssetSegment(`${descriptor.cacheKey}-${descriptor.revision}`),
+  ].join('/');
+}
+
+function getProjectInFlight(
+  projectHandle: FileSystemDirectoryHandle,
+): Map<string, Promise<MaterializedFireflyMedia>> {
+  let projectInFlight = inFlightByProject.get(projectHandle);
+  if (!projectInFlight) {
+    projectInFlight = new Map();
+    inFlightByProject.set(projectHandle, projectInFlight);
+  }
+  return projectInFlight;
 }
 
 async function navigate(
@@ -56,6 +114,8 @@ async function streamResponseToFile(
   handle: FileSystemFileHandle,
   expectedSize: number | undefined,
   onProgress: ((progress: number) => void) | undefined,
+  controller: AbortController,
+  inactivityTimeoutMs: number,
 ): Promise<File> {
   if (!response.body) throw new Error('Firefly media response has no readable body');
   const writable = await handle.createWritable({ keepExistingData: false });
@@ -63,7 +123,11 @@ async function streamResponseToFile(
   let received = 0;
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await waitForTransferActivity(
+        reader.read(),
+        controller,
+        inactivityTimeoutMs,
+      );
       if (done) break;
       await writable.write(value);
       received += value.byteLength;
@@ -105,13 +169,13 @@ async function materialize(
     }
   }
 
-  const projectHandle = dependencies.projectHandle ?? projectFileService.getProjectHandle();
-  if (!projectHandle || (!dependencies.projectHandle && projectFileService.activeBackend !== 'firefly')) {
+  const projectHandle = dependencies.projectHandle;
+  if (!projectHandle) {
     throw new Error('Firefly project storage is unavailable');
   }
 
   const target = buildRawTargetPath(
-    `${CACHE_FOLDER}/${safeAssetSegment(assetId)}/${mediaFile.name}`,
+    `${getMaterializationFolder(mediaFile, assetId)}/${mediaFile.name}`,
     `${assetId}.bin`,
   );
   const raw = await projectHandle.getDirectoryHandle(PROJECT_FOLDERS.RAW, { create: true });
@@ -122,10 +186,20 @@ async function materialize(
     return { ...cached, relativePath: target.relativePath };
   }
 
-  const response = await (dependencies.fetcher ?? fetch)(remoteSourcePath, {
-    credentials: 'same-origin',
-    cache: 'no-store',
-  });
+  const controller = new AbortController();
+  const inactivityTimeoutMs = Math.max(
+    1,
+    dependencies.requestInactivityTimeoutMs ?? DEFAULT_TRANSFER_INACTIVITY_TIMEOUT_MS,
+  );
+  const response = await waitForTransferActivity(
+    (dependencies.fetcher ?? fetch)(remoteSourcePath, {
+      credentials: 'same-origin',
+      cache: 'no-store',
+      signal: controller.signal,
+    }),
+    controller,
+    inactivityTimeoutMs,
+  );
   if (!response.ok) throw new Error(`Firefly media download failed (${response.status})`);
   const responseSize = Number(response.headers.get('content-length')) || undefined;
   const expectedSize = mediaFile.fileSize || responseSize;
@@ -134,14 +208,22 @@ async function materialize(
   }
 
   const handle = await folder.getFileHandle(target.fileName, { create: true });
-  const file = await streamResponseToFile(response, handle, expectedSize, dependencies.onProgress);
+  const file = await streamResponseToFile(
+    response,
+    handle,
+    expectedSize,
+    dependencies.onProgress,
+    controller,
+    inactivityTimeoutMs,
+  );
   return { file, handle, relativePath: target.relativePath };
 }
 
 /**
  * Streams a durable Firefly project asset into the active project's OPFS Raw
- * directory. The in-flight map prevents repeated drops from downloading the
- * same asset more than once; no fetch-to-Blob buffering is used.
+ * directory. The in-flight map prevents repeated drops of the same immutable
+ * revision from downloading it more than once; revisions never share a
+ * promise or fallback OPFS target. No fetch-to-Blob buffering is used.
  */
 export function materializeFireflyRemoteMedia(
   mediaFile: MediaFile,
@@ -149,12 +231,23 @@ export function materializeFireflyRemoteMedia(
 ): Promise<MaterializedFireflyMedia> {
   const assetId = mediaFile.fireflyProjectAssetId;
   if (!assetId) return Promise.reject(new Error('Firefly project asset id is missing'));
-  const existing = inFlight.get(assetId);
+  const projectHandle = dependencies.projectHandle
+    ?? (projectFileService.activeBackend === 'firefly'
+      ? projectFileService.getProjectHandle() ?? undefined
+      : undefined);
+
+  const materializationIdentity = getMaterializationIdentity(mediaFile);
+  const projectInFlight = projectHandle
+    ? getProjectInFlight(projectHandle)
+    : sharedKernelInFlight;
+  const existing = projectInFlight.get(materializationIdentity);
   if (existing) return existing;
 
-  const promise = materialize(mediaFile, dependencies).finally(() => {
-    if (inFlight.get(assetId) === promise) inFlight.delete(assetId);
+  const promise = materialize(mediaFile, { ...dependencies, projectHandle }).finally(() => {
+    if (projectInFlight.get(materializationIdentity) === promise) {
+      projectInFlight.delete(materializationIdentity);
+    }
   });
-  inFlight.set(assetId, promise);
+  projectInFlight.set(materializationIdentity, promise);
   return promise;
 }

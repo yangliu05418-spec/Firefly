@@ -12,6 +12,12 @@ import { DEFAULT_SPLAT_EFFECTOR_SETTINGS } from '../../types/splatEffector';
 import { DEFAULT_LIGHT_CLIP_SETTINGS } from '../../types/light';
 import type { LiveInputSource } from '../../types/liveInput';
 import { withExclusiveHistorySnapshotMutationLease } from '../timeline/exclusiveMutationLease';
+import {
+  hasFireflyRemoteAssetSourceChanged,
+  reconcileFireflyRemoteAsset,
+  type FireflyRemoteAssetRegistration,
+} from './fireflyRemoteAssetReconciliation';
+import { invalidateFireflyRemoteAssetRuntime } from '../../services/project/fireflyRemoteAssetRuntimeInvalidation';
 
 // Import slices
 import { createFileImportSlice, type FileImportActions } from './slices/fileImportSlice';
@@ -86,11 +92,7 @@ type MediaStoreState = MediaState &
     getItemsByFolder: (folderId: string | null) => ProjectItem[];
     getItemById: (id: string) => ProjectItem | undefined;
     getFileByName: (name: string) => MediaFile | undefined;
-    registerFireflyRemoteAsset: (asset: {
-      id: string; name: string; kind: 'image' | 'video' | 'audio'; mediaUrl: string; size?: number;
-      thumbnailUrl?: string; duration?: number; width?: number; height?: number; hasAudio?: boolean;
-      localMedia?: import('../../firefly/local-media').LocalMediaDescriptor;
-    }) => string;
+    registerFireflyRemoteAsset: (asset: FireflyRemoteAssetRegistration) => string;
     createLiveInputItem: (id: string, source: LiveInputSource, name: string, parentId?: string | null) => string;
     updateLiveInputSource: (id: string, source: LiveInputSource) => void;
     getOrCreateTextFolder: () => string;
@@ -174,22 +176,15 @@ export const useMediaStore = create<MediaStoreState>()(
     registerFireflyRemoteAsset: (asset) => {
       const existing = get().files.find((file) => file.fireflyProjectAssetId === asset.id);
       if (existing) {
-        const legacyGeneratedName = /^(?:preview|result|output)(?:[-_.]|$)/i.test(existing.name.trim());
+        const sourceChanged = hasFireflyRemoteAssetSourceChanged(existing, asset);
+        const reconciled = reconcileFireflyRemoteAsset(existing, asset);
+        if (reconciled === existing) return existing.id;
         set((state) => ({
-          files: state.files.map((file) => file.id !== existing.id ? file : {
-            ...file,
-            name: legacyGeneratedName && asset.name ? asset.name : file.name,
-            url: asset.mediaUrl,
-            remoteSourcePath: asset.mediaUrl,
-            localMediaDescriptor: asset.localMedia ?? file.localMediaDescriptor,
-            fileSize: asset.size ?? file.fileSize,
-            thumbnailUrl: asset.thumbnailUrl ?? file.thumbnailUrl,
-            duration: asset.duration ?? file.duration,
-            width: asset.width ?? file.width,
-            height: asset.height ?? file.height,
-            hasAudio: asset.hasAudio ?? file.hasAudio,
-          }),
+          files: state.files.map((file) => file.id !== existing.id ? file : reconciled),
         }));
+        if (sourceChanged) {
+          void invalidateFireflyRemoteAssetRuntime(existing);
+        }
         return existing.id;
       }
       const id = `firefly-atlas-${asset.id}`;
