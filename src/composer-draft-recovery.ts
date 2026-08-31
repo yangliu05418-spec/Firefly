@@ -79,6 +79,9 @@ export const recoverComposerDraftAsset = async (
           expiresAt: upload.expiresAt ?? cached.expiresAt,
           progress: 100,
           phase: "ready",
+          preview: upload.type === "image"
+            ? `/api/uploads/${encodeURIComponent(upload.uploadId ?? upload.id)}/source?variant=thumbnail`
+            : undefined,
         };
       } else return null;
       delay = 1_500;

@@ -20,7 +20,20 @@ describe("composer draft asset recovery", () => {
       getUpload: async () => ({ id: "upload-1", name: "frame.png", type: "image", size: 10, state: ++checks === 1 ? "processing" : "ready" }),
     }));
     expect(checks).toBe(2);
-    expect(result).toMatchObject({ uploadId: "upload-1", phase: "ready", progress: 100 });
+    expect(result).toMatchObject({
+      uploadId: "upload-1",
+      phase: "ready",
+      progress: 100,
+      preview: "/api/uploads/upload-1/source?variant=thumbnail",
+    });
+  });
+
+  it("does not invent an image thumbnail for recovered video uploads", async () => {
+    const result = await recoverComposerDraftAsset(upload({ type: "video", name: "clip.mp4" }), undefined, deps({
+      getUpload: async () => ({ id: "upload-1", name: "clip.mp4", type: "video", size: 10, state: "ready" }),
+    }));
+    expect(result).toMatchObject({ type: "video", phase: "ready", progress: 100 });
+    expect(result?.preview).toBeUndefined();
   });
 
   it("refreshes the stable provider asset preview instead of reusing a signed URL", async () => {

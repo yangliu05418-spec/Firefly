@@ -3,7 +3,10 @@ import { migrateLegacyAtlasDocument } from './LegacyAtlasDocumentMigration';
 
 const CHECKPOINT_KIND = 'firefly-atlas-project-file';
 const CHECKPOINT_VERSION = 1;
-const COMPLETE_TIMEOUT_MS = 210_000;
+const CONTROL_REQUEST_TIMEOUT_MS = 15_000;
+const CHECKPOINT_LOAD_TIMEOUT_MS = 30_000;
+const PART_UPLOAD_TIMEOUT_MS = 60_000;
+const COMPLETE_TIMEOUT_MS = 30_000;
 
 export interface FireflyProjectCheckpointEnvelope {
   kind: typeof CHECKPOINT_KIND;
@@ -236,10 +239,32 @@ export class FireflyCheckpointTransport implements FireflyCheckpointTransportPor
     this.decodeImpl = dependencies.decode ?? decodeCheckpoint;
   }
 
+  private async fetchWithTimeout(
+    input: RequestInfo | URL,
+    init: RequestInit | undefined,
+    timeoutMs: number,
+    timeoutMessage: string,
+  ): Promise<Response> {
+    const controller = new AbortController();
+    const timeoutId = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await this.fetchImpl(input, { ...init, signal: controller.signal });
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new FireflyCheckpointError(timeoutMessage, 504, 'ATLAS_NETWORK_TIMEOUT');
+      }
+      throw error;
+    } finally {
+      globalThis.clearTimeout(timeoutId);
+    }
+  }
+
   async load(projectId: string): Promise<ProjectFile> {
-    const response = await this.fetchImpl(
+    const response = await this.fetchWithTimeout(
       `/api/atlas/projects/${encodeURIComponent(projectId)}/checkpoint`,
       { credentials: 'same-origin', cache: 'no-store' },
+      CHECKPOINT_LOAD_TIMEOUT_MS,
+      '读取云端项目检查点超时',
     );
     if (!response.ok) await parseResponse(response);
     const bytes = new Uint8Array(await response.arrayBuffer());
@@ -249,7 +274,7 @@ export class FireflyCheckpointTransport implements FireflyCheckpointTransportPor
   async save(input: FireflyCheckpointSaveInput): Promise<number> {
     const envelope = createCheckpointEnvelope(input.projectId, input.projectFile, this.now());
     const checkpoint = await this.encodeImpl(envelope);
-    const startResponse = await this.fetchImpl(
+    const startResponse = await this.fetchWithTimeout(
       `/api/atlas/projects/${encodeURIComponent(input.projectId)}/checkpoints`,
       {
         method: 'POST',
@@ -262,6 +287,8 @@ export class FireflyCheckpointTransport implements FireflyCheckpointTransportPor
           size: checkpoint.blob.size,
         }),
       },
+      CONTROL_REQUEST_TIMEOUT_MS,
+      '创建项目云端检查点超时',
     );
     const start = asRecord(await parseResponse(startResponse), '检查点上传响应');
     if (start.status === 'ready') return requiredNumber(start.revision, '检查点版本');
@@ -276,7 +303,12 @@ export class FireflyCheckpointTransport implements FireflyCheckpointTransportPor
     for (const part of parseSignedParts(start.parts)) {
       const offset = (part.partNumber - 1) * partSize;
       const body = checkpoint.blob.slice(offset, Math.min(checkpoint.blob.size, offset + partSize));
-      const response = await this.fetchImpl(part.url, { method: 'PUT', body });
+      const response = await this.fetchWithTimeout(
+        part.url,
+        { method: 'PUT', body },
+        PART_UPLOAD_TIMEOUT_MS,
+        '上传项目检查点超时',
+      );
       if (!response.ok) {
         throw new FireflyCheckpointError(
           `项目检查点分片上传失败（${response.status}）`,
@@ -287,36 +319,26 @@ export class FireflyCheckpointTransport implements FireflyCheckpointTransportPor
       completed.set(part.partNumber, { partNumber: part.partNumber, etag: responseEtag(response) });
     }
 
-    const timeout = new AbortController();
-    const timeoutId = globalThis.setTimeout(() => timeout.abort(), COMPLETE_TIMEOUT_MS);
-    try {
-      const completeResponse = await this.fetchImpl(
-        `/api/atlas/projects/${encodeURIComponent(input.projectId)}/checkpoints/${encodeURIComponent(checkpointId)}/complete`,
-        {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
-          signal: timeout.signal,
-          body: JSON.stringify({
-            leaseToken: input.leaseToken,
-            parts: [...completed.values()].sort((left, right) => left.partNumber - right.partNumber),
-          }),
-        },
-      );
-      const result = asRecord(await parseResponse(completeResponse), '检查点完成响应');
-      return requiredNumber(result.revision, '检查点版本');
-    } catch (error) {
-      if (timeout.signal.aborted) {
-        throw new FireflyCheckpointError('项目云端检查点确认超时', 504, 'ATLAS_NETWORK_TIMEOUT');
-      }
-      throw error;
-    } finally {
-      globalThis.clearTimeout(timeoutId);
-    }
+    const completeResponse = await this.fetchWithTimeout(
+      `/api/atlas/projects/${encodeURIComponent(input.projectId)}/checkpoints/${encodeURIComponent(checkpointId)}/complete`,
+      {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          leaseToken: input.leaseToken,
+          parts: [...completed.values()].sort((left, right) => left.partNumber - right.partNumber),
+        }),
+      },
+      COMPLETE_TIMEOUT_MS,
+      '项目云端检查点确认超时',
+    );
+    const result = asRecord(await parseResponse(completeResponse), '检查点完成响应');
+    return requiredNumber(result.revision, '检查点版本');
   }
 
   async rename(projectId: string, title: string, expectedRevision: number): Promise<number> {
-    const response = await this.fetchImpl(
+    const response = await this.fetchWithTimeout(
       `/api/atlas/projects/${encodeURIComponent(projectId)}`,
       {
         method: 'PUT',
@@ -324,6 +346,8 @@ export class FireflyCheckpointTransport implements FireflyCheckpointTransportPor
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title, expectedRevision }),
       },
+      CONTROL_REQUEST_TIMEOUT_MS,
+      '项目重命名请求超时',
     );
     const result = asRecord(await parseResponse(response), '项目重命名响应');
     return requiredNumber(result.revision, '项目版本');

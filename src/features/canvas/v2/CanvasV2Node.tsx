@@ -6,8 +6,6 @@ import type { CanvasNodeTypeV2, CanvasNodeV2 } from "../canvas-v2-types";
 import { LazyCanvasVideo } from "../components/media/LazyCanvasVideo";
 import type { CanvasMenuAnchor, CanvasReferenceSummary } from "./canvas-ux";
 import { persistPrivateMediaStorage } from "../../../private-media-cache";
-import { useLocalMediaSource } from "../../../local-media-client";
-import type { LocalMediaDescriptor } from "../../../types";
 
 const CanvasRichText = lazy(() => import("./CanvasRichText").then((module) => ({ default: module.CanvasRichText })));
 
@@ -16,7 +14,6 @@ export type CanvasFlowData = {
   readOnly: boolean;
   references: CanvasReferenceSummary[];
   localPreviewUrl?: string;
-  localMedia?: LocalMediaDescriptor;
   expandedText: boolean;
   onChange: (id: string, patch: Partial<CanvasNodeV2["data"]>) => void;
   onCreateFrom: (id: string, side: "left" | "right", anchor: CanvasMenuAnchor) => void;
@@ -43,8 +40,7 @@ function CanvasV2NodeView({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const Icon = icons[domain.type];
   const uploadInput = useRef<HTMLInputElement>(null);
   const persistedMediaUrl = domain.data.projectAssetId ? `/api/canvas-project-assets/${encodeURIComponent(domain.data.projectAssetId)}/media${["image", "character", "scene"].includes(domain.type) ? "?variant=thumbnail" : ""}` : "";
-  const { source: cachedMediaUrl } = useLocalMediaSource(data.localPreviewUrl ? undefined : data.localMedia, { warm: true, switchWhenReady: domain.type !== "video" });
-  const mediaUrl = data.localPreviewUrl ?? cachedMediaUrl ?? persistedMediaUrl;
+  const mediaUrl = data.localPreviewUrl ?? persistedMediaUrl;
   const status = domain.data.status ?? "idle";
   const mediaStyle = { transform: `rotate(${domain.data.rotation ?? 0}deg)` };
   const canBranch = domain.type !== "group" && domain.type !== "legacy-audio";

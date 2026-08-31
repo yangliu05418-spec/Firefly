@@ -39,7 +39,8 @@ export class FireflyProjectCoreService implements ProjectCorePort {
       if (projectFile && projectFile.name !== options.title) {
         this.localCore.updateProjectData({ name: options.title });
         if (await this.localCore.saveProject()) {
-          this.repository.enqueueCloudSave(projectFile);
+          const synchronizedProjectFile = this.localCore.getProjectData();
+          if (synchronizedProjectFile) this.repository.enqueueCloudSave(synchronizedProjectFile);
         }
       }
       return true;
