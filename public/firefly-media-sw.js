@@ -13,8 +13,7 @@ const isPrivateThumbnail = (request) => {
   const thumbnail = url.searchParams.get("variant") === "thumbnail";
   return (thumbnail && /^\/api\/assets\/[^/]+\/source$/.test(url.pathname))
     || (thumbnail && /^\/api\/image-media\/[^/]+$/.test(url.pathname))
-    || (thumbnail && /^\/api\/canvas-project-assets\/[^/]+\/media$/.test(url.pathname))
-    || /^\/api\/generations\/[^/]+\/poster$/.test(url.pathname);
+    || (thumbnail && /^\/api\/canvas-project-assets\/[^/]+\/media$/.test(url.pathname));
 };
 
 const trimCache = async (cache) => {

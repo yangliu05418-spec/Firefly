@@ -35,6 +35,12 @@ export const createMediaReloadActions: MediaSliceCreator<Pick<
     if (!mediaFile) return false;
 
     if (!mediaFile.file) {
+      // Firefly project assets intentionally start as stable remote media and
+      // are materialized into OPFS in the background. A thumbnail decoding
+      // error must not send them through Atlas' local file-handle relink path.
+      if (mediaFile.fireflyProjectAssetId && mediaFile.remoteSourcePath) {
+        return false;
+      }
       return (get() as MediaState & FileManageActions).reloadFile(id);
     }
 
@@ -161,7 +167,8 @@ export const createMediaReloadActions: MediaSliceCreator<Pick<
    * SIMPLIFIED: Batch reload from RAW folder - no user prompts needed!
    */
   reloadAllFiles: async () => {
-    const filesToReload = get().files.filter(f => !f.file);
+    const filesToReload = get().files.filter((file) => !file.file
+      && !(file.fireflyProjectAssetId && file.remoteSourcePath));
     if (filesToReload.length === 0) {
       log.debug('No files need reloading');
       return 0;

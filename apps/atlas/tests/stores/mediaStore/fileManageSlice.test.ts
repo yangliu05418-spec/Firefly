@@ -1171,6 +1171,27 @@ describe('MediaStore - File Management', () => {
   });
 
   describe('refreshFileUrls', () => {
+    it('does not misroute a durable Firefly asset through local file relinking', async () => {
+      const remote = makeMediaFile({
+        id: 'remote-video-1',
+        type: 'video',
+        name: '远程视频.mp4',
+        file: undefined,
+        url: '/api/atlas/project-assets/asset-1/media',
+        remoteSourcePath: '/api/atlas/project-assets/asset-1/media',
+        fireflyProjectAssetId: 'asset-1',
+      });
+      const reloadFile = vi.fn(async () => false);
+      store.setState({ files: [remote], reloadFile });
+
+      await expect(store.getState().refreshFileUrls(remote.id)).resolves.toBe(false);
+      expect(reloadFile).not.toHaveBeenCalled();
+      expect(store.getState().files[0]).toMatchObject({
+        url: remote.url,
+        remoteSourcePath: remote.remoteSourcePath,
+      });
+    });
+
     it('restores stored thumbnail blobs with media-owned object url tracking', async () => {
       const thumbnailBlob = new Blob(['thumb'], { type: 'image/webp' });
       const createObjectURL = vi.spyOn(URL, 'createObjectURL')

@@ -109,7 +109,9 @@ export function ShortcutsSettings() {
       const conflicts = registry.findConflicts(actionId, combo);
       if (conflicts.length > 0) {
         const meta = ACTION_META.find((m) => m.id === conflicts[0]);
-        return meta?.label || conflicts[0];
+        return IS_FIREFLY_VARIANT
+          ? SHORTCUT_LABEL_ZH[conflicts[0]] ?? meta?.label ?? conflicts[0]
+          : meta?.label ?? conflicts[0];
       }
     }
     return null;

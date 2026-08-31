@@ -24,6 +24,7 @@ export type AtlasImportSource = {
 };
 
 export type AtlasAssetPresentation = {
+  displayName?: string;
   thumbnailUrl?: string;
   duration?: number;
   width?: number;
@@ -114,7 +115,7 @@ const publicAsset = (asset: AtlasProjectAsset, presentation: AtlasAssetPresentat
     : asset.status === "copying" ? sourceMediaUrl : undefined;
   return {
     id: asset.id, projectId: asset.projectId, sourceType: asset.sourceType, sourceId: asset.sourceId,
-    kind: asset.kind, fileName: asset.fileName, contentType: asset.contentType, size: asset.size,
+    kind: asset.kind, fileName: presentation.displayName ?? asset.fileName, contentType: asset.contentType, size: asset.size,
     status: asset.status, error: asset.error, createdAt: asset.createdAt, updatedAt: asset.updatedAt,
     thumbnailUrl: presentation.thumbnailUrl,
     duration: presentation.duration,

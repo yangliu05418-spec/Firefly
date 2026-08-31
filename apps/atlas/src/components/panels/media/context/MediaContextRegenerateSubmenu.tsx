@@ -47,11 +47,13 @@ export function MediaContextRegenerateSubmenu({
   onRegenerateSpectrogram,
   onClose,
 }: MediaContextRegenerateSubmenuProps) {
+  const firefly = import.meta.env.VITE_APP_VARIANT === 'firefly';
+  const text = (zh: string, en: string) => firefly ? zh : en;
   return (
     <>
       <div className="context-menu-separator" />
       <div className="context-menu-item has-submenu" onMouseEnter={handleSubmenuHover} onMouseLeave={handleSubmenuLeave}>
-        <span>Regenerate</span>
+        <span>{text('重新生成派生素材', 'Regenerate')}</span>
         <span className="submenu-arrow">&#9654;</span>
         <div className="context-submenu">
           {isVideoFile && (
@@ -68,8 +70,8 @@ export function MediaContextRegenerateSubmenu({
               }}
             >
               {isGenerating
-                ? `Stop Proxy Generation (${mediaFile.proxyProgress || 0}%)`
-                : `Proxy${hasProxy ? ' (ready)' : ''}`}
+                ? text(`停止生成代理（${mediaFile.proxyProgress || 0}%）`, `Stop Proxy Generation (${mediaFile.proxyProgress || 0}%)`)
+                : text(`代理文件${hasProxy ? '（已就绪）' : ''}`, `Proxy${hasProxy ? ' (ready)' : ''}`)}
             </div>
           )}
           {isVideoFile && (
@@ -85,13 +87,13 @@ export function MediaContextRegenerateSubmenu({
                 onClose();
               }}
             >
-              {mediaFile.sceneCutStatus === 'analyzing' ? 'Stop Scene Cuts' : 'Scene Cuts'}
+              {mediaFile.sceneCutStatus === 'analyzing' ? text('停止镜头分析', 'Stop Scene Cuts') : text('镜头分析', 'Scene Cuts')}
               {mediaFile.sceneCutStatus === 'analyzing'
-                ? ` (${Math.round(mediaFile.sceneCutProgress || 0)}%)`
+                ? text(`（${Math.round(mediaFile.sceneCutProgress || 0)}%）`, ` (${Math.round(mediaFile.sceneCutProgress || 0)}%)`)
                 : mediaFile.sceneCutStatus === 'ready'
-                  ? ` (${mediaFile.sceneCutAnalysis?.cuts.length ?? 0} found)`
+                  ? text(`（发现 ${mediaFile.sceneCutAnalysis?.cuts.length ?? 0} 个）`, ` (${mediaFile.sceneCutAnalysis?.cuts.length ?? 0} found)`)
                   : mediaFile.sceneCutStatus === 'error'
-                    ? ' (error)'
+                    ? text('（失败）', ' (error)')
                     : ''}
             </div>
           )}
@@ -100,7 +102,7 @@ export function MediaContextRegenerateSubmenu({
               className="context-menu-item"
               onClick={() => onRegenerateThumbnails(mediaFile)}
             >
-              Thumbnails{mediaFile.thumbnailUrl ? ' (ready)' : ''}
+              {text(`缩略图${mediaFile.thumbnailUrl ? '（已就绪）' : ''}`, `Thumbnails${mediaFile.thumbnailUrl ? ' (ready)' : ''}`)}
             </div>
           )}
           {hasAudio && (
@@ -111,11 +113,11 @@ export function MediaContextRegenerateSubmenu({
                 onRegenerateAudioProxy(mediaFile, hasAudioProxy);
               }}
             >
-              WAV Audio Proxy
+              {text('WAV 音频代理', 'WAV Audio Proxy')}
               {isAudioProxyGenerating
-                ? ` (${mediaFile.audioProxyProgress || 0}%)`
+                ? text(`（${mediaFile.audioProxyProgress || 0}%）`, ` (${mediaFile.audioProxyProgress || 0}%)`)
                 : hasAudioProxy
-                ? ' (ready)'
+                ? text('（已就绪）', ' (ready)')
                 : ''}
             </div>
           )}
@@ -127,11 +129,11 @@ export function MediaContextRegenerateSubmenu({
                 onRegenerateWaveform(mediaFile);
               }}
             >
-              Waveform
+              {text('波形', 'Waveform')}
               {isSourceAudioAnalysisGenerating
-                ? ` (${Math.round(mediaFile.waveformProgress || 0)}%)`
+                ? text(`（${Math.round(mediaFile.waveformProgress || 0)}%）`, ` (${Math.round(mediaFile.waveformProgress || 0)}%)`)
                 : hasSourceWaveform
-                ? ' (ready)'
+                ? text('（已就绪）', ' (ready)')
                 : ''}
             </div>
           )}
@@ -143,7 +145,7 @@ export function MediaContextRegenerateSubmenu({
                 onRegenerateSpectrogram(mediaFile);
               }}
             >
-              Spectral{hasSourceSpectrogram ? ' (ready)' : ''}
+              {text(`频谱${hasSourceSpectrogram ? '（已就绪）' : ''}`, `Spectral${hasSourceSpectrogram ? ' (ready)' : ''}`)}
             </div>
           )}
         </div>
