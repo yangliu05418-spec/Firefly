@@ -50,7 +50,7 @@ import {
   createAudioClipPlaceholder,
   loadAudioMedia,
 } from '../../src/stores/timeline/clip/addAudioClip';
-import { loadVideoMedia } from '../../src/stores/timeline/clip/addVideoClip';
+import { loadVideoMedia, resolveInitialVideoTransform } from '../../src/stores/timeline/clip/addVideoClip';
 
 function createFile(name: string, type: string): File {
   return new File(['media'], name, { type });
@@ -83,6 +83,17 @@ describe('direct video/audio add runtime sources', () => {
     mp4MetadataMocks.getMP4MetadataFast.mockResolvedValue({ duration: 12, hasAudio: true });
   });
 
+  it('fits a newly placed video to the composition without stretching it', () => {
+    vi.mocked(useMediaStore.getState).mockReturnValue({
+      files: [],
+      activeCompositionId: 'comp-1',
+      compositions: [{ id: 'comp-1', width: 1920, height: 1080 }],
+    } as unknown as ReturnType<typeof useMediaStore.getState>);
+
+    expect(resolveInitialVideoTransform(1080, 1920).scale).toEqual({ x: 0.5625, y: 0.5625 });
+    expect(resolveInitialVideoTransform(1280, 720).scale).toEqual({ x: 1.5, y: 1.5 });
+  });
+
   it('loads browser video metadata without persisting video/audio elements on linked clips', async () => {
     const videoElement = {
       duration: 12,
@@ -97,6 +108,7 @@ describe('direct video/audio add runtime sources', () => {
     webCodecsHelperMocks.createVideoElement.mockReturnValue(videoElement);
 
     const updates = new Map<string, Partial<TimelineClip>>();
+    const onVideoDimensionsResolved = vi.fn();
     await loadVideoMedia({
       clipId: 'video-clip',
       audioClipId: 'audio-clip',
@@ -108,6 +120,7 @@ describe('direct video/audio add runtime sources', () => {
         updates.set(id, { ...(updates.get(id) ?? {}), ...patch });
       },
       setClips: vi.fn(),
+      onVideoDimensionsResolved,
     });
 
     const videoPatch = updates.get('video-clip')!;
@@ -121,6 +134,7 @@ describe('direct video/audio add runtime sources', () => {
     expect(audioPatch.source).toEqual({ type: 'audio', naturalDuration: 12, mediaFileId: 'media-video' });
     expect(audioPatch.source).not.toHaveProperty('audioElement');
     expect(audioPatch.isLoading).toBe(false);
+    expect(onVideoDimensionsResolved).toHaveBeenCalledWith({ width: 1920, height: 1080 });
     expect(webCodecsHelperMocks.releaseTemporaryMediaElement).toHaveBeenCalledWith(videoElement);
   });
 

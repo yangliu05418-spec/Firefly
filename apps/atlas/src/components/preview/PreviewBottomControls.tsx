@@ -10,10 +10,10 @@ interface PreviewBottomControlsProps {
 }
 
 const QUALITY_OPTIONS: Array<{ value: PreviewQuality; label: string; detail: string }> = [
-  { value: 1, label: '原画', detail: '100%' },
-  { value: 0.5, label: '清晰', detail: '50%' },
-  { value: 0.25, label: '流畅', detail: '25%' },
-  { value: 0.125, label: '低清', detail: '12.5%' },
+  { value: 1, label: '原画', detail: '最高分辨率' },
+  { value: 0.5, label: '清晰', detail: '高分辨率' },
+  { value: 0.25, label: '流畅', detail: '性能优先' },
+  { value: 0.125, label: '低清', detail: '最低负载' },
 ];
 
 const RATIO_OPTIONS = [
@@ -66,7 +66,7 @@ export function PreviewBottomControls({ previewQuality, setPreviewQuality, viewZ
 
   return <div className="preview-controls-bottom" ref={hostRef}>
     <div className="preview-bottom-control">
-      <button type="button" className="preview-tool-button" onClick={() => toggle('quality')} aria-expanded={menu === 'quality'} title="预览画质">
+      <button type="button" className="preview-tool-button" onClick={() => toggle('quality')} aria-expanded={menu === 'quality'} title="预览画质（仅改变清晰度）">
         {qualityLabel}<span aria-hidden="true">⌄</span>
       </button>
       {menu === 'quality' && <div className="preview-tool-menu">{QUALITY_OPTIONS.map((item) => <button type="button" key={item.value} className={item.value === previewQuality ? 'active' : ''} onClick={() => { setPreviewQuality(item.value); setMenu(null); }}><span>{item.label}</span><small>{item.detail}</small></button>)}</div>}

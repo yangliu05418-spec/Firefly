@@ -1,4 +1,5 @@
 import { useEffect, type Dispatch, type RefObject, type SetStateAction } from 'react';
+import { resolvePreviewDisplaySize } from './previewResolution';
 
 interface PreviewSize {
   width: number;
@@ -38,29 +39,11 @@ export function usePreviewViewport({
 
       setContainerSize({ width: containerWidth, height: containerHeight });
 
-      if (fillContainer) {
-        setCanvasSize({ width: containerWidth, height: containerHeight });
-        return;
-      }
-
-      const videoAspect = effectiveResolution.width / effectiveResolution.height;
-      const containerAspect = containerWidth / containerHeight;
-
-      let width: number;
-      let height: number;
-
-      if (containerAspect > videoAspect) {
-        height = containerHeight;
-        width = height * videoAspect;
-      } else {
-        width = containerWidth;
-        height = width / videoAspect;
-      }
-
-      setCanvasSize({
-        width: Math.floor(width),
-        height: Math.floor(height),
-      });
+      setCanvasSize(resolvePreviewDisplaySize(
+        { width: containerWidth, height: containerHeight },
+        effectiveResolution,
+        fillContainer,
+      ));
     };
 
     updateSize();

@@ -3,13 +3,15 @@ import { Logger } from '../../services/logger';
 import { renderHostPort } from '../../services/render/renderHostPort';
 import { useMediaStore } from '../../stores/mediaStore';
 import { useSettingsStore } from '../../stores/settingsStore';
+import type { PreviewQuality } from '../../stores/settingsStore';
+import { resolvePreviewRenderResolution } from '../../components/preview/previewResolution';
 
 const log = Logger.create('Engine');
 
 function getEngineResolutionConfig(): {
   baseWidth: number;
   baseHeight: number;
-  previewQuality: number;
+  previewQuality: PreviewQuality;
 } {
   const { previewQuality } = useSettingsStore.getState();
   const { activeCompositionId, compositions } = useMediaStore.getState();
@@ -39,8 +41,10 @@ export function useEngineResolutionSync(isEngineReady: boolean): void {
 
     const updateResolution = () => {
       const { baseWidth, baseHeight, previewQuality } = getEngineResolutionConfig();
-      const scaledWidth = Math.round(baseWidth * previewQuality);
-      const scaledHeight = Math.round(baseHeight * previewQuality);
+      const { width: scaledWidth, height: scaledHeight } = resolvePreviewRenderResolution(
+        { width: baseWidth, height: baseHeight },
+        previewQuality,
+      );
 
       renderHostPort.setResolution(scaledWidth, scaledHeight);
       log.info(`Resolution set to ${scaledWidth}\u00d7${scaledHeight} (${previewQuality * 100}% of ${baseWidth}\u00d7${baseHeight})`);
