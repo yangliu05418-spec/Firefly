@@ -1,4 +1,5 @@
 import { api, ApiError, notifySignedOut } from "../../api";
+import type { LocalMediaDescriptor } from "../../types";
 import type { CanvasDocument, CanvasListResult, CanvasMediaRef, CanvasProjectDetail } from "./canvas-types";
 import type { AnyCanvasDocument, CanvasDocumentV2 } from "./canvas-v2-types";
 
@@ -67,6 +68,7 @@ export type CanvasProjectAsset = {
   id: string; canvasId: string; kind: "image" | "video" | "audio"; title: string; contentType: string; size: number;
   width?: number; height?: number; durationMs?: number; status: "copying" | "ready" | "failed"; createdAt: number; updatedAt: number;
   mediaUrl: string; thumbnailUrl?: string; downloadUrl: string;
+  localMedia?: { preview?: LocalMediaDescriptor; thumbnail?: LocalMediaDescriptor };
 };
 export type CanvasJob = {
   id: string; canvasId: string; nodeId: string; kind: "text" | "image" | "video" | "character_tool";

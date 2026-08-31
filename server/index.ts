@@ -51,6 +51,7 @@ import { buildLegacyImageSnapshot, buildLegacyVideoSnapshot } from "./legacy-cre
 import { assertPromptLength, EDITOR_PROMPT_STORAGE_MAX_CHARS, IMAGE_PROVIDER_PROMPT_MAX_CHARS, PromptTooLongError } from "./prompt-policy.js";
 import { journeyNames, recordJourneyEvent } from "./journey-observability.js";
 import { createAtlasRuntime } from "./atlas-runtime.js";
+import { publicLocalMedia, publicLocalMediaFromSource } from "./local-media-public.js";
 
 let atlasRuntime: ReturnType<typeof createAtlasRuntime>;
 
@@ -145,14 +146,33 @@ const rejectGeneration = (res: express.Response, status: number, code: string, e
 };
 const param = (value: string | string[]) => Array.isArray(value) ? value[0] : value;
 const publicGenerationTask = (task: StoredTask) => {
-  const stablePreviewReady = tosEnabled() && config.tosPreviewTranscodeEnabled && Boolean(users.readTaskMedia(task.id, "preview"));
-  const stablePosterReady = tosEnabled() && Boolean(users.readTaskMedia(task.id, "poster"));
+  const previewMedia = users.readTaskMedia(task.id, "preview");
+  const posterMedia = users.readTaskMedia(task.id, "poster");
+  const outputMedia = users.readTaskMedia(task.id, "output");
+  const effectivePreview = config.tosPreviewTranscodeEnabled ? previewMedia : previewMedia ?? outputMedia;
+  const stablePreviewReady = tosEnabled() && config.tosPreviewTranscodeEnabled && Boolean(previewMedia);
+  const stablePosterReady = tosEnabled() && Boolean(posterMedia);
   const stableOutputReady = task.status !== "succeeded" || task.mediaStatus !== "ready"
     ? true
     : !tosEnabled()
       ? true
-      : Boolean(users.readTaskMedia(task.id, "output"));
-  return publicTask(task, { stableOutputReady, stablePreviewReady, stablePosterReady, outputIsPreview: !config.tosPreviewTranscodeEnabled });
+      : Boolean(outputMedia);
+  const revision = task.mediaRevision ?? 0;
+  const localMedia = tosEnabled() ? {
+    preview: effectivePreview ? publicLocalMedia(effectivePreview, { variant: "preview", url: `/api/generations/${task.id}/media?rev=${revision}`, cachePolicy: "warm" }) : undefined,
+    poster: posterMedia ? publicLocalMedia(posterMedia, { variant: "thumbnail", url: `/api/generations/${task.id}/poster?rev=${revision}`, cachePolicy: "warm" }) : undefined,
+    original: outputMedia ? publicLocalMedia(outputMedia, { variant: "original", url: `/api/generations/${task.id}/download?rev=${revision}`, cachePolicy: "on-demand" }) : undefined,
+  } : undefined;
+  return publicTask(task, { stableOutputReady, stablePreviewReady, stablePosterReady, outputIsPreview: !config.tosPreviewTranscodeEnabled, localMedia });
+};
+const publicUserAssetResponse = (asset: UserAsset) => {
+  const media = asset.uploadId ? users.readUpload(asset.uploadId) : null;
+  if (!media || media.ownerId !== asset.ownerId || media.status !== "ready") return publicUserAsset(asset);
+  const sourceUrl = `/api/assets/${encodeURIComponent(asset.id)}/source`;
+  return publicUserAsset(asset, {
+    thumbnail: asset.assetType === "Image" ? publicLocalMedia(media, { variant: "thumbnail", url: `${sourceUrl}?variant=thumbnail`, cachePolicy: "warm", transform: "image/resize,w_640/format,webp" }) : undefined,
+    original: publicLocalMedia(media, { variant: "original", url: sourceUrl, cachePolicy: "on-demand" }),
+  });
 };
 const publicCreationSession = ({ ownerId: _ownerId, deletedAt: _deletedAt, ...session }: CreationSession) => session;
 const createCreationSession = (ownerId: string, title = "新创作") => {
@@ -260,6 +280,16 @@ const readUploadMeta = async (uploadId: string) => {
   const raw = await redis.get(`upload:${uploadId}`);
   return raw ? JSON.parse(raw) as UploadMeta : null;
 };
+const publicUploadLocalMedia = (uploadId: string, objectKey: string, size: number, contentType: string) => publicLocalMediaFromSource({
+  sourceId: objectKey,
+  revision: `${objectKey}\0${size}\0${contentType}\0identity`,
+  variant: "original",
+  mediaType: uploadKindFromContentType(contentType),
+  contentType,
+  size,
+  url: `/api/uploads/${encodeURIComponent(uploadId)}/source`,
+  cachePolicy: "pin",
+});
 
 app.post("/api/uploads", requireAuth, async (req, res) => {
   try {
@@ -294,7 +324,7 @@ app.post("/api/uploads", requireAuth, async (req, res) => {
         pendingMultipart = undefined;
         void redis.set(`upload:${id}`, JSON.stringify(stored), "EX", UPLOAD_SESSION_TTL_SECONDS).catch((error) => console.warn(JSON.stringify({ type: "upload_session_cache_failed", at: new Date().toISOString(), uploadId: id, userId: owner.id, code: (error as { code?: string }).code ?? "unknown" })));
         console.info(JSON.stringify({ type: "tos_upload_started", at: new Date().toISOString(), userId: owner.id, uploadId: id, size: meta.size, parts: partCount }));
-        return res.status(201).json({ id, direct: true, chunkSize: partSize, concurrency: config.tosUploadConcurrency, parts });
+        return res.status(201).json({ id, direct: true, chunkSize: partSize, concurrency: config.tosUploadConcurrency, parts, localMedia: publicUploadLocalMedia(id, objectKey, meta.size, mime) });
       }
       const dir = path.join(config.uploadDir, id);
       await fs.mkdir(dir, { recursive: true, mode: 0o750 });
@@ -353,7 +383,10 @@ const respondUploadState = async (res: express.Response, uploadId: string, owner
   if (!media || media.ownerId !== ownerId) return res.status(404).json({ error: "上传不存在或已过期", requestId: res.locals.requestId });
   const expiresAt = media.objectKey.startsWith("inputs/") ? media.createdAt + config.tosInputRetentionDays * 24 * 60 * 60 * 1000 : undefined;
   if (expiresAt && expiresAt <= Date.now()) return res.status(410).json({ error: "上传素材已过期，请重新上传", code: "UPLOAD_EXPIRED", requestId: res.locals.requestId });
-  const base = { id: uploadId, uploadId, name: media.fileName, type: uploadKindFromContentType(media.contentType), size: media.size, expiresAt };
+  const base = {
+    id: uploadId, uploadId, name: media.fileName, type: uploadKindFromContentType(media.contentType), size: media.size, expiresAt,
+    localMedia: publicUploadLocalMedia(uploadId, media.objectKey, media.size, media.contentType),
+  };
   if (media.status === "ready") return res.json({ ...base, state: "ready" });
   if (media.status === "uploading") return res.status(202).json({ ...base, state: "processing" });
   const cachedError = await redis.get(`upload:error:${uploadId}`).catch(() => null);
@@ -941,6 +974,35 @@ app.post("/api/media-events", requireAuth, async (req, res) => {
     res.status(204).end();
   } catch (error) { respondError(res, error); }
 });
+const localMediaEventSchema = z.object({
+  type: z.enum(["local_media_hit", "local_media_miss", "local_media_fetch_started", "local_media_fetch_resumed", "local_media_ready", "local_media_evicted", "local_media_quota_pressure", "local_media_fallback"]),
+  cacheKey: z.string().min(16).max(128).regex(/^[A-Za-z0-9_-]+$/),
+  variant: z.enum(["thumbnail", "preview", "original"]),
+  mediaType: z.enum(["image", "video", "audio"]),
+  bytes: z.number().int().nonnegative().max(16 * 1024 ** 4).optional(),
+  elapsedMs: z.number().int().nonnegative().max(24 * 3600 * 1000).optional(),
+  errorCode: z.string().max(64).regex(/^[A-Za-z0-9_.:-]+$/).optional(),
+});
+app.get("/api/local-media/config", requireAuth, (_req, res) => {
+  res.json({
+    enabled: config.localMediaCacheEnabled,
+    studio: config.localMediaCacheStudio,
+    canvas: config.localMediaCacheCanvas,
+    atlas: config.localMediaCacheAtlas,
+    uploadResume: config.localMediaUploadResume,
+  });
+});
+app.post("/api/local-media-events", requireAuth, async (req, res) => {
+  try {
+    const event = localMediaEventSchema.parse(req.body);
+    const user = res.locals.user as SessionUser;
+    const rateKey = `local-media-events:${user.id}:${Math.floor(Date.now() / 60_000)}`;
+    const count = await redis.incr(rateKey);
+    if (count === 1) await redis.expire(rateKey, 120);
+    if (count <= 180) console.info(JSON.stringify({ ...event, type: event.type, at: new Date().toISOString(), userId: user.id, requestId: res.locals.requestId }));
+    res.status(204).end();
+  } catch (error) { respondError(res, error); }
+});
 
 const clientEventSchema = z.object({
   journey: z.enum(journeyNames),
@@ -996,7 +1058,7 @@ app.get("/api/assets", requireAuth, async (req, res) => {
     const user = res.locals.user as SessionUser;
     const assets = users.listUserAssets(user.id, query.q ?? "", query.pageSize + 1, query.type, (query.page - 1) * query.pageSize, query.category);
     const hasMore = assets.length > query.pageSize;
-    res.json({ Items: assets.slice(0, query.pageSize).map(publicUserAsset), PageNumber: query.page, PageSize: query.pageSize, HasMore: hasMore });
+    res.json({ Items: assets.slice(0, query.pageSize).map(publicUserAssetResponse), PageNumber: query.page, PageSize: query.pageSize, HasMore: hasMore });
   } catch (error) { respondError(res, error, 502); }
 });
 app.post("/api/assets", requireAuth, async (req, res) => {
@@ -1015,7 +1077,7 @@ app.post("/api/assets", requireAuth, async (req, res) => {
     let providerName = providerAssetName(body.name);
     if (body.uploadId) {
       const existing = users.readUserAssetByUpload(user.id, body.uploadId);
-      if (existing) return res.status(202).json(publicUserAsset(existing));
+      if (existing) return res.status(202).json(publicUserAssetResponse(existing));
       const media = users.readUploadState(body.uploadId);
       if (!canCreatePendingAsset(media, user.id, config.tosInputRetentionDays)) return res.status(404).json({ error: "引用素材不存在或尚未上传完成" });
       assetType = media.contentType.startsWith("video/") ? "Video" : media.contentType.startsWith("audio/") ? "Audio" : "Image";
@@ -1025,7 +1087,7 @@ app.post("/api/assets", requireAuth, async (req, res) => {
       users.upsertUserAsset(asset);
       const stored = users.readUserAssetByUpload(user.id, body.uploadId);
       if (!stored) throw new Error("素材上传记录未能持久化");
-      if (stored.id !== asset.id) return res.status(202).json(publicUserAsset(stored));
+      if (stored.id !== asset.id) return res.status(202).json(publicUserAssetResponse(stored));
       if (users.readUpload(body.uploadId)) {
         void assetQueue.add("register", { assetId: asset.id }, { jobId: asset.id, attempts: 3, backoff: { type: "exponential", delay: 15_000 }, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } }).catch((error) => {
           users.upsertUserAsset({ ...asset, lastError: "素材已上传，生成引用将在后台继续准备", updatedAt: Date.now() });
@@ -1033,7 +1095,7 @@ app.post("/api/assets", requireAuth, async (req, res) => {
         });
       }
       console.info(JSON.stringify({ type: "user_asset_mutation", action: "queue_asset", userId: user.id, assetId: asset.id, at: new Date().toISOString() }));
-      return res.status(202).json(publicUserAsset(users.readUserAsset(asset.id)!));
+      return res.status(202).json(publicUserAssetResponse(users.readUserAsset(asset.id)!));
     }
     groupId ||= await ensureAutoReferenceGroup();
     const created = await callAssetApi<ProviderAssetRecord>("CreateAsset", { GroupId: groupId, URL: url, AssetType: assetType, Name: providerName });
@@ -1042,7 +1104,7 @@ app.post("/api/assets", requireAuth, async (req, res) => {
     const asset: UserAsset = { id: created.Id, providerAssetId: created.Id, ownerId: user.id, groupId, name: created.Name ?? providerName, assetType: created.AssetType ?? assetType, status: created.Status ?? "Processing", category: body.category, url: created.URL, createdAt: now, updatedAt: now };
     users.upsertUserAsset(asset);
     console.info(JSON.stringify({ type: "user_asset_mutation", action: "create_asset", userId: user.id, assetId: asset.id, at: new Date().toISOString() }));
-    res.status(201).json(publicUserAsset(asset));
+    res.status(201).json(publicUserAssetResponse(asset));
   } catch (error) {
     // 素材服务对尺寸不合规素材返回英文错误，翻译为清晰中文提示（兜底，正常在 complete 阶段已被拦截）
     const message = error instanceof Error ? error.message : "";
@@ -1090,7 +1152,7 @@ app.get("/api/assets/:id/source", requireAuth, async (req, res) => {
   } catch (error) { respondError(res, error, 502); }
 });
 app.get("/api/assets/:id", requireAuth, async (req, res) => {
-  try { const user = res.locals.user as SessionUser; const asset = ownedUserAsset(param(req.params.id), user.id); if (!asset) return res.status(404).json({ error: "素材不存在" }); res.json(publicUserAsset(asset)); } catch (error) { respondError(res, error, 502); }
+  try { const user = res.locals.user as SessionUser; const asset = ownedUserAsset(param(req.params.id), user.id); if (!asset) return res.status(404).json({ error: "素材不存在" }); res.json(publicUserAssetResponse(asset)); } catch (error) { respondError(res, error, 502); }
 });
 app.patch("/api/assets/:id", requireAuth, async (req, res) => {
   try {
@@ -1103,7 +1165,7 @@ app.patch("/api/assets/:id", requireAuth, async (req, res) => {
     if (body.name !== undefined) users.renameUserAsset(id, user.id, body.name);
     if (body.category !== undefined) users.updateUserAssetCategory(id, user.id, body.category);
     console.info(JSON.stringify({ type: "user_asset_mutation", action: body.name !== undefined ? body.category !== undefined ? "update_asset" : "rename_asset" : "categorize_asset", userId: user.id, assetId: id, at: new Date().toISOString() }));
-    res.json(publicUserAsset(users.readUserAsset(id)!));
+    res.json(publicUserAssetResponse(users.readUserAsset(id)!));
   } catch (error) { respondError(res, error, 502); }
 });
 app.delete("/api/assets/:id", requireAuth, async (req, res) => {
@@ -1122,6 +1184,14 @@ app.delete("/api/assets/:id", requireAuth, async (req, res) => {
 
 
 // ---- OpenRouter 图片生成 ----
+const publicImageGenerationTask = (task: ImageGenerationTask) => publicImageGeneration(task, (mediaId) => {
+  const media = users.readMedia(mediaId);
+  if (!media || media.ownerId !== task.ownerId || media.kind !== "generated" || media.status !== "ready") return undefined;
+  return {
+    thumbnail: publicLocalMedia(media, { variant: "thumbnail", url: `/api/image-media/${encodeURIComponent(mediaId)}?variant=thumbnail`, cachePolicy: "warm", transform: "image/resize,w_960/format,webp" }),
+    original: publicLocalMedia(media, { variant: "original", url: `/api/image-media/${encodeURIComponent(mediaId)}`, cachePolicy: "warm" }),
+  };
+});
 const imageReferenceSchema = z.union([
   z.string().min(20).max(200),
   z.object({
@@ -1161,15 +1231,15 @@ app.get("/api/image-generations", requireAuth, (req, res) => {
   if (sessionId) {
     const session = users.readCreationSession(sessionId);
     if (!session || session.ownerId !== user.id) return res.status(404).json({ error: "创作会话不存在" });
-    return res.json(users.listImageGenerationsForSession(user.id, sessionId, limit).map(publicImageGeneration));
+    return res.json(users.listImageGenerationsForSession(user.id, sessionId, limit).map(publicImageGenerationTask));
   }
-  res.json(users.listImageGenerations(user.id, limit).map(publicImageGeneration));
+  res.json(users.listImageGenerations(user.id, limit).map(publicImageGenerationTask));
 });
 
 app.get("/api/image-generations/:id", requireAuth, (req, res) => {
   const user = res.locals.user as SessionUser;
   const task = users.readImageGeneration(param(req.params.id));
-  task && task.ownerId === user.id ? res.json(publicImageGeneration(task)) : res.status(404).json({ error: "图片任务不存在" });
+  task && task.ownerId === user.id ? res.json(publicImageGenerationTask(task)) : res.status(404).json({ error: "图片任务不存在" });
 });
 
 app.get("/api/image-generations/:id/reedit", requireAuth, (req, res) => {

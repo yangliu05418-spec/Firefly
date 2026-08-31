@@ -11,6 +11,12 @@ import type { AssetCategory, LibraryAsset, LibraryGroup } from "../../types";
 import { uploadFileUntilAccepted } from "../../upload-acceptance";
 import { usePendingAssetPreviews } from "../../use-pending-asset-previews";
 import { persistPrivateMediaStorage } from "../../private-media-cache";
+import { useLocalMediaSource } from "../../local-media-client";
+
+function AssetThumbnail({ asset, preview }: { asset: LibraryAsset; preview: string }) {
+  const { source } = useLocalMediaSource(asset.LocalMedia?.thumbnail, { warm: true, switchWhenReady: true });
+  return <RecoveringThumbnail src={source ?? preview} alt={asset.Name || "图片素材"} manualRecovery={false} loading="lazy" decoding="async" />;
+}
 
 export function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: LibraryAsset) => void }) {
   const userId = useAssetCacheUserId();
@@ -291,7 +297,7 @@ export function ImageAssetManager({ onInsertCanvas }: { onInsertCanvas: (asset: 
         const preview = assetPreviewSource(asset, pendingPreviews.get(asset.Id));
         return <article key={asset.Id} className={`image-asset-card ${selected.has(asset.Id) ? "is-selected" : ""}`}>
           <button className="image-asset-card__media" aria-pressed={selected.has(asset.Id)} aria-label={`${selected.has(asset.Id) ? "取消选择" : "选择"} ${asset.Name}`} onClick={() => toggle(asset.Id)}>
-            {preview ? <RecoveringThumbnail src={preview} alt={asset.Name || "图片素材"} manualRecovery={false} loading="lazy" decoding="async" /> : <span><ImageIcon /></span>}
+            {preview ? <AssetThumbnail asset={asset} preview={preview} /> : <span><ImageIcon /></span>}
             <i>{selected.has(asset.Id) ? <Check /> : null}</i>
             {asset.Status !== "Active" && <small className={`status-${asset.Status.toLowerCase()}`} title={asset.Error}>{asset.Status === "Processing" ? "已上传 · 引用准备中" : "已上传 · 引用失败"}</small>}
           </button>

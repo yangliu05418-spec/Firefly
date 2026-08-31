@@ -859,6 +859,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 
 .canvas-v2-inspect>.image-recovery-fallback{flex:1;min-height:0}
 
+.account-menu__actions button span small{display:block;margin-top:1px;color:#747a84;font-size:9px}.account-menu__storage{margin:2px 4px 7px;padding:9px;border-radius:9px;background:rgba(255,255,255,.035)}.account-menu__storage p{margin:0 0 7px;color:#858a93;font-size:10px}.account-menu__storage>div{display:flex;gap:6px}.account-menu__storage>div button{display:block;height:30px;padding:0 8px;border:1px solid rgba(255,255,255,.09);font-size:10px;text-align:center}.account-menu__storage>div button:last-child{color:#d9aaa5}
+
 /* Canvas V2 interaction consistency: visible keyboard controls and truthful anchored overlays. */
 .react-flow__node:focus-within .canvas-v2-node__plus,.canvas-v2-node__plus:focus-visible{opacity:1}.canvas-v2-node__plus:focus-visible{outline:2px solid rgba(192,224,211,.7);outline-offset:2px}.canvas-v2-toolbar>output{min-width:42px;text-align:center;color:#89938f;font-size:9px}.canvas-v2-create-menu[data-placement]::before{top:var(--canvas-menu-arrow-top,50%)}
 

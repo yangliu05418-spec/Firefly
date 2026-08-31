@@ -86,7 +86,7 @@ type MediaStoreState = MediaState &
     getItemsByFolder: (folderId: string | null) => ProjectItem[];
     getItemById: (id: string) => ProjectItem | undefined;
     getFileByName: (name: string) => MediaFile | undefined;
-    registerFireflyRemoteAsset: (asset: { id: string; name: string; kind: 'image' | 'video' | 'audio'; mediaUrl: string; size?: number }) => string;
+    registerFireflyRemoteAsset: (asset: { id: string; name: string; kind: 'image' | 'video' | 'audio'; mediaUrl: string; size?: number; localMedia?: import('../../firefly/local-media').LocalMediaDescriptor }) => string;
     createLiveInputItem: (id: string, source: LiveInputSource, name: string, parentId?: string | null) => string;
     updateLiveInputSource: (id: string, source: LiveInputSource) => void;
     getOrCreateTextFolder: () => string;
@@ -173,7 +173,7 @@ export const useMediaStore = create<MediaStoreState>()(
       const id = `firefly-atlas-${asset.id}`;
       const mediaFile: MediaFile = {
         id, name: asset.name, type: asset.kind, parentId: null, createdAt: Date.now(),
-        url: asset.mediaUrl, remoteSourcePath: asset.mediaUrl, fireflyProjectAssetId: asset.id,
+        url: asset.mediaUrl, remoteSourcePath: asset.mediaUrl, fireflyProjectAssetId: asset.id, localMediaDescriptor: asset.localMedia,
         fileSize: asset.size, proxyStatus: 'none', remoteCacheStatus: 'idle', remoteCacheProgress: 0,
       };
       set((state) => state.files.some((file) => file.id === id) ? {} : { files: [mediaFile, ...state.files] });

@@ -3,6 +3,7 @@ import { LoaderCircle } from "lucide-react";
 import type { Task } from "../../types";
 import { RecoveringImage, type ImageRecoveryState } from "../../recovering-image";
 import { reportClientJourney } from "../../client-observability";
+import { useLocalMediaSource } from "../../local-media-client";
 
 function PosterRecovery({ phase, taskId, startedAt, reported }: ImageRecoveryState & { taskId: string; startedAt: number; reported: MutableRefObject<boolean> }) {
   useEffect(() => {
@@ -16,6 +17,7 @@ function PosterRecovery({ phase, taskId, startedAt, reported }: ImageRecoverySta
 export function ArchivePoster({ task }: { task: Task }) {
   const startedAt = useRef(Date.now());
   const reported = useRef(false);
+  const { source } = useLocalMediaSource(task.localMedia?.poster, { warm: true, switchWhenReady: true });
   const ready = Boolean(task.posterUrl) && (task.posterStatus === "ready" || task.posterStatus === undefined);
   if (!ready || !task.posterUrl) {
     return task.posterStatus === "processing" ? <span className="archive-card__poster-state" role="status"><LoaderCircle className="spin" /><span>海报生成中</span></span> : null;
@@ -23,7 +25,7 @@ export function ArchivePoster({ task }: { task: Task }) {
   return <RecoveringImage
     key={`${task.id}-${task.mediaRevision ?? 0}`}
     className="archive-card__poster"
-    src={task.posterUrl}
+    src={source ?? task.posterUrl}
     alt=""
     loading="lazy"
     decoding="async"

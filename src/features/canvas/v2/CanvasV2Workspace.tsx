@@ -651,11 +651,20 @@ function Workspace({ canvasId, navigate, user, logout }: { canvasId: string; nav
 
   const renderedNodes = useMemo(() => {
     const domains = nodes.map((node) => node.data.domain);
+    const assetsById = new Map(assets.map((asset) => [asset.id, asset]));
     return nodes.map((node) => ({
       ...node,
-      data: { ...node.data, references: incomingCanvasReferences(node.id, domains, edges), expandedText: expandedTextNodeId === node.id, localPreviewUrl: localPreviews[node.id] ?? (node.data.domain.data.projectAssetId ? localAssetPreviews[node.data.domain.data.projectAssetId] : undefined) },
+      data: {
+        ...node.data,
+        references: incomingCanvasReferences(node.id, domains, edges),
+        expandedText: expandedTextNodeId === node.id,
+        localPreviewUrl: localPreviews[node.id] ?? (node.data.domain.data.projectAssetId ? localAssetPreviews[node.data.domain.data.projectAssetId] : undefined),
+        localMedia: node.data.domain.data.projectAssetId
+          ? (() => { const asset = assetsById.get(node.data.domain.data.projectAssetId); return ["image", "character", "scene"].includes(node.data.domain.type) ? asset?.localMedia?.thumbnail : asset?.localMedia?.preview; })()
+          : undefined,
+      },
     }));
-  }, [edges, expandedTextNodeId, localAssetPreviews, localPreviews, nodes]);
+  }, [assets, edges, expandedTextNodeId, localAssetPreviews, localPreviews, nodes]);
 
   useEffect(() => {
     if (expandedTextNodeId && !nodes.some((node) => node.id === expandedTextNodeId)) setExpandedTextNodeId(null);

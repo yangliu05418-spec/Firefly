@@ -263,6 +263,12 @@ sync_atlas_assets
 # for the SDK's multi-retry window; the scheduled backup stays strict and alerts.
 FIREFLY_BACKUP_ALLOW_LOCAL_FALLBACK=true TOS_BACKUP_REQUEST_TIMEOUT_MS=60000 /usr/local/sbin/firefly-backup "$image"
 
+# Keep browser direct-upload and OPFS Range-resume headers aligned with the
+# immutable application release before any traffic can reach the candidate.
+/usr/bin/docker run --rm --network "$network" --env-file "$app_env" --env-file "$feishu_env" \
+  -e FIREFLY_REVISION="$revision" -e FIREFLY_IMAGE_DIGEST="${image##*@}" \
+  "$image" node dist-server/tos-admin.js
+
 /usr/bin/docker run --rm --network "$network" --env-file "$app_env" --env-file "$feishu_env" \
   -e FIREFLY_REVISION="$revision" -e FIREFLY_IMAGE_DIGEST="${image##*@}" \
   -v /srv/firefly/data:/data:rw "$image" node dist-server/migrate.js

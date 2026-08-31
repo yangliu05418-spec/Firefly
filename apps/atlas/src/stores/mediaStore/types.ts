@@ -112,6 +112,7 @@ export interface MediaFile extends MediaItem {
   url: string;
   fireflyProjectAssetId?: string;
   remoteSourcePath?: string;
+  localMediaDescriptor?: import('../../firefly/local-media').LocalMediaDescriptor;
   remoteCacheStatus?: 'idle' | 'downloading' | 'ready' | 'error';
   remoteCacheProgress?: number;
   modelSequence?: ModelSequenceData;

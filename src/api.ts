@@ -1,4 +1,6 @@
 import { prepareImageForUpload } from "./image-normalize";
+import type { LocalMediaDescriptor } from "./types";
+import { seedUploadedLocalMedia } from "./local-media-client";
 
 export const AUTH_EXPIRED_EVENT = "firefly:auth-expired";
 const AUTH_CHANNEL = "firefly-auth";
@@ -226,7 +228,8 @@ export async function uploadFile(file: File, type: UploadKind, onProgress: (valu
     }
     : undefined;
   onProgress(0, "uploading");
-  const init = await api.post<{ id: string; chunkSize: number; direct?: boolean; concurrency?: number; parts?: SignedPart[] }>("/api/uploads", { name: upload.name, size: upload.size, type, mime: upload.type });
+  const init = await api.post<{ id: string; chunkSize: number; direct?: boolean; concurrency?: number; parts?: SignedPart[]; localMedia?: LocalMediaDescriptor }>("/api/uploads", { name: upload.name, size: upload.size, type, mime: upload.type });
+  if (init.localMedia) void seedUploadedLocalMedia(init.localMedia, upload);
   const heartbeat = globalThis.setInterval(() => { void api.post(`/api/uploads/${init.id}/heartbeat`).catch(() => undefined); }, 60_000);
   try {
   if (init.direct) {

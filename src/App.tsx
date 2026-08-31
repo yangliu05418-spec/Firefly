@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Archive, ArrowRight, Check, ChevronRight, Copy, Download, Film, Home, ImageIcon, LayoutGrid, LoaderCircle, LogOut, Menu, MessageSquare, PanelLeftClose, Pencil, Play, Plus, RefreshCw, RotateCcw, Search, Trash2, WandSparkles, X } from "lucide-react";
 import { api, ApiError, listenForSignedOut, notifySignedOut } from "./api";
-import type { CreationSession, GenerationCapacity, ImageResultBundle, LibraryAsset, ModelCapability, SessionUser, Task } from "./types";
+import type { CreationSession, GenerationCapacity, ImageGenItem, ImageResultBundle, LibraryAsset, ModelCapability, SessionUser, Task } from "./types";
 import { CanvasProjectList } from "./features/canvas/CanvasProjectList";
 import { CanvasWorkspaceGate as CanvasWorkspace } from "./features/canvas/CanvasWorkspaceGate";
 import { CanvasInsertPicker } from "./features/canvas/CanvasInsertPicker";
@@ -21,6 +21,7 @@ import type { ComposerRestore, ComposerRestorePayload } from "./composer-restore
 import { hasMeaningfulComposerDraft, loadReeditPayload } from "./reedit-client";
 import { ArchivePoster } from "./features/assets/ArchivePoster";
 import { clientRouteElapsed, markClientRouteStart, reportClientJourney } from "./client-observability";
+import { activateLocalMediaCache, clearLocalMedia, configureLocalMedia, deactivateLocalMediaCache, localMediaStats, useLocalMediaSource, warmLocalMedia } from "./local-media-client";
 const statusText: Record<Task["status"], string> = { queued: "等待调度", submitting: "正在提交", running: "正在生成", succeeded: "生成完成", failed: "生成失败" };
 const taskStatusText = (task: Task) => task.status === "succeeded" && task.mediaStatus === "archiving" ? "正在归档成片" : task.status === "succeeded" && task.mediaStatus === "failed" ? "成片归档待恢复" : statusText[task.status];
 const waitingMoments = [
@@ -188,7 +189,8 @@ function CaseIdButton({ task, compact = false }: { task: Task; compact?: boolean
   return <button className={`case-id-button ${compact ? "case-id-button--compact" : ""} ${copied ? "is-copied" : ""}`} onClick={copy} title={`复制 Case ID：${caseId}`} aria-label={`复制 Case ID ${caseId}`}>{copied ? <Check /> : <Copy />}{!compact && <span>{copied ? "已复制" : `Case ${caseId.slice(0, 8)}`}</span>}</button>;
 }
 
-function TaskCard({ task, models, eager, now, onDelete, onReedit, reeditBusy = false, canDelete = false }: { task: Task; models: ModelCapability[]; eager: boolean; now: number; onDelete: (task: Task) => void; onReedit: (kind: "video", id: string) => void; reeditBusy?: boolean; canDelete?: boolean }) {
+function TaskCard({ task: inputTask, models, eager, now, onDelete, onReedit, reeditBusy = false, canDelete = false }: { task: Task; models: ModelCapability[]; eager: boolean; now: number; onDelete: (task: Task) => void; onReedit: (kind: "video", id: string) => void; reeditBusy?: boolean; canDelete?: boolean }) {
+  let task = inputTask;
   const model = models.find((item) => item.id === task.model);
   const temporaryAvailable = Boolean(task.temporaryVideoUrl && (!task.temporaryVideoExpiresAt || task.temporaryVideoExpiresAt > now));
   const expired = false;
@@ -197,6 +199,10 @@ function TaskCard({ task, models, eager, now, onDelete, onReedit, reeditBusy = f
   const cardRef = useRef<HTMLElement>(null); const retryTimer = useRef<number | null>(null); const bufferWatchdog = useRef<number | null>(null); const automaticRecoveries = useRef(0); const readyOnce = useRef(false); const loadStartedAt = useRef(Date.now()); const bufferingStartedAt = useRef<number | null>(null); const resumeTime = useRef(0);
   const [nearViewport, setNearViewport] = useState(eager); const [mediaState, setMediaState] = useState<MediaState>("idle"); const [retryCount, setRetryCount] = useState(0); const [downloadNotice, setDownloadNotice] = useState(""); const [copyNotice, setCopyNotice] = useState("");
   const shouldLoadVideo = task.status === "succeeded" && Boolean(task.videoUrl) && (eager || nearViewport);
+  const { source: videoSource } = useLocalMediaSource(shouldLoadVideo ? task.localMedia?.preview : undefined, { warm: false, switchWhenReady: false });
+  const { source: posterSource } = useLocalMediaSource(shouldLoadVideo ? task.localMedia?.poster : undefined, { warm: true, switchWhenReady: true });
+  const remoteVideoUrl = task.videoUrl;
+  task = { ...task, videoUrl: videoSource ?? task.videoUrl, posterUrl: posterSource ?? task.posterUrl };
   const reportTaskMediaEvent = (event: MediaEventName, video?: HTMLVideoElement, bufferingMs?: number) => reportMediaEvent(task.id, event, loadStartedAt.current, video, bufferingMs);
   useEffect(() => {
     if (["succeeded", "failed"].includes(task.status)) return;
@@ -255,14 +261,14 @@ function TaskCard({ task, models, eager, now, onDelete, onReedit, reeditBusy = f
     setMediaState("error");
   };
   const copyVideoLink = async () => {
-    if (!task.videoUrl) return;
-    try { await navigator.clipboard.writeText(new URL(task.videoUrl, window.location.origin).href); setCopyNotice("链接已复制"); } catch { setCopyNotice("复制失败，请使用下载按钮"); }
+    if (!remoteVideoUrl) return;
+    try { await navigator.clipboard.writeText(new URL(remoteVideoUrl, window.location.origin).href); setCopyNotice("链接已复制"); } catch { setCopyNotice("复制失败，请使用下载按钮"); }
     window.setTimeout(() => setCopyNotice(""), 2400);
   };
   return <article id={`task-${task.id}`} ref={cardRef} className={`task-card task-card--${task.status}${mediaFailed ? " task-card--media-failed" : ""}`}>
     <header><div><span className="status-pulse" /><b>{taskStatusText(task)}</b><small>{new Date(task.createdAt).toLocaleString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</small>{task.visibility === "shared" && <small className="shared-mark">团队历史</small>}</div><span>{model?.name ?? task.model} · {task.ratio} · {task.resolution} · {task.duration}s <CaseIdButton task={task} />{["succeeded", "failed"].includes(task.status) && <button className="task-reedit" disabled={reeditBusy} aria-label="重新编辑这次视频创作" title="载入这次创作的提示词、参数与参考素材" onClick={() => onReedit("video", task.id)}>{reeditBusy ? <LoaderCircle className="spin" /> : <RotateCcw />}<span>{reeditBusy ? "载入中" : "重新编辑"}</span></button>}{canDelete && <button className="task-delete" aria-label="删除项目" title="删除项目" onClick={() => onDelete(task)}><Trash2 /></button>}</span></header>
     <p>{task.prompt || "基于参考素材生成"}</p>
-    {task.status === "succeeded" && task.videoUrl ? <div className="video-result"><div className="video-stage">{shouldLoadVideo && <video key={`${task.id}-${task.mediaRevision ?? 0}-${retryCount}`} src={task.videoUrl} poster={task.posterUrl} controls playsInline preload={eager ? "auto" : "metadata"} onLoadedMetadata={(event) => { const video = event.currentTarget; if (resumeTime.current > 0 && Number.isFinite(video.duration)) video.currentTime = Math.min(resumeTime.current, Math.max(0, video.duration - 0.1)); reportTaskMediaEvent("metadata", video); }} onCanPlay={(event) => { const firstCanPlay = !readyOnce.current; readyOnce.current = true; setMediaState("ready"); if (firstCanPlay) reportTaskMediaEvent("canplay", event.currentTarget); }} onPlaying={(event) => { clearBufferWatchdog(); const bufferingMs = bufferingStartedAt.current === null ? undefined : Math.min(3600 * 1000, Date.now() - bufferingStartedAt.current); bufferingStartedAt.current = null; setMediaState("ready"); reportTaskMediaEvent("playing", event.currentTarget, bufferingMs); }} onWaiting={(event) => beginBufferRecovery(event.currentTarget, "waiting")} onStalled={(event) => beginBufferRecovery(event.currentTarget, "stalled")} onError={(event) => handleMediaError(event.currentTarget)} />}{(!shouldLoadVideo || mediaState !== "ready") && <div className={`video-loading video-loading--${mediaState}`} aria-live="polite"><div className="film-window"><Film /><span /><i /></div><b>{expired ? "预览链接已过期" : mediaState === "error" ? navigator.onLine ? "预览连接失败" : "网络连接已断开" : mediaState === "buffering" ? "正在继续缓冲" : shouldLoadVideo ? "正在载入第一帧" : "靠近时自动载入预览"}</b><small>{expired ? "成片正在重新归档，请稍后再试" : mediaState === "error" ? navigator.onLine ? "播放位置已保留，可重新加载预览" : "网络恢复后将自动重新连接" : "Firefly 正在从北京媒体存储准备画面"}</small>{mediaState === "error" && !expired && navigator.onLine && <button onClick={retryMedia}><RefreshCw /> 重新加载预览</button>}</div>}</div><div className="video-result__footer"><span>{expired ? "预览链接已过期" : downloadNotice || (task.mediaStatus === "ready" ? "成片已安全归档，可随时预览与下载" : task.downloadUrl ? "兼容预览已就绪 · 原片可立即下载，系统继续归档" : "兼容预览已就绪，原始成片仍在安全归档")}</span><div className="video-actions">{!expired && <button title="复制受保护的预览入口" onClick={copyVideoLink}><Copy /> {copyNotice || "复制入口"}</button>}{expired ? <button disabled><Download /> 下载暂不可用</button> : task.downloadUrl ? <a href={task.downloadUrl} target="_blank" rel="noreferrer" onClick={() => { setDownloadNotice("原片已交给浏览器下载器，可在下载列表中继续"); reportTaskMediaEvent("download_click"); }}><Download /> 下载原片</a> : <button disabled><Download /> 原片地址已过期</button>}</div></div></div> : task.status === "failed" ? <div className="task-error">{task.error ?? "生成失败，请检查素材与参数后重试"}</div> : <div className={`generation-visual ${mediaFailed ? "generation-visual--recovery" : ""}`}><div className="film-window"><Film /><span /><i /></div><div className="progress-copy"><div className="waiting-quote" aria-live="polite" key={quoteIndex}><b>{mediaFailed ? "成片尚未完成安全归档" : task.status === "succeeded" && task.mediaStatus === "archiving" ? "正在归档到北京 TOS" : task.status === "submitting" ? "正在确认任务接纳" : task.status === "queued" ? "正在等待一束空闲的算力" : waitingMoment.title}</b><small>{mediaFailed ? task.downloadUrl ? "临时原片仍可下载；系统将在有效期内自动重试归档" : "临时原片已过期；系统正在尝试恢复长期副本" : task.status === "succeeded" && task.mediaStatus === "archiving" ? task.downloadUrl ? "原片可立即下载，长期副本正在后台归档" : "长期副本正在后台归档" : task.status === "submitting" ? "正在等待模型服务返回任务编号；响应中断时不会重复提交" : task.status === "queued" ? "已进入安全队列，可以放心离开页面" : waitingMoment.detail}</small></div><code>{task.providerId ? `TASK / ${task.providerId.slice(0, 18)}…` : "SECURELY SUBMITTING PARAMETERS"}</code></div></div>}
+    {task.status === "succeeded" && task.videoUrl ? <div className="video-result"><div className="video-stage">{shouldLoadVideo && <video key={`${task.id}-${task.mediaRevision ?? 0}-${retryCount}`} src={task.videoUrl} poster={task.posterUrl} controls playsInline preload={eager ? "auto" : "metadata"} onLoadedMetadata={(event) => { const video = event.currentTarget; if (resumeTime.current > 0 && Number.isFinite(video.duration)) video.currentTime = Math.min(resumeTime.current, Math.max(0, video.duration - 0.1)); reportTaskMediaEvent("metadata", video); }} onCanPlay={(event) => { const firstCanPlay = !readyOnce.current; readyOnce.current = true; setMediaState("ready"); if (event.currentTarget.paused) void warmLocalMedia(task.localMedia?.preview); if (firstCanPlay) reportTaskMediaEvent("canplay", event.currentTarget); }} onPlaying={(event) => { clearBufferWatchdog(); const bufferingMs = bufferingStartedAt.current === null ? undefined : Math.min(3600 * 1000, Date.now() - bufferingStartedAt.current); bufferingStartedAt.current = null; setMediaState("ready"); reportTaskMediaEvent("playing", event.currentTarget, bufferingMs); }} onPause={() => void warmLocalMedia(task.localMedia?.preview)} onWaiting={(event) => beginBufferRecovery(event.currentTarget, "waiting")} onStalled={(event) => beginBufferRecovery(event.currentTarget, "stalled")} onError={(event) => handleMediaError(event.currentTarget)} />}{(!shouldLoadVideo || mediaState !== "ready") && <div className={`video-loading video-loading--${mediaState}`} aria-live="polite"><div className="film-window"><Film /><span /><i /></div><b>{expired ? "预览链接已过期" : mediaState === "error" ? navigator.onLine ? "预览连接失败" : "网络连接已断开" : mediaState === "buffering" ? "正在继续缓冲" : shouldLoadVideo ? "正在载入第一帧" : "靠近时自动载入预览"}</b><small>{expired ? "成片正在重新归档，请稍后再试" : mediaState === "error" ? navigator.onLine ? "播放位置已保留，可重新加载预览" : "网络恢复后将自动重新连接" : "Firefly 正在从北京媒体存储准备画面"}</small>{mediaState === "error" && !expired && navigator.onLine && <button onClick={retryMedia}><RefreshCw /> 重新加载预览</button>}</div>}</div><div className="video-result__footer"><span>{expired ? "预览链接已过期" : downloadNotice || (task.mediaStatus === "ready" ? "成片已安全归档，可随时预览与下载" : task.downloadUrl ? "兼容预览已就绪 · 原片可立即下载，系统继续归档" : "兼容预览已就绪，原始成片仍在安全归档")}</span><div className="video-actions">{!expired && <button title="复制受保护的预览入口" onClick={copyVideoLink}><Copy /> {copyNotice || "复制入口"}</button>}{expired ? <button disabled><Download /> 下载暂不可用</button> : task.downloadUrl ? <a href={task.downloadUrl} target="_blank" rel="noreferrer" onClick={() => { setDownloadNotice("原片已交给浏览器下载器，可在下载列表中继续"); reportTaskMediaEvent("download_click"); }}><Download /> 下载原片</a> : <button disabled><Download /> 原片地址已过期</button>}</div></div></div> : task.status === "failed" ? <div className="task-error">{task.error ?? "生成失败，请检查素材与参数后重试"}</div> : <div className={`generation-visual ${mediaFailed ? "generation-visual--recovery" : ""}`}><div className="film-window"><Film /><span /><i /></div><div className="progress-copy"><div className="waiting-quote" aria-live="polite" key={quoteIndex}><b>{mediaFailed ? "成片尚未完成安全归档" : task.status === "succeeded" && task.mediaStatus === "archiving" ? "正在归档到北京 TOS" : task.status === "submitting" ? "正在确认任务接纳" : task.status === "queued" ? "正在等待一束空闲的算力" : waitingMoment.title}</b><small>{mediaFailed ? task.downloadUrl ? "临时原片仍可下载；系统将在有效期内自动重试归档" : "临时原片已过期；系统正在尝试恢复长期副本" : task.status === "succeeded" && task.mediaStatus === "archiving" ? task.downloadUrl ? "原片可立即下载，长期副本正在后台归档" : "长期副本正在后台归档" : task.status === "submitting" ? "正在等待模型服务返回任务编号；响应中断时不会重复提交" : task.status === "queued" ? "已进入安全队列，可以放心离开页面" : waitingMoment.detail}</small></div><code>{task.providerId ? `TASK / ${task.providerId.slice(0, 18)}…` : "SECURELY SUBMITTING PARAMETERS"}</code></div></div>}
     {task.status === "succeeded" && !task.videoUrl && temporaryAvailable && <button className="temporary-preview-button" onClick={() => window.open(task.temporaryVideoUrl, "_blank", "noopener,noreferrer")}><Play /> 立即预览临时源（可能卡顿）</button>}
   </article>;
 }
@@ -273,10 +279,22 @@ function UserAvatar({ user }: { user: SessionUser }) {
 }
 
 function AccountMenu({ user, close, home, logout }: { user: SessionUser; close: () => void; home: () => void; logout: () => void }) {
+  const [storageOpen, setStorageOpen] = useState(false);
+  const [storage, setStorage] = useState<{ cachedBytes: number; cachedItems: number; persisted: boolean } | null>(null);
+  const [clearing, setClearing] = useState(false);
+  const refreshStorage = () => void localMediaStats().then(setStorage).catch(() => setStorage(null));
+  useEffect(() => { if (storageOpen) refreshStorage(); }, [storageOpen]);
+  const clearStorage = async (keepPinned: boolean) => {
+    setClearing(true);
+    try { await clearLocalMedia(keepPinned); refreshStorage(); } finally { setClearing(false); }
+  };
+  const storageText = storage ? `${storage.cachedItems} 项 · ${storage.cachedBytes >= 1024 ** 3 ? `${(storage.cachedBytes / 1024 ** 3).toFixed(1)} GB` : `${Math.round(storage.cachedBytes / 1024 ** 2)} MB`}` : "读取中";
   return <div className="account-menu" role="menu" aria-label="账号菜单" onClick={(event) => event.stopPropagation()}>
     <div className="account-menu__identity"><div className="account-menu__avatar"><UserAvatar user={user} /></div><span><b>{user.name}</b><small>{user.email}</small></span></div>
     <div className="account-menu__space"><span>企业创作空间</span><small>项目与成片仅你可见</small></div>
     <div className="account-menu__actions">
+      <button role="menuitem" aria-expanded={storageOpen} onClick={() => setStorageOpen((open) => !open)}><Archive /><span>本机媒体<small>{storageText}</small></span><ChevronRight /></button>
+      {storageOpen && <div className="account-menu__storage" role="group" aria-label="本机媒体管理"><p>{storage?.persisted ? "已获得持久存储保护" : "由浏览器按可用空间管理"}</p><div><button disabled={clearing} onClick={() => void clearStorage(true)}>清理临时缓存</button><button disabled={clearing} onClick={() => void clearStorage(false)}>清理全部副本</button></div></div>}
       <button role="menuitem" onClick={() => { close(); home(); }}><Home /><span>返回首页</span><ChevronRight /></button>
       <button role="menuitem" onClick={() => { close(); logout(); }}><LogOut /><span>退出登录</span></button>
     </div>
@@ -285,6 +303,8 @@ function AccountMenu({ user, close, home, logout }: { user: SessionUser; close: 
 
 function AssetPreview({ task, close, onDelete, initialTime, onPosition }: { task: Task; close: () => void; onDelete: (task: Task) => void; initialTime: number; onPosition: (time: number) => void }) {
   const [state, setState] = useState<MediaState>("loading"); const [retryCount, setRetryCount] = useState(0); const [downloadNotice, setDownloadNotice] = useState("");
+  const { source: videoSource } = useLocalMediaSource(task.localMedia?.preview, { warm: false, switchWhenReady: false });
+  const { source: posterSource } = useLocalMediaSource(task.localMedia?.poster, { warm: true, switchWhenReady: true });
   const startedAt = useRef(Date.now()); const readyOnce = useRef(false); const bufferingStartedAt = useRef<number | null>(null); const resumeTime = useRef(initialTime); const retryTimer = useRef<number | null>(null); const bufferWatchdog = useRef<number | null>(null); const automaticRecoveries = useRef(0); const dialogRef = useRef<HTMLDivElement>(null); const videoRef = useRef<HTMLVideoElement>(null);
   useEffect(() => () => { if (retryTimer.current !== null) window.clearTimeout(retryTimer.current); if (bufferWatchdog.current !== null) window.clearTimeout(bufferWatchdog.current); }, []);
   useEffect(() => {
@@ -336,7 +356,7 @@ function AssetPreview({ task, close, onDelete, initialTime, onPosition }: { task
     <div ref={dialogRef} className="asset-preview" onKeyDown={handleDialogKeyDown} onClick={(event) => event.stopPropagation()}>
       <header><div><span>视频预览</span><h2 id="asset-preview-title">{task.prompt || "参考素材生成"}</h2></div><button data-modal-initial aria-label="关闭预览" onClick={close}><X /></button></header>
       <div className="asset-preview__stage">
-        <video ref={videoRef} key={`${task.id}-${task.mediaRevision ?? 0}-${retryCount}`} src={task.videoUrl} poster={task.posterUrl} controls playsInline preload="auto" onLoadedMetadata={(event) => { const video = event.currentTarget; if (resumeTime.current > 0 && Number.isFinite(video.duration) && resumeTime.current < video.duration - 1) video.currentTime = Math.min(resumeTime.current, Math.max(0, video.duration - 0.1)); reportMediaEvent(task.id, "metadata", startedAt.current, video); }} onTimeUpdate={(event) => { const time = event.currentTarget.currentTime; if (Number.isFinite(time)) onPosition(Math.max(0, time)); }} onEnded={() => onPosition(0)} onCanPlay={(event) => { const firstCanPlay = !readyOnce.current; readyOnce.current = true; setState("ready"); if (firstCanPlay) reportMediaEvent(task.id, "canplay", startedAt.current, event.currentTarget); }} onPlaying={(event) => { clearBufferWatchdog(); const bufferingMs = bufferingStartedAt.current === null ? undefined : Math.min(3600 * 1000, Date.now() - bufferingStartedAt.current); bufferingStartedAt.current = null; setState("ready"); reportMediaEvent(task.id, "playing", startedAt.current, event.currentTarget, bufferingMs); }} onWaiting={(event) => beginBufferRecovery(event.currentTarget, "waiting")} onStalled={(event) => beginBufferRecovery(event.currentTarget, "stalled")} onError={(event) => failed(event.currentTarget)} />
+        <video ref={videoRef} key={`${task.id}-${task.mediaRevision ?? 0}-${retryCount}`} src={videoSource ?? task.videoUrl} poster={posterSource ?? task.posterUrl} controls playsInline preload="auto" onLoadedMetadata={(event) => { const video = event.currentTarget; if (resumeTime.current > 0 && Number.isFinite(video.duration) && resumeTime.current < video.duration - 1) video.currentTime = Math.min(resumeTime.current, Math.max(0, video.duration - 0.1)); reportMediaEvent(task.id, "metadata", startedAt.current, video); }} onTimeUpdate={(event) => { const time = event.currentTarget.currentTime; if (Number.isFinite(time)) onPosition(Math.max(0, time)); }} onEnded={() => { onPosition(0); void warmLocalMedia(task.localMedia?.preview); }} onCanPlay={(event) => { const firstCanPlay = !readyOnce.current; readyOnce.current = true; setState("ready"); if (event.currentTarget.paused) void warmLocalMedia(task.localMedia?.preview); if (firstCanPlay) reportMediaEvent(task.id, "canplay", startedAt.current, event.currentTarget); }} onPlaying={(event) => { clearBufferWatchdog(); const bufferingMs = bufferingStartedAt.current === null ? undefined : Math.min(3600 * 1000, Date.now() - bufferingStartedAt.current); bufferingStartedAt.current = null; setState("ready"); reportMediaEvent(task.id, "playing", startedAt.current, event.currentTarget, bufferingMs); }} onPause={() => void warmLocalMedia(task.localMedia?.preview)} onWaiting={(event) => beginBufferRecovery(event.currentTarget, "waiting")} onStalled={(event) => beginBufferRecovery(event.currentTarget, "stalled")} onError={(event) => failed(event.currentTarget)} />
         {state !== "ready" && <div className={`asset-preview__status asset-preview__status--${state}`} aria-live="polite"><div className="film-window"><Film /><span /><i /></div><b>{state === "error" ? navigator.onLine ? "预览连接失败" : "网络连接已断开" : state === "buffering" ? "正在继续缓冲" : "正在载入成片"}</b><small>{state === "error" ? navigator.onLine ? "播放位置已保留，可重新加载" : "网络恢复后将自动重新连接" : "正在从北京媒体存储准备画面"}</small>{state === "error" && navigator.onLine && <button onClick={retry}><RefreshCw /> 重新加载</button>}</div>}
       </div>
       <footer><span>{downloadNotice || `${new Date(task.createdAt).toLocaleString("zh-CN")} · ${task.resolution} · ${task.ratio}`}</span><div><CaseIdButton task={task} /><button onClick={() => { close(); onDelete(task); }}><Trash2 /> 删除</button>{task.downloadUrl ? <a href={task.downloadUrl} target="_blank" rel="noreferrer" onClick={() => { setDownloadNotice("原片已交给浏览器下载器，可在下载列表中继续"); reportMediaEvent(task.id, "download_click", startedAt.current); }}><Download /> 下载原片</a> : <button disabled><Download /> 原片暂不可用</button>}</div></footer>
@@ -392,6 +412,13 @@ function AssetArchive({ tasks, imageResults, models, onCreate, onDelete, onRemov
   </div>;
 }
 
+function GeneratedImageThumbnail({ item, alt }: { item: ImageGenItem; alt: string }) {
+  const remote = `/api/image-media/${encodeURIComponent(item.mediaId)}?variant=thumbnail`;
+  const { source } = useLocalMediaSource(item.localMedia?.thumbnail, { warm: true, switchWhenReady: true });
+  useEffect(() => { void warmLocalMedia(item.localMedia?.original); }, [item.localMedia?.original?.cacheKey, item.localMedia?.original?.revision]);
+  return <RecoveringThumbnail src={source ?? remote} alt={alt} loading="lazy" decoding="async" />;
+}
+
 function ImageResultsGallery({ results, onInsertCanvas, onRemove, onReedit, reeditBusyId }: { results: ImageResultBundle[]; onInsertCanvas: (target: { kind: "generated"; mediaId: string; title: string }) => void; onRemove: (id: string) => void; onReedit: (kind: "video" | "image", id: string) => void; reeditBusyId: string | null }) {
   if (!results.length) return null;
   return <section className="image-results" aria-label="图片生成结果">
@@ -400,7 +427,7 @@ function ImageResultsGallery({ results, onInsertCanvas, onRemove, onReedit, reed
       {result.prompt && <p className="image-result__prompt" title={result.prompt}>「{result.prompt}」</p>}
       {status === "generating" ? <div className="image-result__pending" role="status"><span className="image-result__pending-mark"><WandSparkles /></span><span><b>{result.error ? "正在确认提交" : "请求已接收"}</b><small>{result.error ?? "正在生成画面，完成后会自动显示在这里。"}</small></span><div className="image-result__pending-cells" aria-hidden="true">{Array.from({ length: Math.min(4, Math.max(1, count)) }, (_, index) => <i key={index} />)}</div></div> : status === "failed" ? <div className="image-result__failure" role="alert"><X /><span><b>这次没有生成成功</b><small>{result.error ?? "请检查网络或调整参数后重新生成。"}</small></span></div> : <div className="image-result__grid">
         {result.items.map((item) => <figure key={item.mediaId} style={{ aspectRatio: result.ratio.replace(":", " / ") }}>
-          <RecoveringThumbnail src={"/api/image-media/" + encodeURIComponent(item.mediaId) + "?variant=thumbnail"} alt={result.prompt || "生成图片"} loading="lazy" decoding="async" />
+          <GeneratedImageThumbnail item={item} alt={result.prompt || "生成图片"} />
           <figcaption>
             <a href={"/api/image-media/" + encodeURIComponent(item.mediaId) + "?download=1"} download title="下载图片"><Download /> 下载</a>
             <button onClick={() => onInsertCanvas({ kind: "generated", mediaId: item.mediaId, title: (result.prompt || "生成图片").slice(0, 24) })} title="插入画布"><LayoutGrid /> 插入画布</button>
@@ -661,7 +688,20 @@ export function App() {
   const navigate = (path: string) => { markClientRouteStart(path); history.pushState({}, "", path); setRoute(path); };
   useEffect(() => { const pop = () => setRoute(location.pathname); addEventListener("popstate", pop); return () => removeEventListener("popstate", pop); }, []);
   useEffect(() => { let active = true; setAuthError(false); bootstrapSession({ load: () => api.get<{ authenticated: boolean; user?: SessionUser }>("/api/auth/session", { timeoutMs: 8000 }), activateMediaScope: scopePrivateMediaCacheToUser, deactivateMediaScope: deactivatePrivateMediaCacheScope }).then((user) => { if (active) setAuth(user); }).catch(() => { void deactivatePrivateMediaCacheScope(); if (active) setAuthError(true); }); return () => { active = false; }; }, [authRetry]);
-  useEffect(() => listenForSignedOut((reason) => { if (reason === "explicit" && auth?.id) { void assetMetadataCache.clear(auth.id); void composerDraftCache.clearUser(auth.id); void forgetPrivateMediaCacheUser(); } else void deactivatePrivateMediaCacheScope(); setAuth(null); }), [auth?.id]);
+  useEffect(() => {
+    let cancelled = false;
+    if (!auth?.id) { void deactivateLocalMediaCache(false); return; }
+    void api.get<{ enabled: boolean; studio: boolean; canvas: boolean; uploadResume: boolean }>("/api/local-media/config")
+      .then((flags) => {
+        if (cancelled) return;
+        configureLocalMedia({ uploadResume: flags.enabled && flags.uploadResume });
+        const allowed = flags.enabled && (route.startsWith("/studio/canvas") ? flags.canvas : flags.studio);
+        if (allowed) activateLocalMediaCache(auth.id); else void deactivateLocalMediaCache(false);
+      })
+      .catch(() => { if (!cancelled) void deactivateLocalMediaCache(false); });
+    return () => { cancelled = true; };
+  }, [auth?.id, route]);
+  useEffect(() => listenForSignedOut((reason) => { if (reason === "explicit" && auth?.id) { void assetMetadataCache.clear(auth.id); void composerDraftCache.clearUser(auth.id); void forgetPrivateMediaCacheUser(); void deactivateLocalMediaCache(true); } else { void deactivatePrivateMediaCacheScope(); void deactivateLocalMediaCache(false); } setAuth(null); }), [auth?.id]);
   if (route === "/") return <Landing enter={() => navigate("/studio")} />;
   if (auth === undefined) return <main className="boot"><FireflyMark />{authError ? <div className="boot-recovery" role="alert"><p>暂时无法确认登录状态</p><small>网络或会话服务正在恢复，你的登录 Cookie 没有被清除。</small><button className="primary-button" onClick={() => setAuthRetry((value) => value + 1)}><RefreshCw /> 重新连接</button></div> : <LoaderCircle className="spin" />}</main>;
   if (!auth) return <AccessGate back={() => navigate("/")} />;

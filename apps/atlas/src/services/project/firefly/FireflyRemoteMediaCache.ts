@@ -2,6 +2,7 @@ import type { MediaFile } from '../../../stores/mediaStore';
 import { projectFileService } from '../../projectFileService';
 import { PROJECT_FOLDERS } from '../core/constants';
 import { buildRawTargetPath } from '../core/rawPath';
+import { materializeAtlasLocalMedia } from '../../../firefly/local-media';
 
 const CACHE_FOLDER = 'FireflyGenerated';
 const inFlight = new Map<string, Promise<MaterializedFireflyMedia>>();
@@ -92,6 +93,17 @@ async function materialize(
   const assetId = mediaFile.fireflyProjectAssetId;
   const remoteSourcePath = mediaFile.remoteSourcePath;
   if (!assetId || !remoteSourcePath) throw new Error('Firefly remote media source is incomplete');
+
+  if (mediaFile.localMediaDescriptor) {
+    try {
+      const shared = await materializeAtlasLocalMedia(mediaFile.localMediaDescriptor);
+      dependencies.onProgress?.(100);
+      return { ...shared, relativePath: `firefly-local-media/${mediaFile.localMediaDescriptor.cacheKey}` };
+    } catch {
+      // Feature-disabled, unavailable and quota-failure paths retain Atlas's
+      // proven project-local streaming fallback below.
+    }
+  }
 
   const projectHandle = dependencies.projectHandle ?? projectFileService.getProjectHandle();
   if (!projectHandle || (!dependencies.projectHandle && projectFileService.activeBackend !== 'firefly')) {
