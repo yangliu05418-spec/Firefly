@@ -151,6 +151,7 @@ jobs:
           grep -q 'api/atlas/projects.*checkpoints.*complete' ops/firefly.nginx.conf
           grep -q 'api/atlas/projects.*uploads.*complete' ops/firefly.nginx.conf
           grep -q 'FIREFLY_BACKUP_ALLOW_LOCAL_FALLBACK=true TOS_BACKUP_REQUEST_TIMEOUT_MS=60000' ops/firefly-deploy.sh
+          grep -q 'node dist-server/tos-admin.js' ops/firefly-deploy.sh
           grep -q 'ALLOW_LOCAL_BACKUP_FALLBACK' ops/backup-db.mjs
           grep -q 'label=\$firefly_image_label' ops/firefly-deploy.sh
           grep -q "builder prune -af --filter 'until=24h'" ops/firefly-deploy.sh

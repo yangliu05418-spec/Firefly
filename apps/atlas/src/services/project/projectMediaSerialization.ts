@@ -55,6 +55,7 @@ export function convertMediaFiles(files: MediaFile[]): ProjectMediaFile[] {
       sourcePath: file.liveInput ? `live:${file.id}` : file.filePath || file.name,
       fireflyProjectAssetId: file.fireflyProjectAssetId,
       remoteSourcePath: file.remoteSourcePath,
+      localMediaDescriptor: file.localMediaDescriptor,
       projectPath: file.projectPath,
       fileHash: file.fileHash,
       duration: file.duration,

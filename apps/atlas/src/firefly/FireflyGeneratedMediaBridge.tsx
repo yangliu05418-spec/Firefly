@@ -1,8 +1,9 @@
 import { useEffect } from 'react';
 import { useMediaStore } from '../stores/mediaStore';
 import { useFireflyEmbedding } from './FireflyEmbeddingContext';
+import { activateAtlasLocalMedia, closeAtlasLocalMedia, type LocalMediaDescriptor } from './local-media';
 
-type ProjectAsset = { id: string; fileName: string; kind: 'image' | 'video' | 'audio'; size: number; status: string; mediaUrl?: string };
+type ProjectAsset = { id: string; fileName: string; kind: 'image' | 'video' | 'audio'; size: number; status: string; mediaUrl?: string; localMedia?: LocalMediaDescriptor };
 const PAGE_SIZE = 100;
 const MAX_RECONCILE_ASSETS = 1000;
 
@@ -27,7 +28,8 @@ export function FireflyGeneratedMediaBridge() {
   const embedding = useFireflyEmbedding();
 
   useEffect(() => {
-    if (!embedding?.projectId) return;
+    if (!embedding?.projectId || !embedding.user.id) return;
+    activateAtlasLocalMedia(embedding.user.id);
     let stopped = false;
     let inFlight: Promise<void> | undefined;
     let controller: AbortController | undefined;
@@ -41,6 +43,7 @@ export function FireflyGeneratedMediaBridge() {
             if (asset.status !== 'ready' || !asset.mediaUrl) continue;
             useMediaStore.getState().registerFireflyRemoteAsset({
               id: asset.id, name: asset.fileName, kind: asset.kind, mediaUrl: asset.mediaUrl, size: asset.size,
+              localMedia: asset.localMedia,
             });
           }
         })
@@ -59,6 +62,7 @@ export function FireflyGeneratedMediaBridge() {
       window.removeEventListener('online', refresh);
       window.removeEventListener(FIREFLY_ATLAS_MEDIA_REFRESH_EVENT, refresh);
       document.removeEventListener('visibilitychange', refresh);
+      closeAtlasLocalMedia();
     };
   }, [embedding?.projectId]);
 

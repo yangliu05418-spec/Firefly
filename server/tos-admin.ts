@@ -9,8 +9,8 @@ await tos.putBucketCORS({
   CORSRules: [{
     AllowedOrigins: [config.origin],
     AllowedMethods: [HttpMethodType.HttpMethodGet, HttpMethodType.HttpMethodHead, HttpMethodType.HttpMethodPut],
-    AllowedHeaders: ["Content-Type", "Content-MD5", "x-tos-*"],
-    ExposeHeaders: ["ETag", "x-tos-request-id"],
+    AllowedHeaders: ["Range", "Content-Type", "Content-MD5", "x-tos-*"],
+    ExposeHeaders: ["ETag", "Accept-Ranges", "Content-Range", "Content-Length", "x-tos-request-id"],
     MaxAgeSeconds: 3600,
     ResponseVary: true
   }]

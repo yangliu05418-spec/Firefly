@@ -177,6 +177,7 @@ export async function convertProjectMediaToStore(
       url: runtimeSources.representativeUrl,
       fireflyProjectAssetId: pm.fireflyProjectAssetId,
       remoteSourcePath: pm.remoteSourcePath,
+      localMediaDescriptor: pm.localMediaDescriptor,
       thumbnailUrl: runtimeSources.thumbnailUrl,
       duration: pm.duration,
       width: pm.width,

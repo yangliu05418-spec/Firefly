@@ -3,6 +3,7 @@ import express, { type NextFunction, type Request, type RequestHandler, type Res
 import { z } from "zod";
 import { AtlasStore, type AtlasGenerationDestination, type AtlasGlobalAssetRegistration, type AtlasMediaKind, type AtlasProject, type AtlasProjectAsset, type AtlasTransfer, type AtlasTransferPart } from "./atlas-store.js";
 import { AtlasImportError, importFireflySourceIntoAtlasProject } from "./atlas-import-service.js";
+import { publicLocalMediaFromSource } from "./local-media-public.js";
 
 const GIB = 1024 * 1024 * 1024;
 const DEFAULT_PART_SIZE = 16 * 1024 * 1024;
@@ -84,12 +85,25 @@ const publicProject = (project: AtlasProject) => ({
   hasCheckpoint: Boolean(project.latestVersionId), leaseDeviceId: project.leaseDeviceId,
   leaseExpiresAt: project.leaseExpiresAt, createdAt: project.createdAt, updatedAt: project.updatedAt,
 });
-const publicAsset = (asset: AtlasProjectAsset) => ({
-  id: asset.id, projectId: asset.projectId, sourceType: asset.sourceType, sourceId: asset.sourceId,
-  kind: asset.kind, fileName: asset.fileName, contentType: asset.contentType, size: asset.size,
-  status: asset.status, error: asset.error, createdAt: asset.createdAt, updatedAt: asset.updatedAt,
-  mediaUrl: asset.status === "ready" ? `/api/atlas/project-assets/${asset.id}/media` : undefined,
-});
+const publicAsset = (asset: AtlasProjectAsset) => {
+  const mediaUrl = asset.status === "ready" ? `/api/atlas/project-assets/${asset.id}/media` : undefined;
+  return {
+    id: asset.id, projectId: asset.projectId, sourceType: asset.sourceType, sourceId: asset.sourceId,
+    kind: asset.kind, fileName: asset.fileName, contentType: asset.contentType, size: asset.size,
+    status: asset.status, error: asset.error, createdAt: asset.createdAt, updatedAt: asset.updatedAt,
+    mediaUrl,
+    localMedia: mediaUrl ? publicLocalMediaFromSource({
+      sourceId: asset.objectKey,
+      revision: `${asset.etag}\0${asset.size}\0${asset.contentType}\0identity`,
+      variant: asset.kind === "image" ? "original" : "preview",
+      mediaType: asset.kind,
+      contentType: asset.contentType,
+      size: asset.size,
+      url: mediaUrl,
+      cachePolicy: "pin",
+    }) : undefined,
+  };
+};
 const publicDestination = (destination: AtlasGenerationDestination) => ({
   id: destination.id, projectId: destination.projectId, sessionId: destination.sessionId,
   sourceType: destination.sourceType, sourceId: destination.sourceId, outputKey: destination.outputKey,

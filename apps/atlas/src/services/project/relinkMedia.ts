@@ -181,7 +181,13 @@ export function isNativeProjectLinkedMedia(mediaFile: MediaFile): boolean {
 }
 
 export function mediaNeedsRelink(mediaFile: MediaFile): boolean {
-  return !mediaFile.liveInput && !mediaFile.file && !isNativeProjectLinkedMedia(mediaFile);
+  const hasRecoverableFireflySource = Boolean(
+    mediaFile.fireflyProjectAssetId && mediaFile.remoteSourcePath,
+  );
+  return !mediaFile.liveInput
+    && !mediaFile.file
+    && !hasRecoverableFireflySource
+    && !isNativeProjectLinkedMedia(mediaFile);
 }
 
 function replaceMediaFile(mediaFileId: string, nextFile: Partial<MediaFile>): void {

@@ -82,8 +82,12 @@ const audit = async () => {
   const corsValid = Boolean(matchingCors
     && [...requiredMethods].every((method) => methods.has(method))
     && allowedHeaders.has("content-type")
+    && allowedHeaders.has("range")
     && allowedHeaders.has("x-tos-*")
     && exposedHeaders.has("etag")
+    && exposedHeaders.has("accept-ranges")
+    && exposedHeaders.has("content-range")
+    && exposedHeaders.has("content-length")
     && exposedHeaders.has("x-tos-request-id")
     && matchingCors.ResponseVary);
   const inputRetention = lifecycleRules.find((rule) => rule.ID === "firefly-input-retention");

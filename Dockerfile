@@ -6,6 +6,7 @@ COPY apps/atlas/index.html apps/atlas/tsconfig.json apps/atlas/tsconfig.app.json
 # Atlas is the proven upstream editor runtime. Copy the complete source tree;
 # Firefly only replaces its outer control-plane boundary.
 COPY apps/atlas/src ./src
+COPY packages /packages
 RUN VITE_APP_VARIANT=firefly npm run build
 
 FROM node:22-bookworm-slim AS build
@@ -17,6 +18,7 @@ COPY tsconfig.json tsconfig.server.json vite.config.ts index.html ./
 COPY Design ./Design
 COPY public ./public
 COPY src ./src
+COPY packages ./packages
 COPY server ./server
 RUN npm run build
 

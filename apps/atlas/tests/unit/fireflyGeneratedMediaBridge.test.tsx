@@ -32,6 +32,7 @@ describe('Firefly generated media bridge', () => {
     }));
     const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input);
+      if (url === '/api/local-media/config') return new Response(JSON.stringify({ enabled: true, atlas: true }), { status: 200 });
       if (url.includes('offset=0')) return new Response(JSON.stringify({ items: firstPage }), { status: 200 });
       if (url.includes('offset=100')) return new Response(JSON.stringify({ items: [
         { id: 'asset-100', fileName: '成片.png', kind: 'image', size: 2_000, status: 'ready', mediaUrl: '/api/atlas/project-assets/asset-100/media' },
@@ -42,13 +43,13 @@ describe('Firefly generated media bridge', () => {
 
     render(<FireflyEmbeddingProvider value={embedding}><FireflyGeneratedMediaBridge /></FireflyEmbeddingProvider>);
     await waitFor(() => expect(mocks.register).toHaveBeenCalledTimes(101));
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher).toHaveBeenCalledTimes(3);
     expect(mocks.register).toHaveBeenCalledWith(expect.objectContaining({
       id: 'asset-100', kind: 'image', mediaUrl: '/api/atlas/project-assets/asset-100/media',
     }));
 
     act(() => window.dispatchEvent(new Event(FIREFLY_ATLAS_MEDIA_REFRESH_EVENT)));
     await waitFor(() => expect(mocks.register).toHaveBeenCalledTimes(202));
-    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(fetcher).toHaveBeenCalledTimes(5);
   });
 });

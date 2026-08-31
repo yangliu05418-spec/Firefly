@@ -3,6 +3,7 @@ import type { MediaFile } from '../../src/stores/mediaStore';
 import {
   findRelinkMatch,
   getRelinkExpectedFileNames,
+  mediaNeedsRelink,
   type RelinkCandidate,
   type RelinkCandidateMap,
 } from '../../src/services/project/relinkMedia';
@@ -19,6 +20,35 @@ function candidateMap(...names: string[]): RelinkCandidateMap {
 }
 
 describe('relink media matching', () => {
+  it('does not require relinking for a durable Firefly project asset', () => {
+    const mediaFile = {
+      id: 'media-firefly',
+      name: 'generated.mp4',
+      type: 'video',
+      parentId: null,
+      createdAt: 1,
+      url: '/api/atlas/project-assets/asset-1/media',
+      fireflyProjectAssetId: 'asset-1',
+      remoteSourcePath: '/api/atlas/project-assets/asset-1/media',
+    } as MediaFile;
+
+    expect(mediaNeedsRelink(mediaFile)).toBe(false);
+  });
+
+  it('still requires relinking when a Firefly source is incomplete', () => {
+    const mediaFile = {
+      id: 'media-incomplete',
+      name: 'missing.mp4',
+      type: 'video',
+      parentId: null,
+      createdAt: 1,
+      url: '',
+      fireflyProjectAssetId: 'asset-1',
+    } as MediaFile;
+
+    expect(mediaNeedsRelink(mediaFile)).toBe(true);
+  });
+
   it('matches gaussian splat sequences by frame names instead of display name', () => {
     const mediaFile = {
       id: 'media-splat-seq',

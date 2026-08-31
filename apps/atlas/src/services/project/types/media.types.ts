@@ -18,6 +18,7 @@ export interface ProjectMediaFile {
   sourcePath: string;
   fireflyProjectAssetId?: string;
   remoteSourcePath?: string;
+  localMediaDescriptor?: import('../../../firefly/local-media').LocalMediaDescriptor;
 
   // Path to copied file in project folder (e.g., "Raw/video.mp4")
   projectPath?: string;

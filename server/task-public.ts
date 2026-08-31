@@ -1,5 +1,6 @@
 import type { StoredTask } from "./db.js";
 import { classifyProviderError, providerPublicMessage } from "./provider.js";
+import type { PublicLocalMediaDescriptor } from "./local-media-public.js";
 
 const publicFailure = (error: string | undefined, errorCode: string | undefined) => {
   if (!error) return undefined;
@@ -24,7 +25,8 @@ export const publicTask = (
     stablePreviewReady = false,
     stablePosterReady = false,
     outputIsPreview = true,
-  }: { stableOutputReady?: boolean; stablePreviewReady?: boolean; stablePosterReady?: boolean; outputIsPreview?: boolean } = {},
+    localMedia,
+  }: { stableOutputReady?: boolean; stablePreviewReady?: boolean; stablePosterReady?: boolean; outputIsPreview?: boolean; localMedia?: { preview?: PublicLocalMediaDescriptor; poster?: PublicLocalMediaDescriptor; original?: PublicLocalMediaDescriptor } } = {},
 ) => {
   const revision = task.mediaRevision ?? 0;
   const downloadable = task.status === "succeeded" && task.mediaStatus === "ready" && stableOutputReady;
@@ -53,6 +55,7 @@ export const publicTask = (
     downloadUrl: downloadable || temporaryOriginalAvailable ? `/api/generations/${task.id}/download?rev=${revision}` : undefined,
     posterStatus,
     posterUrl: posterReady ? `/api/generations/${task.id}/poster?rev=${revision}` : undefined,
+    localMedia,
     temporaryVideoUrl: temporary ? sourceVideoUrl : undefined,
     temporaryVideoExpiresAt: temporary ? sourceVideoExpiresAt : undefined,
     mediaSource: previewable ? ("tos" as const) : undefined

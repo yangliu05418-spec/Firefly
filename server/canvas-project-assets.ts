@@ -5,6 +5,7 @@ import { users } from "./store.js";
 import { signedObjectUrl, signedProviderObjectUrl } from "./tos.js";
 import { stablePreviewUrl } from "./preview-url-cache.js";
 import type { GenerationInput } from "./provider.js";
+import { publicLocalMediaFromSource } from "./local-media-public.js";
 
 export type ResolvedCanvasProjectMedia = {
   objectKey: string;
@@ -85,23 +86,48 @@ export const resolveCanvasGenerationReferences = (
   }),
 });
 
-export const publicCanvasProjectAsset = (asset: CanvasProjectAsset) => ({
-  id: asset.id,
-  canvasId: asset.canvasId,
-  kind: asset.kind,
-  title: asset.title,
-  contentType: asset.contentType,
-  size: asset.size,
-  width: asset.width,
-  height: asset.height,
-  durationMs: asset.durationMs,
-  status: asset.status,
-  createdAt: asset.createdAt,
-  updatedAt: asset.updatedAt,
-  mediaUrl: `/api/canvas-project-assets/${encodeURIComponent(asset.id)}/media`,
-  thumbnailUrl: `/api/canvas-project-assets/${encodeURIComponent(asset.id)}/media${asset.kind === "image" ? "?variant=thumbnail" : ""}`,
-  downloadUrl: `/api/canvas-project-assets/${encodeURIComponent(asset.id)}/media?download=1`,
-});
+export const publicCanvasProjectAsset = (asset: CanvasProjectAsset) => {
+  const baseUrl = `/api/canvas-project-assets/${encodeURIComponent(asset.id)}/media`;
+  const mediaReady = asset.status === "ready";
+  return {
+    id: asset.id,
+    canvasId: asset.canvasId,
+    kind: asset.kind,
+    title: asset.title,
+    contentType: asset.contentType,
+    size: asset.size,
+    width: asset.width,
+    height: asset.height,
+    durationMs: asset.durationMs,
+    status: asset.status,
+    createdAt: asset.createdAt,
+    updatedAt: asset.updatedAt,
+    mediaUrl: baseUrl,
+    thumbnailUrl: `${baseUrl}${asset.kind === "image" ? "?variant=thumbnail" : ""}`,
+    downloadUrl: `${baseUrl}?download=1`,
+    localMedia: mediaReady ? {
+      preview: publicLocalMediaFromSource({
+        sourceId: `canvas-project:${asset.id}`,
+        revision: `canvas-project:${asset.id}\0${asset.updatedAt}\0${asset.size}\0${asset.contentType}\0identity`,
+        variant: asset.kind === "image" ? "original" : "preview",
+        mediaType: asset.kind,
+        contentType: asset.contentType,
+        size: asset.size,
+        url: baseUrl,
+        cachePolicy: "pin",
+      }),
+      thumbnail: asset.kind === "image" ? publicLocalMediaFromSource({
+        sourceId: `canvas-project:${asset.id}:thumbnail:960`,
+        revision: `canvas-project:${asset.id}\0${asset.updatedAt}\0${asset.size}\0${asset.contentType}\0image/resize,w_960/format,webp`,
+        variant: "thumbnail",
+        mediaType: "image",
+        contentType: "image/webp",
+        url: `${baseUrl}?variant=thumbnail`,
+        cachePolicy: "warm",
+      }) : undefined,
+    } : undefined,
+  };
+};
 
 export const createCanvasProjectMediaHandler = (deps: {
   readAsset: (id: string) => CanvasProjectAsset | null;
