@@ -9,7 +9,7 @@ export type ThemeMode = 'dark' | 'light' | 'midnight' | 'system' | 'crazy' | 'cu
 export type TranscriptionProvider = 'local' | 'openai' | 'deepgram' | 'hybrid';
 
 // Preview quality options (multiplier on base resolution)
-export type PreviewQuality = 1 | 0.5 | 0.25;
+export type PreviewQuality = 1 | 0.5 | 0.25 | 0.125;
 
 // GPU power preference options
 export type GPUPowerPreference = 'high-performance' | 'low-power';

@@ -15,6 +15,12 @@ const themeOptions: { id: ThemeMode; label: string; bg: string; bar: string; acc
   { id: 'custom',   label: 'Custom',   bg: 'linear-gradient(135deg, hsl(210,30%,12%) 0%, hsl(210,30%,22%) 100%)', bar: 'hsl(210,30%,8%)', accent: 'hsl(210,70%,55%)' },
 ];
 
+const IS_FIREFLY_VARIANT = import.meta.env.VITE_APP_VARIANT === 'firefly';
+const ui = (zh: string, en: string) => IS_FIREFLY_VARIANT ? zh : en;
+const themeLabel = (theme: ThemeMode, fallback: string) => IS_FIREFLY_VARIANT
+  ? ({ dark: '深色', light: '浅色', midnight: '午夜', system: '跟随系统', crazy: '彩色', custom: '自定义' } as Record<ThemeMode, string>)[theme]
+  : fallback;
+
 /** Convert hue to a CSS color for the preview swatch */
 function hueToPreviewBg(hue: number, brightness: number): string {
   const isLight = brightness > 50;
@@ -42,14 +48,13 @@ export function AppearanceSettings() {
 
   return (
     <div className="settings-category-content">
-      <h2>Appearance</h2>
+      <h2>{ui('外观', 'Appearance')}</h2>
 
       <div className="settings-group">
-        <div className="settings-group-title">Interface Zoom</div>
+        <div className="settings-group-title">{ui('界面缩放', 'Interface Zoom')}</div>
         <p className="settings-group-hint" style={{ color: 'var(--text-secondary)', fontSize: 12, margin: '0 0 8px' }}>
-          Ctrl + Scroll zoom is disabled across the app to avoid accidental zoom. To scale the whole
-          interface, hold <strong>Ctrl</strong> and scroll inside the box below — it uses your browser's
-          native page zoom.
+          {ui('为避免误触，应用内不会响应 Ctrl + 滚轮。若要缩放整个界面，请在下方区域按住 ', 'Ctrl + Scroll zoom is disabled across the app to avoid accidental zoom. To scale the whole interface, hold ')}
+          <strong>Ctrl</strong>{ui(' 并滚动，Atlas 将使用浏览器原生页面缩放。', " and scroll inside the box below — it uses your browser's native page zoom.")}
         </p>
         <div
           data-browser-zoom-area
@@ -68,15 +73,15 @@ export function AppearanceSettings() {
             cursor: 'ns-resize',
           }}
         >
-          Ctrl + Scroll here to zoom the interface
+          {ui('在此按住 Ctrl 并滚动以缩放界面', 'Ctrl + Scroll here to zoom the interface')}
         </div>
       </div>
 
       <div className="settings-group">
-        <div className="settings-group-title">Text and Readability</div>
+        <div className="settings-group-title">{ui('文字与可读性', 'Text and Readability')}</div>
 
         <label className="settings-row shortcut-display-size-row">
-          <span className="settings-label">Interface text size</span>
+          <span className="settings-label">{ui('界面文字大小', 'Interface text size')}</span>
           <span className="shortcut-display-size-control">
             <input
               type="range"
@@ -92,22 +97,22 @@ export function AppearanceSettings() {
         </label>
 
         <label className="settings-row">
-          <span className="settings-label">Interface font</span>
+          <span className="settings-label">{ui('界面字体', 'Interface font')}</span>
           <select
             value={interfaceFontFamily}
             onChange={(event) => setInterfaceFontFamily(event.target.value as InterfaceFontFamily)}
             className="settings-select"
           >
-            <option value="system">System</option>
+            <option value="system">{ui('系统默认', 'System')}</option>
             <option value="segoe">Segoe UI</option>
             <option value="arial">Arial</option>
             <option value="verdana">Verdana</option>
-            <option value="mono">Monospace</option>
+            <option value="mono">{ui('等宽字体', 'Monospace')}</option>
           </select>
         </label>
 
         <label className="settings-row">
-          <span className="settings-label">High readability colors</span>
+          <span className="settings-label">{ui('高可读性配色', 'High readability colors')}</span>
           <input
             type="checkbox"
             checked={highReadabilityMode}
@@ -118,7 +123,7 @@ export function AppearanceSettings() {
       </div>
 
       <div className="settings-group">
-        <div className="settings-group-title">Theme</div>
+        <div className="settings-group-title">{ui('主题', 'Theme')}</div>
         <div className="theme-selector">
           {themeOptions.map((opt) => {
             const isCustomCard = opt.id === 'custom';
@@ -142,7 +147,7 @@ export function AppearanceSettings() {
                   <div className="theme-preview-bar" style={{ background: bar }} />
                   <div className="theme-preview-accent" style={{ background: accent }} />
                 </div>
-                <span className="theme-card-label">{opt.label}</span>
+                <span className="theme-card-label">{themeLabel(opt.id, opt.label)}</span>
               </label>
             );
           })}
@@ -151,11 +156,11 @@ export function AppearanceSettings() {
 
       {theme === 'custom' && (
         <div className="settings-group">
-          <div className="settings-group-title">Customize</div>
+          <div className="settings-group-title">{ui('自定义主题', 'Customize')}</div>
 
           <div className="custom-theme-controls">
             <div className="custom-theme-row">
-              <label className="custom-theme-label">Color</label>
+              <label className="custom-theme-label">{ui('色相', 'Color')}</label>
               <input
                 type="range"
                 min={0}
@@ -171,7 +176,7 @@ export function AppearanceSettings() {
             </div>
 
             <div className="custom-theme-row">
-              <label className="custom-theme-label">Brightness</label>
+              <label className="custom-theme-label">{ui('亮度', 'Brightness')}</label>
               <input
                 type="range"
                 min={0}
@@ -187,10 +192,10 @@ export function AppearanceSettings() {
       )}
 
       <div className="settings-group">
-        <div className="settings-group-title">Studio Surfaces</div>
+        <div className="settings-group-title">{ui('工作台材质', 'Studio Surfaces')}</div>
 
         <label className="settings-row">
-          <span className="settings-label">Wooden audio mixer theme</span>
+          <span className="settings-label">{ui('木质调音台主题', 'Wooden audio mixer theme')}</span>
           <input
             type="checkbox"
             checked={audioMixerWoodThemeEnabled}
@@ -200,7 +205,7 @@ export function AppearanceSettings() {
         </label>
 
         <label className="settings-row">
-          <span className="settings-label">Wooden media panel theme</span>
+          <span className="settings-label">{ui('木质素材面板主题', 'Wooden media panel theme')}</span>
           <input
             type="checkbox"
             checked={mediaPanelWoodThemeEnabled}
@@ -209,7 +214,7 @@ export function AppearanceSettings() {
           />
         </label>
         <p className="settings-hint">
-          Uses the wood, leather, brass, and metal skins for studio panels.
+          {ui('为工作台面板应用木材、皮革、黄铜与金属质感。', 'Uses the wood, leather, brass, and metal skins for studio panels.')}
         </p>
       </div>
     </div>

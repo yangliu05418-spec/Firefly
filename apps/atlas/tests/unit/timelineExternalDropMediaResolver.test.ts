@@ -1,4 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const remoteCache = vi.hoisted(() => ({ materialize: vi.fn() }));
+
+vi.mock('../../src/services/project/firefly/FireflyRemoteMediaCache', () => ({
+  materializeFireflyRemoteMedia: remoteCache.materialize,
+}));
 
 import {
   createPlaceholderFileForTimelineMedia,
@@ -7,6 +13,7 @@ import {
   setTimelineDroppedFilePath,
 } from '../../src/services/timeline/timelineExternalDropMediaResolver';
 import type { MediaFile } from '../../src/stores/mediaStore';
+import { useMediaStore } from '../../src/stores/mediaStore';
 
 function mediaFile(overrides: Partial<MediaFile>): MediaFile {
   return {
@@ -20,6 +27,10 @@ function mediaFile(overrides: Partial<MediaFile>): MediaFile {
 }
 
 describe('timeline external drop media resolver', () => {
+  afterEach(() => {
+    remoteCache.materialize.mockReset();
+    useMediaStore.setState({ files: [] });
+  });
   it('marks files with native paths for timeline placement', () => {
     const file = new File(['video'], 'clip.mp4', { type: 'video/mp4' });
 
@@ -64,5 +75,29 @@ describe('timeline external drop media resolver', () => {
       name: 'mesh.obj',
       type: 'model/obj',
     }));
+  });
+
+  it.each([
+    ['video', 'remote.mp4', 'video/mp4'],
+    ['image', 'remote.png', 'image/png'],
+  ] as const)('creates a %s timeline clip immediately while OPFS materializes in the background', async (type, name, contentType) => {
+    remoteCache.materialize.mockReturnValue(new Promise(() => undefined));
+    const remote = mediaFile({
+      id: `remote-${type}`,
+      name,
+      type,
+      fireflyProjectAssetId: `asset-${type}`,
+      remoteSourcePath: `/api/atlas/project-assets/asset-${type}/media`,
+      url: `/api/atlas/project-assets/asset-${type}/media`,
+      duration: type === 'video' ? 8 : undefined,
+      width: 1920,
+      height: 1080,
+    });
+    useMediaStore.setState({ files: [remote] });
+
+    const resolved = await resolveMediaFileForTimelineDrop(remote);
+
+    expect(resolved).toEqual(expect.objectContaining({ name, type: contentType, size: 0 }));
+    expect(remoteCache.materialize).toHaveBeenCalledWith(remote, expect.objectContaining({ onProgress: expect.any(Function) }));
   });
 });

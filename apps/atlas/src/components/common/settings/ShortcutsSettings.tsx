@@ -7,6 +7,10 @@ import { ACTION_META, PRESET_LIST, PRESETS } from '../../../services/shortcutPre
 import { getShortcutRegistry } from '../../../services/shortcutRegistry';
 import type { ShortcutPresetId, ShortcutCategory, ShortcutMap, KeyCombo, ShortcutActionId } from '../../../services/shortcutTypes';
 import { ShortcutRecorder } from './ShortcutRecorder';
+import { SHORTCUT_CATEGORY_ZH, SHORTCUT_LABEL_ZH } from './shortcutLabelsZh';
+
+const IS_FIREFLY_VARIANT = import.meta.env.VITE_APP_VARIANT === 'firefly';
+const ui = (zh: string, en: string) => IS_FIREFLY_VARIANT ? zh : en;
 
 const CATEGORIES_ORDER: ShortcutCategory[] = [
   'Playback',
@@ -17,6 +21,7 @@ const CATEGORIES_ORDER: ShortcutCategory[] = [
   'Preview',
   'Project',
   'History',
+  'Masking',
 ];
 
 export function ShortcutsSettings() {
@@ -112,14 +117,14 @@ export function ShortcutsSettings() {
 
   return (
     <div className="settings-category-content">
-      <h2>Keyboard Shortcuts</h2>
+      <h2>{ui('键盘快捷键', 'Keyboard Shortcuts')}</h2>
 
       {/* Preset Selection */}
       <div className="settings-group">
-        <div className="settings-group-title">Preset</div>
+        <div className="settings-group-title">{ui('预设方案', 'Preset')}</div>
 
         <label className="settings-row">
-          <span className="settings-label">Active Preset</span>
+          <span className="settings-label">{ui('当前方案', 'Active Preset')}</span>
           <select
             value={activeShortcutPreset}
             onChange={handlePresetChange}
@@ -136,10 +141,10 @@ export function ShortcutsSettings() {
         {shortcutOverrides && Object.keys(shortcutOverrides).length > 0 && (
           <div className="settings-row">
             <span className="settings-label">
-              {Object.keys(shortcutOverrides).length} custom override(s)
+              {ui(`${Object.keys(shortcutOverrides).length} 项自定义`, `${Object.keys(shortcutOverrides).length} custom override(s)`)}
             </span>
             <button className="settings-button shortcut-reset-all-btn" onClick={resetShortcutsToPreset}>
-              Reset All to Preset
+              {ui('全部恢复为预设', 'Reset All to Preset')}
             </button>
           </div>
         )}
@@ -147,13 +152,13 @@ export function ShortcutsSettings() {
 
       {/* Custom Presets */}
       <div className="settings-group">
-        <div className="settings-group-title">Custom Presets</div>
+        <div className="settings-group-title">{ui('自定义方案', 'Custom Presets')}</div>
 
         <div className="settings-row shortcut-custom-save">
           <input
             type="text"
             className="settings-input shortcut-preset-name-input"
-            placeholder="Preset name..."
+            placeholder={ui('方案名称…', 'Preset name...')}
             value={customPresetName}
             onChange={(e) => setCustomPresetName(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') handleSaveCustom(); }}
@@ -163,7 +168,7 @@ export function ShortcutsSettings() {
             onClick={handleSaveCustom}
             disabled={!customPresetName.trim()}
           >
-            Save Current
+            {ui('保存当前方案', 'Save Current')}
           </button>
         </div>
 
@@ -176,13 +181,13 @@ export function ShortcutsSettings() {
                   className="settings-button shortcut-custom-load-btn"
                   onClick={() => handleLoadCustom(preset.name)}
                 >
-                  Load
+                  {ui('载入', 'Load')}
                 </button>
                 <button
                   className="settings-button shortcut-custom-delete-btn"
                   onClick={() => handleDeleteCustom(preset.name)}
                 >
-                  Delete
+                  {ui('删除', 'Delete')}
                 </button>
               </div>
             ))}
@@ -195,7 +200,7 @@ export function ShortcutsSettings() {
         <input
           type="text"
           className="settings-input shortcut-search-input"
-          placeholder="Search shortcuts..."
+          placeholder={ui('搜索快捷键…', 'Search shortcuts...')}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
@@ -209,7 +214,7 @@ export function ShortcutsSettings() {
 
           return (
             <div key={cat} className="shortcut-category-group">
-              <div className="shortcut-category-title">{cat}</div>
+              <div className="shortcut-category-title">{IS_FIREFLY_VARIANT ? SHORTCUT_CATEGORY_ZH[cat] : cat}</div>
               {actions.map((meta) => {
                 const combos = effectiveMap[meta.id] || [];
                 const isOverridden = !!(shortcutOverrides && meta.id in shortcutOverrides);
@@ -220,7 +225,7 @@ export function ShortcutsSettings() {
                     key={meta.id}
                     className={`shortcut-row ${isOverridden ? 'shortcut-row--overridden' : ''}`}
                   >
-                    <span className="shortcut-action-label">{meta.label}</span>
+                    <span className="shortcut-action-label">{IS_FIREFLY_VARIANT ? SHORTCUT_LABEL_ZH[meta.id] ?? meta.label : meta.label}</span>
                     <ShortcutRecorder
                       combos={combos}
                       actionId={meta.id}

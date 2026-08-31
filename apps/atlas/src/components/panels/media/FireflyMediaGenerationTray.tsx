@@ -22,7 +22,9 @@ export function FireflyMediaGenerationTray({ expanded, onExpandedChange }: { exp
       const message = event.data as { channel?: unknown; type?: unknown; projectId?: unknown };
       if (message.channel !== channel || message.projectId !== embedding.projectId || typeof message.type !== 'string') return;
       if (message.type === 'CLOSE') onExpandedChange(false);
-      if (message.type === 'OUTPUT_READY') window.dispatchEvent(new Event(FIREFLY_ATLAS_MEDIA_REFRESH_EVENT));
+      if (message.type === 'TASK_STATUS' || message.type === 'OUTPUT_READY') {
+        window.dispatchEvent(new Event(FIREFLY_ATLAS_MEDIA_REFRESH_EVENT));
+      }
     };
     window.addEventListener('message', receive);
     return () => window.removeEventListener('message', receive);

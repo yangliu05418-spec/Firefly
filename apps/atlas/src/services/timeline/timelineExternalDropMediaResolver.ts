@@ -170,8 +170,9 @@ export async function resolveMediaFileForTimelineDrop(mediaFile: MediaFile): Pro
         ? { ...currentFile, remoteCacheStatus: 'downloading', remoteCacheProgress: 0 }
         : currentFile),
     }));
-    try {
-      const materialized = await materializeFireflyRemoteMedia(mediaFile, {
+    const materialize = async () => {
+      try {
+        const materialized = await materializeFireflyRemoteMedia(mediaFile, {
         onProgress: (progress) => {
           useMediaStore.setState((state) => ({
             files: state.files.map((currentFile) => currentFile.id === mediaFile.id
@@ -194,20 +195,36 @@ export async function resolveMediaFileForTimelineDrop(mediaFile: MediaFile): Pro
             }
           : currentFile),
       }));
-      return materialized.file;
-    } catch (error) {
-      useMediaStore.setState((state) => ({
-        files: state.files.map((currentFile) => currentFile.id === mediaFile.id
-          ? { ...currentFile, remoteCacheStatus: 'error' }
-          : currentFile),
-      }));
-      log.warn('Could not materialize Firefly project asset for timeline drop', {
-        mediaFileId: mediaFile.id,
-        fireflyProjectAssetId: mediaFile.fireflyProjectAssetId,
-        error,
-      });
-      return null;
+        return materialized.file;
+      } catch (error) {
+        useMediaStore.setState((state) => ({
+          files: state.files.map((currentFile) => currentFile.id === mediaFile.id
+            ? { ...currentFile, remoteCacheStatus: 'error' }
+            : currentFile),
+        }));
+        log.warn('Could not materialize Firefly project asset for timeline drop', {
+          mediaFileId: mediaFile.id,
+          fireflyProjectAssetId: mediaFile.fireflyProjectAssetId,
+          error,
+        });
+        return null;
+      }
+    };
+
+    // Firefly project assets already have a stable, authenticated remote URL.
+    // Creating the timeline clip must not wait for the complete object to be
+    // copied into OPFS. The renderer resolves the source by mediaFileId and can
+    // play that URL immediately; the original file is materialized in the
+    // background for subsequent scrubbing and offline editing.
+    if (mediaFile.type === 'video' || mediaFile.type === 'image') {
+      void materialize();
+      const contentType = mediaFile.type === 'image'
+        ? (mediaFile.name.toLowerCase().endsWith('.png') ? 'image/png' : mediaFile.name.toLowerCase().endsWith('.webp') ? 'image/webp' : 'image/jpeg')
+        : mediaFile.name.toLowerCase().endsWith('.mov') ? 'video/quicktime' : 'video/mp4';
+      return new File([], mediaFile.name, { type: contentType });
     }
+
+    return materialize();
   }
 
   if (mediaFile.type === 'model' || mediaFile.type === 'gaussian-splat') {

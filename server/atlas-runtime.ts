@@ -7,7 +7,7 @@ import { registerAtlasGlobalExport } from "./atlas-global-assets.js";
 import { OpenRouterAtlasAgentProvider } from "./atlas-agent-provider.js";
 import { AtlasAgentService } from "./atlas-agent-service.js";
 import { createAtlasAgentRouter, type AtlasAgentQueue } from "./atlas-agent-routes.js";
-import { createAtlasRouter, type AtlasImportSource, type AtlasStorageDependencies } from "./atlas-routes.js";
+import { createAtlasRouter, type AtlasAssetPresentation, type AtlasImportSource, type AtlasStorageDependencies } from "./atlas-routes.js";
 import { AtlasStore } from "./atlas-store.js";
 import { users } from "./store.js";
 import {
@@ -36,9 +36,27 @@ const mediaKind = (contentType: string): AtlasImportSource["kind"] | null => {
   return null;
 };
 
-const importSource = (input: { objectKey: string; fileName: string; contentType: string; size: number }): AtlasImportSource | null => {
+const importSource = (input: { objectKey: string; fileName: string; contentType: string; size: number } & Partial<Pick<AtlasImportSource, "duration" | "width" | "height" | "hasAudio">>): AtlasImportSource | null => {
   const kind = mediaKind(input.contentType);
   return kind && input.size > 0 ? { ...input, kind } : null;
+};
+
+const generatedFileName = (prompt: string, id: string, extension: string) => {
+  const title = Array.from(prompt.normalize("NFKC").replace(/\s+/g, " ").trim()
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "-")
+    .replace(/[.\s-]+$/g, "")).slice(0, 40).join("");
+  return `${title || "Firefly生成素材"}-${id.slice(0, 8)}.${extension}`;
+};
+
+const videoDimensions = (ratio: string, resolution: string) => {
+  const shortEdge = resolution === "1080p" ? 1080 : resolution === "720p" ? 720 : resolution === "480p" ? 480 : 0;
+  const match = /^(\d+):(\d+)$/.exec(ratio);
+  if (!shortEdge || !match) return {};
+  const x = Number(match[1]);
+  const y = Number(match[2]);
+  if (!x || !y) return {};
+  if (x >= y) return { width: Math.round(shortEdge * x / y), height: shortEdge };
+  return { width: shortEdge, height: Math.round(shortEdge * y / x) };
 };
 
 export const resolveAtlasImportSource = async (input: {
@@ -54,16 +72,51 @@ export const resolveAtlasImportSource = async (input: {
   if (input.sourceType === "generation") {
     const task = users.readTask(input.sourceId);
     const media = users.readTaskMedia(input.sourceId, "preview") ?? users.readTaskMedia(input.sourceId, "output");
-    return task?.ownerId === input.ownerId && media?.ownerId === input.ownerId && media.status === "ready" ? importSource(media) : null;
+    if (task?.ownerId !== input.ownerId || media?.ownerId !== input.ownerId || media.status !== "ready") return null;
+    const extension = media.contentType === "video/quicktime" ? "mov" : "mp4";
+    const request = task.request && typeof task.request === "object" ? task.request as Record<string, unknown> : {};
+    return importSource({
+      ...media,
+      fileName: generatedFileName(task.prompt, task.id, extension),
+      duration: task.duration,
+      ...videoDimensions(task.ratio, task.resolution),
+      hasAudio: typeof request.generateAudio === "boolean" ? request.generateAudio : true,
+    });
   }
   if (input.sourceType === "generated") {
     const media = users.readMedia(input.sourceId);
-    return media?.ownerId === input.ownerId && media.status === "ready" && media.kind === "generated" ? importSource(media) : null;
+    if (media?.ownerId !== input.ownerId || media.status !== "ready" || media.kind !== "generated") return null;
+    const task = media.taskId ? users.readImageGeneration(media.taskId) : null;
+    const extension = media.contentType === "image/png" ? "png" : media.contentType === "image/webp" ? "webp" : "jpg";
+    return importSource({ ...media, fileName: generatedFileName(task?.prompt ?? "Firefly生成图片", task?.id ?? media.id, extension) });
   }
   const asset = users.readCanvasProjectAsset(input.sourceId);
   if (!asset || asset.ownerId !== input.ownerId || asset.status !== "ready") return null;
   try { return importSource(resolveCanvasProjectMedia(asset)); }
   catch { return null; }
+};
+
+const describeAtlasAsset = (asset: import("./atlas-store.js").AtlasProjectAsset): AtlasAssetPresentation => {
+  if (asset.sourceType === "generation" && asset.sourceId) {
+    const task = users.readTask(asset.sourceId);
+    const poster = users.readTaskMedia(asset.sourceId, "poster");
+    const request = task?.request && typeof task.request === "object" ? task.request as Record<string, unknown> : {};
+    return {
+      thumbnailUrl: poster?.status === "ready" ? `/api/generations/${encodeURIComponent(asset.sourceId)}/poster` : undefined,
+      duration: task?.duration,
+      ...(task ? videoDimensions(task.ratio, task.resolution) : {}),
+      hasAudio: typeof request.generateAudio === "boolean" ? request.generateAudio : true,
+    };
+  }
+  if (asset.sourceType === "generated" && asset.sourceId) {
+    return { thumbnailUrl: `/api/image-media/${encodeURIComponent(asset.sourceId)}?variant=thumbnail` };
+  }
+  if (asset.sourceType === "user_asset" && asset.sourceId && asset.kind === "image") {
+    return { thumbnailUrl: `/api/assets/${encodeURIComponent(asset.sourceId)}/source?variant=thumbnail` };
+  }
+  return asset.kind === "image" && asset.status === "ready"
+    ? { thumbnailUrl: `/api/atlas/project-assets/${encodeURIComponent(asset.id)}/media` }
+    : {};
 };
 
 const verifyAtlasObject: AtlasStorageDependencies["verifyObject"] = async (objectKey) => {
@@ -156,6 +209,7 @@ export const createAtlasRuntime = (input: {
     requireAuth: input.requireAuth,
     storage,
     resolveImportSource: resolveAtlasImportSource,
+    describeAsset: describeAtlasAsset,
     enabled: config.atlasEnabled,
     agentEnabled: config.atlasAgentEnabled,
     generateEnabled: config.atlasGenerateEnabled,

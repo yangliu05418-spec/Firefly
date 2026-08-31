@@ -86,7 +86,11 @@ type MediaStoreState = MediaState &
     getItemsByFolder: (folderId: string | null) => ProjectItem[];
     getItemById: (id: string) => ProjectItem | undefined;
     getFileByName: (name: string) => MediaFile | undefined;
-    registerFireflyRemoteAsset: (asset: { id: string; name: string; kind: 'image' | 'video' | 'audio'; mediaUrl: string; size?: number; localMedia?: import('../../firefly/local-media').LocalMediaDescriptor }) => string;
+    registerFireflyRemoteAsset: (asset: {
+      id: string; name: string; kind: 'image' | 'video' | 'audio'; mediaUrl: string; size?: number;
+      thumbnailUrl?: string; duration?: number; width?: number; height?: number; hasAudio?: boolean;
+      localMedia?: import('../../firefly/local-media').LocalMediaDescriptor;
+    }) => string;
     createLiveInputItem: (id: string, source: LiveInputSource, name: string, parentId?: string | null) => string;
     updateLiveInputSource: (id: string, source: LiveInputSource) => void;
     getOrCreateTextFolder: () => string;
@@ -169,12 +173,30 @@ export const useMediaStore = create<MediaStoreState>()(
 
     registerFireflyRemoteAsset: (asset) => {
       const existing = get().files.find((file) => file.fireflyProjectAssetId === asset.id);
-      if (existing) return existing.id;
+      if (existing) {
+        set((state) => ({
+          files: state.files.map((file) => file.id !== existing.id ? file : {
+            ...file,
+            url: asset.mediaUrl,
+            remoteSourcePath: asset.mediaUrl,
+            localMediaDescriptor: asset.localMedia ?? file.localMediaDescriptor,
+            fileSize: asset.size ?? file.fileSize,
+            thumbnailUrl: asset.thumbnailUrl ?? file.thumbnailUrl,
+            duration: asset.duration ?? file.duration,
+            width: asset.width ?? file.width,
+            height: asset.height ?? file.height,
+            hasAudio: asset.hasAudio ?? file.hasAudio,
+          }),
+        }));
+        return existing.id;
+      }
       const id = `firefly-atlas-${asset.id}`;
       const mediaFile: MediaFile = {
         id, name: asset.name, type: asset.kind, parentId: null, createdAt: Date.now(),
         url: asset.mediaUrl, remoteSourcePath: asset.mediaUrl, fireflyProjectAssetId: asset.id, localMediaDescriptor: asset.localMedia,
-        fileSize: asset.size, proxyStatus: 'none', remoteCacheStatus: 'idle', remoteCacheProgress: 0,
+        fileSize: asset.size, thumbnailUrl: asset.thumbnailUrl, duration: asset.duration, width: asset.width,
+        height: asset.height, hasAudio: asset.hasAudio,
+        proxyStatus: 'none', remoteCacheStatus: 'idle', remoteCacheProgress: 0,
       };
       set((state) => state.files.some((file) => file.id === id) ? {} : { files: [mediaFile, ...state.files] });
       return id;

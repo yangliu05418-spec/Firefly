@@ -75,8 +75,6 @@ interface PreviewCanvasMountProps {
   playbackWaiterVideoCount: number;
   previewCameraOverride: SceneCameraConfig | null;
   previewQuality: PreviewQuality;
-  qualityDropdownRef: React.RefObject<HTMLDivElement | null>;
-  qualityOpen: boolean;
   sam2Active: boolean;
   sceneGizmoToolbarTarget: HTMLDivElement | null;
   sceneNavClipId: string | null;
@@ -88,7 +86,6 @@ interface PreviewCanvasMountProps {
   selectedTextLayer: Layer | null;
   setPropertyValue: (clipId: string, property: ReturnType<typeof createTextBoundsNumericProperty>, value: number) => void;
   setPreviewQuality: (quality: PreviewQuality) => void;
-  setQualityOpen: (open: boolean) => void;
   setSceneGizmoToolbarTarget: (target: HTMLDivElement | null) => void;
   setTextTyping: (typing: boolean) => void;
   showPlaybackWaiter: boolean;
@@ -101,13 +98,13 @@ interface PreviewCanvasMountProps {
   textClipEditMode: boolean;
   textPreviewEditorEnabled: boolean;
   textTypingActive: boolean;
-  toggleTransparency: () => void;
   tracks: TimelineTrack[];
   updateTextBoundsVertex: (clipId: string, vertexId: string, updates: Partial<MaskVertex>, recordKeyframe?: boolean) => void;
   updateTextBoundsVertices: (clipId: string, vertexUpdates: Array<{ vertexId: string; updates: Partial<MaskVertex> }>, recordKeyframe?: boolean) => void;
   updateTextProperties: (clipId: string, props: Partial<TextClipProperties>) => void;
   viewTransform: React.CSSProperties;
   viewZoom: number;
+  setViewZoom: (zoom: number) => void;
   worldGridPlane: 'xy' | 'yz' | 'xz';
   onToggleStats: () => void;
 }
@@ -177,8 +174,6 @@ export function PreviewCanvasMount({
   playbackWaiterVideoCount,
   previewCameraOverride,
   previewQuality,
-  qualityDropdownRef,
-  qualityOpen,
   sam2Active,
   sceneGizmoToolbarTarget,
   sceneNavClipId,
@@ -190,7 +185,6 @@ export function PreviewCanvasMount({
   selectedTextLayer,
   setPropertyValue,
   setPreviewQuality,
-  setQualityOpen,
   setSceneGizmoToolbarTarget,
   setTextTyping,
   showPlaybackWaiter,
@@ -203,13 +197,13 @@ export function PreviewCanvasMount({
   textClipEditMode,
   textPreviewEditorEnabled,
   textTypingActive,
-  toggleTransparency,
   tracks,
   updateTextBoundsVertex,
   updateTextBoundsVertices,
   updateTextProperties,
   viewTransform,
   viewZoom,
+  setViewZoom,
   worldGridPlane,
   onToggleStats,
 }: PreviewCanvasMountProps) {
@@ -453,13 +447,10 @@ export function PreviewCanvasMount({
         />
 
         <PreviewBottomControls
-          showTransparencyGrid={showTransparencyGrid}
-          onToggleTransparency={toggleTransparency}
           previewQuality={previewQuality}
           setPreviewQuality={setPreviewQuality}
-          qualityOpen={qualityOpen}
-          setQualityOpen={setQualityOpen}
-          qualityDropdownRef={qualityDropdownRef}
+          viewZoom={viewZoom}
+          setViewZoom={setViewZoom}
         />
       </div>
     </>

@@ -75,7 +75,7 @@ export function GenerateEmbedApp() {
 
   const admitted = (sourceType: "image" | "video", sourceId: string) => send(projectId, "TASK_ADMITTED", { sourceType, sourceId });
   const failedDestinations = destinations.filter((item) => item.status === "failed");
-  const pendingDestinations = destinations.filter((item) => item.status === "pending" || item.status === "copying");
+  const copyingDestinations = destinations.filter((item) => item.status === "copying");
   const retryDestination = async (destinationId: string) => {
     if (retryingDestinationId) return;
     setRetryingDestinationId(destinationId);
@@ -95,8 +95,8 @@ export function GenerateEmbedApp() {
       onCreated={(task: Task) => admitted("video", task.id)}
       onImagesGenerated={(bundle: ImageResultBundle) => admitted("image", bundle.id)}
     /></div>
-    {(pendingDestinations.length > 0 || failedDestinations.length > 0) && <aside className="atlas-generate-deliveries" aria-live="polite">
-      {pendingDestinations.length > 0 && <div className="atlas-generate-delivery is-pending"><LoaderCircle className="spin" /><span>{pendingDestinations.length} 个生成结果正在加入当前项目素材库</span></div>}
+    {(copyingDestinations.length > 0 || failedDestinations.length > 0) && <aside className="atlas-generate-deliveries" aria-live="polite">
+      {copyingDestinations.length > 0 && <div className="atlas-generate-delivery is-pending"><span>结果已进入素材库，正在后台保存项目副本</span></div>}
       {failedDestinations.map((item) => <div className="atlas-generate-delivery is-failed" key={item.id}>
         <span>结果已生成，但暂未加入素材库。重试不会重新生成或产生费用。</span>
         <button type="button" disabled={Boolean(retryingDestinationId)} onClick={() => void retryDestination(item.id)}>{retryingDestinationId === item.id ? "重试中…" : "重试加入素材库"}</button>

@@ -20,7 +20,7 @@ import { tosArchiveErrorCode } from "./tos-errors.js";
 import { AtlasStore, type AtlasGlobalAssetRegistration } from "./atlas-store.js";
 import { registerAtlasGlobalExport } from "./atlas-global-assets.js";
 import { createAtlasStorage, resolveAtlasImportSource } from "./atlas-runtime.js";
-import { importFireflySourceIntoAtlasProject } from "./atlas-import-service.js";
+import { importFireflySourceIntoAtlasProject, reserveFireflySourceInAtlasProject } from "./atlas-import-service.js";
 
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
 const atlasStore = new AtlasStore(config.databasePath);
@@ -70,6 +70,23 @@ const enqueueAtlasVideoDestinations = async (taskId: string) => {
       backoff: { type: "exponential", delay: 3000, jitter: .5 },
       removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 },
     });
+  }
+};
+const exposeAtlasVideoDestinations = async (taskId: string) => {
+  const output = users.readTaskMedia(taskId, "output");
+  if (!output) return;
+  for (const destination of atlasStore.listGenerationDestinationsForSource("video", taskId)) {
+    if (["ready", "skipped"].includes(destination.status)) continue;
+    const source = await resolveAtlasImportSource({ ownerId: destination.ownerId, sourceType: "generation", sourceId: taskId });
+    if (!source) continue;
+    reserveFireflySourceInAtlasProject({
+      store: atlasStore, ownerId: destination.ownerId, projectId: destination.projectId,
+      sourceType: "generation", sourceId: taskId, source, now: Date.now(), assetId: destination.id,
+    });
+    console.info(JSON.stringify({
+      type: "atlas_destination_exposed", at: new Date().toISOString(), destinationId: destination.id,
+      taskId, projectId: destination.projectId, userId: destination.ownerId,
+    }));
   }
 };
 const finalizeCanvasVideoPreview = async (taskId: string) => {
@@ -251,6 +268,7 @@ const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputF
     const contentType = String(dataOut.contentType ?? headers["content-type"] ?? (data.outputFormat === "mov" ? "video/quicktime" : "video/mp4"));
     const committed = users.commitTaskMediaIfActive(task.id, { id: `${task.id}:output`, ownerId: task.ownerId, taskId: task.id, kind: "output", objectKey, status: "ready", fileName: `result.${data.outputFormat}`, contentType, size, etag, createdAt: now, updatedAt: now }, true);
     if (!committed) { await deleteObject(objectKey); return; }
+    await exposeAtlasVideoDestinations(task.id);
     if (!config.tosPreviewTranscodeEnabled) await enqueueAtlasVideoDestinations(task.id);
     users.deleteMediaArchiveCheckpoint(task.id);
     let posterReady = false;

@@ -144,7 +144,7 @@ export async function loadVideoMedia(params: LoadVideoMediaParams): Promise<void
       authoritativeNaturalDuration !== undefined
       && Number.isFinite(authoritativeNaturalDuration)
       && authoritativeNaturalDuration > 0
-      && typeof importedHasAudio === 'boolean'
+      && (typeof importedHasAudio === 'boolean' || Boolean(importedMedia?.remoteSourcePath))
     );
 
     if (canReuseImportedMetadata && authoritativeNaturalDuration !== undefined) {
@@ -258,8 +258,13 @@ export async function loadVideoMedia(params: LoadVideoMediaParams): Promise<void
 
   // Load audio for linked clip (skip for NativeDecoder - browser can't decode ProRes/DNxHD audio)
   // For browser path, audio clip is already created and will be removed by background detectVideoAudio if no audio
-  if (linkedAudioClipId && !nativeDecoder) {
-    loadLinkedAudio(file, linkedAudioClipId, naturalDuration, mediaFileId, waveformsEnabled, updateClip, setClips);
+    if (linkedAudioClipId && !nativeDecoder && file.size > 0) {
+      loadLinkedAudio(file, linkedAudioClipId, naturalDuration, mediaFileId, waveformsEnabled, updateClip, setClips);
+    } else if (linkedAudioClipId && !nativeDecoder && file.size === 0) {
+      updateClip(linkedAudioClipId, {
+        source: { type: 'audio', naturalDuration, mediaFileId },
+        isLoading: false,
+      });
   } else if (linkedAudioClipId && nativeDecoder) {
     log.debug('Skipping audio decoding for NativeDecoder file (audio clip kept)', { file: file.name });
     updateClip(linkedAudioClipId, {

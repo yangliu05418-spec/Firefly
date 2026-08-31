@@ -12,6 +12,9 @@ import {
 } from '../../utils/previewPanelSource';
 import { originalUi } from '../../firefly/i18n/originalUi';
 
+const IS_FIREFLY_VARIANT = import.meta.env.VITE_APP_VARIANT === 'firefly';
+const ui = (zh: string, en: string) => IS_FIREFLY_VARIANT ? zh : en;
+
 interface PreviewControlsProps {
   // Source monitor
   sourceMonitorActive: boolean;
@@ -103,7 +106,7 @@ export function PreviewControls({
           <button
             className="preview-close-source-btn"
             onClick={closeSourceMonitor}
-            title="Close source monitor [Esc]"
+            title={ui('关闭源监视器 [Esc]', 'Close source monitor [Esc]')}
           >
             x
           </button>
@@ -113,7 +116,7 @@ export function PreviewControls({
           <button
             className={`preview-edit-btn ${editMode ? 'active' : ''}`}
             onClick={() => canEdit && setEditMode(!editMode)}
-            title={canEdit ? 'Toggle Edit Mode [Tab]' : 'Edit mode only works on the full active composition'}
+            title={canEdit ? ui('切换编辑模式 [Tab]', 'Toggle Edit Mode [Tab]') : ui('编辑模式仅适用于完整的当前合成', 'Edit mode only works on the full active composition')}
             disabled={!canEdit}
           >
             {originalUi('original.previewEdit', 'Edit')}
@@ -145,9 +148,9 @@ export function PreviewControls({
               <button
                 className="preview-reset-btn"
                 onClick={resetView}
-                title="Reset View"
+                title={ui('重置视图', 'Reset View')}
               >
-                Reset
+                {ui('重置', 'Reset')}
               </button>
             </>
           )}
@@ -155,7 +158,7 @@ export function PreviewControls({
             <button
               className="preview-comp-dropdown-btn"
               onClick={() => setSelectorOpen(!selectorOpen)}
-              title="Select preview source"
+              title={ui('选择预览源', 'Select preview source')}
             >
               <span className="preview-comp-name">
                 {sourceLabel === 'Active' ? originalUi('original.previewActive', 'Active') : sourceLabel}
@@ -164,7 +167,7 @@ export function PreviewControls({
             </button>
             {selectorOpen && (
               <div className="preview-comp-dropdown" ref={dropdownRef} style={dropdownStyle}>
-                <div className="preview-comp-group-label">Dynamic</div>
+                <div className="preview-comp-group-label">{ui('动态', 'Dynamic')}</div>
                 <button
                   className={`preview-comp-option ${source.type === 'activeComp' ? 'active' : ''}`}
                   onClick={() => {
@@ -176,7 +179,7 @@ export function PreviewControls({
                 </button>
                 {renderLayerOptions(null)}
                 <div className="preview-comp-separator" />
-                <div className="preview-comp-group-label">Compositions</div>
+                <div className="preview-comp-group-label">{ui('合成', 'Compositions')}</div>
                 {visibleCompositions.map((comp) => (
                   <React.Fragment key={comp.id}>
                     <button

@@ -3,7 +3,20 @@ import { useMediaStore } from '../stores/mediaStore';
 import { useFireflyEmbedding } from './FireflyEmbeddingContext';
 import { activateAtlasLocalMedia, closeAtlasLocalMedia, type LocalMediaDescriptor } from './local-media';
 
-type ProjectAsset = { id: string; fileName: string; kind: 'image' | 'video' | 'audio'; size: number; status: string; mediaUrl?: string; localMedia?: LocalMediaDescriptor };
+type ProjectAsset = {
+  id: string;
+  fileName: string;
+  kind: 'image' | 'video' | 'audio';
+  size: number;
+  status: string;
+  mediaUrl?: string;
+  thumbnailUrl?: string;
+  duration?: number;
+  width?: number;
+  height?: number;
+  hasAudio?: boolean;
+  localMedia?: LocalMediaDescriptor;
+};
 const PAGE_SIZE = 100;
 const MAX_RECONCILE_ASSETS = 1000;
 
@@ -40,20 +53,25 @@ export function FireflyGeneratedMediaBridge() {
         .then((items) => {
           if (stopped) return;
           for (const asset of items) {
-            if (asset.status !== 'ready' || !asset.mediaUrl) continue;
+            if (!['copying', 'ready'].includes(asset.status) || !asset.mediaUrl) continue;
             useMediaStore.getState().registerFireflyRemoteAsset({
               id: asset.id, name: asset.fileName, kind: asset.kind, mediaUrl: asset.mediaUrl, size: asset.size,
+              thumbnailUrl: asset.thumbnailUrl, duration: asset.duration, width: asset.width, height: asset.height,
+              hasAudio: asset.hasAudio,
               localMedia: asset.localMedia,
             });
           }
         })
-        .catch((error) => { if (!(error instanceof DOMException && error.name === 'AbortError')) return; })
+        .catch((error) => {
+          if (error instanceof DOMException && error.name === 'AbortError') return;
+          console.warn('[FireflyGeneratedMediaBridge] 素材同步失败', error);
+        })
         .finally(() => { inFlight = undefined; controller = undefined; });
       return inFlight;
     };
     const refresh = () => { void reconcile(); };
     void reconcile();
-    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void reconcile(); }, 5000);
+    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void reconcile(); }, 2000);
     window.addEventListener('online', refresh);
     window.addEventListener(FIREFLY_ATLAS_MEDIA_REFRESH_EVENT, refresh);
     document.addEventListener('visibilitychange', refresh);
