@@ -35,6 +35,15 @@ const projectImageAsset: CanvasProjectAsset = {
   id: "project-library-image", canvasId: "canvas-e2e", kind: "image", title: "常用角色参考", contentType: "image/png", size: 128,
   width: 512, height: 512, status: "ready", createdAt: 1, updatedAt: 1,
   mediaUrl: "/api/canvas-project-assets/project-library-image/media", downloadUrl: "/api/canvas-project-assets/project-library-image/media?download=1",
+  localMedia: {
+    preview: { cacheKey: "canvas-project-image-original", revision: "revision-1", variant: "original", mediaType: "image", contentType: "image/png", size: 128, url: "/api/canvas-project-assets/project-library-image/media", cachePolicy: "pin" },
+    thumbnail: { cacheKey: "canvas-project-image-thumbnail", revision: "revision-1-thumb", variant: "thumbnail", mediaType: "image", contentType: "image/svg+xml", url: "/api/canvas-project-assets/project-library-image/media?variant=thumbnail", cachePolicy: "warm" },
+  },
+};
+const cachedMediaDocument: CanvasDocumentV2 = {
+  ...documentV2,
+  nodes: [{ id: "cached-image", type: "image", title: "已归档图片", position: { x: 240, y: 120 }, width: 320, height: 300, data: { projectAssetId: projectImageAsset.id, status: "succeeded" } }],
+  connections: [],
 };
 const videoModels = [{ id: "dreamina-seedance-2-5-260628", name: "Seedance 2.5", note: "旗舰模型", modes: ["omni", "text"], resolutions: ["720p", "1080p"], ratios: ["adaptive", "16:9", "9:16"], duration: [4, 30], imageLimit: 30, videoLimit: 10, audioLimit: 10, audioOnly: true, supportsAudio: true, outputFormats: ["mp4"] }];
 const imageModels = [{ id: "google/gemini-3.1-flash-lite-image", name: "Nano Banana 2 Lite", resolutions: ["1024"], defaultResolution: "1024", maxCount: 4, maxReferences: 4 }];
@@ -77,6 +86,7 @@ async function mockAuthenticatedApi(page: Page, options: {
       if (authSessionRequests <= (options.authSessionFailures ?? 0)) return json(route, { error: "session service unavailable" }, 503);
       return json(route, { authenticated: true, user: { id: "user-e2e", email: "artist@dokuai.tv", name: "Artist", avatarUrl: "" } });
     }
+    if (path === "/api/local-media/config") return json(route, { enabled: true, studio: true, canvas: true, atlas: true, uploadResume: true });
     if (path === "/api/client-events" && request.method() === "POST") return route.fulfill({ status: 204 });
     if (path === "/api/models") return json(route, videoModels);
     if (path === "/api/image-models") return json(route, { Items: imageModels, Ratios: ["16:9", "1:1", "9:16"], DefaultModel: imageModels[0].id });
@@ -195,6 +205,7 @@ async function mockAuthenticatedApi(page: Page, options: {
     }
     if (/^\/api\/uploads\/upload-e2e-\d+$/.test(path) && request.method() === "DELETE") return route.fulfill({ status: 204 });
     if (path === "/api/canvases/canvas-e2e/assets") return json(route, { Items: projectAssets, HasMore: false });
+    if (path === "/api/canvas-project-assets/project-library-image/media") return route.fulfill({ status: 200, contentType: "image/svg+xml", headers: { "Accept-Ranges": "bytes", ETag: '"canvas-image"' }, body: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><path fill="#b8d9cf" d="M0 0h32v32H0z"/></svg>' });
     if (path === "/api/canvases/canvas-e2e/media" && request.method() === "POST") {
       const body = request.postDataJSON() as { kind: "upload" | "user_asset"; uploadId?: string; assetId?: string };
       const source = body.kind === "user_asset" ? projectImageAsset : undefined;
@@ -599,6 +610,17 @@ test("authenticated Canvas V2 opens, creates a node and preserves the app shell"
   await page.getByTitle("小地图").click();
   await expect(page.getByText(/已保存|保存中/)).toBeVisible();
   await expect.poll(mock.leaseReleaseCount).toBe(releasesBeforePreferenceChange);
+});
+
+test("Canvas opens archived project media while the shared OPFS cache is enabled", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await mockAuthenticatedApi(page, { document: cachedMediaDocument, projectAssets: [projectImageAsset] });
+  await page.goto("/studio/canvas/canvas-e2e");
+
+  await expect(page.getByRole("button", { name: "Firefly 画布导航" })).toContainText("Firefly", { timeout: 30_000 });
+  await expect(page.locator('.canvas-v2-node--image img[alt="已归档图片"]')).toBeVisible();
+  await expect.poll(() => pageErrors).toEqual([]);
 });
 
 test("a held Canvas lease opens safely in read-only mode", async ({ page }) => {

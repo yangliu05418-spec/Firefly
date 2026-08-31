@@ -74,21 +74,28 @@ export class WebGPUContext {
     return this.initPromise;
   }
 
-  /** Race a promise against a timeout */
-  // NOTE: the timer is not cleared when `promise` wins the race, so the warning
-  // below can fire even after a successful adapter/device request. The log line
-  // is therefore not proof of failure — `engineReady`/`isInitialized` is the
-  // source of truth. See docs/Features/Linux-Mesa-GPU.md (mode 5).
+  /** Race a promise against a timeout without leaving a false late warning. */
   private withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T | null> {
-    return Promise.race([
-      promise,
-      new Promise<null>((resolve) => {
-        setTimeout(() => {
-          log.warn(`${label} timed out after ${ms}ms`);
-          resolve(null);
-        }, ms);
-      }),
-    ]);
+    return new Promise<T | null>((resolve, reject) => {
+      let settled = false;
+      const timeoutId = globalThis.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        log.warn(`${label} timed out after ${ms}ms`);
+        resolve(null);
+      }, ms);
+      promise.then((value) => {
+        if (settled) return;
+        settled = true;
+        globalThis.clearTimeout(timeoutId);
+        resolve(value);
+      }, (error) => {
+        if (settled) return;
+        settled = true;
+        globalThis.clearTimeout(timeoutId);
+        reject(error);
+      });
+    });
   }
 
   private shouldUseLowPowerFallback(): boolean {

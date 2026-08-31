@@ -1,14 +1,16 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebGPUContext } from '../../src/engine/core/WebGPUContext';
+
+const loggerMocks = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
 
 vi.mock('../../src/services/logger', () => ({
   Logger: {
-    create: vi.fn(() => ({
-      debug: vi.fn(),
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-    })),
+    create: vi.fn(() => loggerMocks),
   },
 }));
 
@@ -18,7 +20,12 @@ describe('WebGPUContext', () => {
   const originalUserAgent = navigator.userAgent;
   const originalUserAgentData = (navigator as Navigator & { userAgentData?: unknown }).userAgentData;
 
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   afterEach(() => {
+    vi.useRealTimers();
     Object.defineProperty(navigator, 'gpu', {
       configurable: true,
       value: originalGpu,
@@ -87,6 +94,24 @@ describe('WebGPUContext', () => {
         maxBufferSize: 2147483644,
       }),
     }));
+  });
+
+  it('clears timeout diagnostics after adapter and device initialize successfully', async () => {
+    vi.useFakeTimers();
+    const adapter = createAdapter();
+    Object.defineProperty(navigator, 'gpu', {
+      configurable: true,
+      value: {
+        requestAdapter: vi.fn(async () => adapter),
+        getPreferredCanvasFormat: vi.fn(() => 'rgba8unorm'),
+      },
+    });
+
+    const context = new WebGPUContext();
+    await expect(context.initialize()).resolves.toBe(true);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(loggerMocks.warn).not.toHaveBeenCalledWith(expect.stringContaining('timed out'));
   });
 
   it('uses low-power fallback on Linux when high-performance adapter selection fails', async () => {

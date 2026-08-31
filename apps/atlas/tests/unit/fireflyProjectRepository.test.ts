@@ -4,6 +4,7 @@ import { FireflyProjectCoreService } from '../../src/services/project/core/Firef
 import { createInitialProjectFile } from '../../src/services/project/core/createInitialProjectFile';
 import {
   createCheckpointEnvelope,
+  FireflyCheckpointTransport,
   parseCheckpointEnvelope,
   type FireflyCheckpointSaveInput,
   type FireflyCheckpointTransportPort,
@@ -174,6 +175,20 @@ describe('Firefly ProjectFile persistence boundary', () => {
     ]);
   });
 
+  it('checkpoints the server title when opening a locally stale project name', async () => {
+    const root = new MemoryDirectoryHandle('root');
+    const transport = new FakeCheckpointTransport();
+    const repository = createRepository(root, transport);
+    const first = new FireflyProjectCoreService(new FileStorageService(), repository);
+    expect(await first.openProject({ ...openOptions, title: '旧标题' })).toBe(true);
+    first.closeProject();
+
+    const reopened = new FireflyProjectCoreService(new FileStorageService(), createRepository(root, transport));
+    expect(await reopened.openProject({ ...openOptions, title: '服务端新标题' })).toBe(true);
+    expect((await reopened.flushCloudSave()).status).toBe('saved');
+    expect(transport.saveInputs.at(-1)?.projectFile.name).toBe('服务端新标题');
+  });
+
   it('retains one failed latest snapshot and succeeds after an explicit retry', async () => {
     const root = new MemoryDirectoryHandle('root');
     const transport = new FakeCheckpointTransport();
@@ -189,6 +204,31 @@ describe('Firefly ProjectFile persistence boundary', () => {
     expect((await repository.flushCloudSave()).status).toBe('error');
     expect((await repository.retryCloudSave()).status).toBe('saved');
     expect(attempts).toBe(2);
+  });
+
+  it('bounds a stalled cloud checkpoint reservation instead of hanging navigation forever', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+    }));
+    const transport = new FireflyCheckpointTransport({
+      fetch: fetchMock as typeof fetch,
+      encode: async () => ({ blob: new Blob(['checkpoint'], { type: 'application/gzip' }), digest: 'a'.repeat(64) }),
+    });
+    const pending = transport.save({
+      projectId: 'project-a',
+      leaseToken: 'l'.repeat(64),
+      expectedRevision: 0,
+      projectFile: createInitialProjectFile('超时保护'),
+    });
+    const rejection = expect(pending).rejects.toMatchObject({
+      code: 'ATLAS_NETWORK_TIMEOUT',
+      status: 504,
+    });
+
+    await vi.advanceTimersByTimeAsync(15_001);
+    await rejection;
+    vi.useRealTimers();
   });
 
   it('advances the server revision on rename before the following checkpoint', async () => {

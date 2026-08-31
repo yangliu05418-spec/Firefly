@@ -85,14 +85,15 @@ vi.mock('../FireflyEditorAdapter', () => ({
     if (opened) await mocks.loadProjectToStores();
     return opened;
   },
-  saveAndFlushEditorProject: async () => ({ savedLocally: await mocks.saveCurrentProject(), cloudStatus: await mocks.flushCloudSave() }),
+  saveEditorProjectLocally: mocks.saveCurrentProject,
+  flushEditorProjectCloud: mocks.flushCloudSave,
   updateEditorLeaseToken: mocks.updateLeaseToken,
   closeEditorProject: mocks.closeCurrentProject,
   disposeEditorRuntime: mocks.teardownAutoSync,
 }));
 
 vi.mock('../../RootApp', () => ({
-  RootApp: () => <div data-testid="original-atlas-runtime">original-atlas-runtime</div>,
+  RootApp: ({ fireflyEmbedded }: { fireflyEmbedded?: { onBackToProjects: () => void | Promise<void> } }) => <div data-testid="original-atlas-runtime">original-atlas-runtime<button type="button" onClick={() => void fireflyEmbedded?.onBackToProjects()}>return-projects</button></div>,
 }));
 
 vi.mock('../components/ProjectDashboard', () => ({
@@ -196,5 +197,21 @@ describe('Firefly Atlas upstream runtime shell', () => {
     expect(screen.queryByTestId('original-atlas-runtime')).not.toBeInTheDocument();
     resolveOpen(true);
     await waitFor(() => expect(screen.getByTestId('original-atlas-runtime')).toBeInTheDocument());
+  });
+
+  it('returns after the local save without waiting for a slow cloud checkpoint', async () => {
+    let resolveCloud!: (value: { status: 'saved'; revision: number }) => void;
+    mocks.flushCloudSave.mockReturnValue(new Promise((resolve) => { resolveCloud = resolve; }));
+    render(<I18nProvider locale="zh-CN"><FireflyAtlasApp /></I18nProvider>);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'open-original-project' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'return-projects' }));
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'open-original-project' })).toBeInTheDocument());
+    expect(mocks.saveCurrentProject).toHaveBeenCalledOnce();
+    expect(mocks.releaseLease).not.toHaveBeenCalled();
+
+    resolveCloud({ status: 'saved', revision: 1 });
+    await waitFor(() => expect(mocks.releaseLease).toHaveBeenCalledOnce());
   });
 });

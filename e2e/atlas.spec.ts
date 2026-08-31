@@ -62,10 +62,14 @@ async function expectOriginalEditorLayout(page: Page) {
   expect((mediaBox!.y + mediaBox!.height) - (generateBox!.y + generateBox!.height)).toBeGreaterThanOrEqual(18);
 }
 
-async function mockAtlasApi(page: Page) {
+async function mockAtlasApi(page: Page, options: { holdCheckpoint?: boolean } = {}) {
   const projects: Project[] = [];
   const bootstrapCookies: string[] = [];
   let checkpointCount = 0;
+  let releaseCheckpoint: () => void = () => undefined;
+  const checkpointGate = options.holdCheckpoint
+    ? new Promise<void>((resolve) => { releaseCheckpoint = resolve; })
+    : Promise.resolve();
 
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -97,6 +101,7 @@ async function mockAtlasApi(page: Page) {
     if (pathname === `/api/atlas/projects/${projectId}/lease` && method === "DELETE") return route.fulfill({ status: 204 });
     if (pathname === `/api/atlas/projects/${projectId}/checkpoints` && method === "POST") {
       checkpointCount += 1;
+      await checkpointGate;
       const input = request.postDataJSON() as { expectedRevision: number };
       if (projects[0]) {
         projects[0].revision = input.expectedRevision + 1;
@@ -110,7 +115,7 @@ async function mockAtlasApi(page: Page) {
     return json(route, { code: "E2E_ROUTE_UNHANDLED", error: `${method} ${pathname}` }, 501);
   });
 
-  return { bootstrapCookies, projects, checkpointCount: () => checkpointCount };
+  return { bootstrapCookies, projects, checkpointCount: () => checkpointCount, releaseCheckpoint };
 }
 
 test.describe("Atlas production SPA", () => {
@@ -171,6 +176,23 @@ test.describe("Atlas production SPA", () => {
     await page.getByRole("button", { name: "返回 Atlas 项目" }).click();
     await expect(page.getByRole("heading", { name: "你的剪辑项目" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "首支中文剪辑" })).toBeVisible();
+  });
+
+  test("returns to projects after the local save without waiting for cloud checkpoint latency", async ({ page }) => {
+    const api = await mockAtlasApi(page, { holdCheckpoint: true });
+    await page.context().addCookies([{ name: "firefly_session", value: "existing-session", url: atlasOrigin }]);
+    await page.goto("/studio/atlas/");
+    await page.getByRole("button", { name: "新建项目" }).first().click();
+    const dialog = page.getByRole("dialog", { name: "新建项目" });
+    await dialog.getByLabel("重命名项目").fill("本地优先返回");
+    await dialog.getByRole("button", { name: "新建项目" }).click();
+    await expect(page.getByRole("button", { name: "返回 Atlas 项目" })).toBeVisible();
+
+    await page.getByRole("button", { name: "返回 Atlas 项目" }).click();
+    await expect(page.getByRole("heading", { name: "你的剪辑项目" })).toBeVisible({ timeout: 3_000 });
+    await expect.poll(api.checkpointCount, { timeout: 3_000 }).toBeGreaterThan(0);
+
+    api.releaseCheckpoint();
   });
 
   test("keeps the editor usable at the effective 150 percent desktop viewport", async ({ page }) => {

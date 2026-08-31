@@ -100,6 +100,7 @@ export function FireflyAtlasApp() {
   const leaseControllerRef = useRef<FireflyProjectLeaseController | null>(null);
   const leaseUnsubscribeRef = useRef<(() => void) | null>(null);
   const editorAdapterRef = useRef<FireflyEditorAdapter | null>(null);
+  const backgroundCloseRef = useRef<{ projectId: string; promise: Promise<void> } | null>(null);
 
   const loadProjects = useCallback(async () => {
     setProjectsLoading(true);
@@ -112,17 +113,6 @@ export function FireflyAtlasApp() {
       setProjectsLoading(false);
     }
   }, [t]);
-
-  const detachLeaseController = useCallback(async (release: boolean) => {
-    const controller = leaseControllerRef.current;
-    leaseControllerRef.current = null;
-    leaseUnsubscribeRef.current?.();
-    leaseUnsubscribeRef.current = null;
-    setLeaseSnapshot(null);
-    if (!controller) return;
-    if (release) await controller.release();
-    else controller.stop();
-  }, []);
 
   const attachLeaseController = useCallback((controller: FireflyProjectLeaseController) => {
     leaseControllerRef.current = controller;
@@ -144,6 +134,12 @@ export function FireflyAtlasApp() {
     setOpenIssue(null);
     setOpenIssueError(undefined);
     setWorkspaceError(undefined);
+
+    const backgroundClose = backgroundCloseRef.current;
+    if (backgroundClose?.projectId === project.id) {
+      await backgroundClose.promise;
+      if (requestId !== openRequestRef.current) return;
+    }
 
     const controller = new FireflyProjectLeaseController({
       projectId: project.id,
@@ -276,22 +272,39 @@ export function FireflyAtlasApp() {
     try {
       const editor = editorAdapterRef.current;
       if (!editor) throw new Error('编辑器尚未完成初始化');
-      const result = await editor.saveAndFlushEditorProject();
-      if (!result.savedLocally) throw new Error('项目未能保存到本机，请重试');
-      if (result.cloudStatus?.status === 'error') {
-        throw new Error(result.cloudStatus.errorMessage ?? t('workspace.saveFailed'));
-      }
-      await detachLeaseController(true);
+      const savedLocally = await editor.saveEditorProjectLocally();
+      if (!savedLocally) throw new Error('项目未能保存到本机，请重试');
+
+      const controller = leaseControllerRef.current;
+      leaseControllerRef.current = null;
+      leaseUnsubscribeRef.current?.();
+      leaseUnsubscribeRef.current = null;
+      setLeaseSnapshot(null);
+
+      const cloudSave = editor.flushEditorProjectCloud();
       editor.closeEditorProject();
       editorAdapterRef.current = null;
       setActiveProject(null);
       setPhase('dashboard');
       window.history.replaceState(null, '', '/studio/atlas/');
-      await loadProjects();
+
+      const completion = cloudSave.then((cloudStatus) => {
+        if (cloudStatus.status === 'error') {
+          setProjectsError(cloudStatus.errorMessage ?? t('workspace.saveFailed'));
+        }
+      }).catch((error) => {
+        setProjectsError(displayError(error, t('workspace.saveFailed')));
+      }).finally(async () => {
+        await controller?.release();
+        if (backgroundCloseRef.current?.promise === completion) backgroundCloseRef.current = null;
+        await loadProjects();
+      });
+      backgroundCloseRef.current = { projectId: activeProject.id, promise: completion };
+      void loadProjects();
     } catch (error) {
       setWorkspaceError(displayError(error, t('workspace.saveFailed')));
     }
-  }, [activeProject, bootstrap, detachLeaseController, loadProjects, t]);
+  }, [activeProject, bootstrap, loadProjects, t]);
 
   const embeddedContext = useMemo(() => bootstrap ? {
     user: bootstrap.user,

@@ -17,14 +17,16 @@ export async function openEditorProject(options: OpenFireflyProjectOptions): Pro
   return true;
 }
 
-export async function saveAndFlushEditorProject(): Promise<{
-  savedLocally: boolean;
-  cloudStatus?: ReturnType<typeof projectFileService.getFireflyCloudSaveState>;
-}> {
-  const savedLocally = await saveCurrentProject({ source: 'manual', label: 'Return to Atlas projects' });
-  if (!savedLocally) return { savedLocally: false };
-  const cloudStatus = await projectFileService.flushFireflyCloudSave();
-  return { savedLocally: true, cloudStatus };
+export function saveEditorProjectLocally(): Promise<boolean> {
+  return saveCurrentProject({ source: 'manual', label: 'Return to Atlas projects' });
+}
+
+/**
+ * Cloud durability is deliberately separate from the local save boundary.
+ * Atlas is local-first: navigation may wait for OPFS, but never for TOS.
+ */
+export function flushEditorProjectCloud(): ReturnType<typeof projectFileService.flushFireflyCloudSave> {
+  return projectFileService.flushFireflyCloudSave();
 }
 
 export function updateEditorLeaseToken(token: string): void {
