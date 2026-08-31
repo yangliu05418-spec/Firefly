@@ -5,7 +5,11 @@
 
 import { Logger } from './logger';
 import { ThumbnailCacheEventBus } from './thumbnailCache/events';
-import { ThumbnailGenerator } from './thumbnailCache/generation';
+import {
+  ThumbnailGenerator,
+  type ThumbnailGenerationRunOptions,
+  type ThumbnailGenerationSecondRange,
+} from './thumbnailCache/generation';
 import { ThumbnailInvalidationController } from './thumbnailCache/invalidation';
 import { ThumbnailMemoryTier } from './thumbnailCache/memoryTier';
 import { ThumbnailPersistentTier } from './thumbnailCache/persistentTier';
@@ -35,6 +39,7 @@ export type {
   ThumbnailCacheEventType,
   ThumbnailStatus,
 } from './thumbnailCache/types';
+export type { ThumbnailGenerationSecondRange } from './thumbnailCache/generation';
 export {
   createThumbnailGenerationVideo,
   createThumbnailGenerationVideoFromUrl,
@@ -50,6 +55,11 @@ class ThumbnailCacheService {
   private readonly abortControllers = new Map<string, AbortController>();
   private readonly durations = new Map<string, number>();
   private readonly lastGenerationErrors = new Map<string, string>();
+  private readonly generationPromises = new Map<string, Promise<void>>();
+  private readonly generationPrioritySecondRanges = new Map<
+    string,
+    ThumbnailGenerationSecondRange[]
+  >();
   private readonly generator: ThumbnailGenerator;
   private readonly invalidation: ThumbnailInvalidationController;
 
@@ -62,6 +72,9 @@ class ThumbnailCacheService {
       setLastGenerationError: (mediaFileId, error) => {
         this.lastGenerationErrors.set(mediaFileId, error);
       },
+      isSourceVersionCurrent: (mediaFileId, sourceVersion) => (
+        this.requestQueue.isSourceVersionCurrent(mediaFileId, sourceVersion)
+      ),
     });
     this.invalidation = new ThumbnailInvalidationController({
       abortControllers: this.abortControllers,
@@ -173,18 +186,79 @@ class ThumbnailCacheService {
     );
   }
 
-  async generateForSourceUrl(
+  generateForSourceUrl(
     mediaFileId: string,
     sourceUrl: string,
     duration: number,
     fileHash?: string,
     crossOrigin = 'anonymous',
+    prioritySecondRanges?: readonly ThumbnailGenerationSecondRange[],
   ): Promise<void> {
-    const currentStatus = this.getStatus(mediaFileId);
-    if (currentStatus === 'generating' || currentStatus === 'ready') {
-      log.debug('Thumbnails already generating/ready', { mediaFileId, status: currentStatus });
-      return;
+    this.prioritizeSourceSeconds(mediaFileId, prioritySecondRanges);
+
+    const activeGeneration = this.generationPromises.get(mediaFileId);
+    if (activeGeneration) {
+      return activeGeneration;
     }
+
+    const currentStatus = this.getStatus(mediaFileId);
+    const expectedFrameCount = Math.ceil(duration);
+    if (
+      currentStatus === 'ready'
+      && this.getCount(mediaFileId) >= expectedFrameCount
+    ) {
+      log.debug('Thumbnails already generating/ready', { mediaFileId, status: currentStatus });
+      this.generationPrioritySecondRanges.delete(mediaFileId);
+      return Promise.resolve();
+    }
+
+    const generationPromise = this.runThumbnailGeneration(
+      mediaFileId,
+      sourceUrl,
+      duration,
+      fileHash,
+      crossOrigin,
+    );
+    this.generationPromises.set(mediaFileId, generationPromise);
+    const cleanupGeneration = () => {
+      if (this.generationPromises.get(mediaFileId) === generationPromise) {
+        this.generationPromises.delete(mediaFileId);
+        this.generationPrioritySecondRanges.delete(mediaFileId);
+      }
+    };
+    void generationPromise.then(cleanupGeneration, cleanupGeneration);
+    return generationPromise;
+  }
+
+  prioritizeSourceSeconds(
+    mediaFileId: string,
+    prioritySecondRanges?: readonly ThumbnailGenerationSecondRange[],
+  ): void {
+    if (!prioritySecondRanges?.length) return;
+    const current = this.generationPrioritySecondRanges.get(mediaFileId) ?? [];
+    const deduplicated = new Map<string, ThumbnailGenerationSecondRange>();
+    for (const range of [...prioritySecondRanges, ...current]) {
+      if (!Number.isFinite(range.startSecond) || !Number.isFinite(range.endSecond)) continue;
+      const normalized = {
+        startSecond: Math.max(0, Math.floor(Math.min(range.startSecond, range.endSecond))),
+        endSecond: Math.max(0, Math.ceil(Math.max(range.startSecond, range.endSecond))),
+      };
+      deduplicated.set(`${normalized.startSecond}:${normalized.endSecond}`, normalized);
+      // Visible ranges are only a priority hint. Bound retained history so a
+      // long scrolling session cannot make each frame lookup progressively
+      // more expensive while the background pass completes.
+      if (deduplicated.size >= 16) break;
+    }
+    this.generationPrioritySecondRanges.set(mediaFileId, [...deduplicated.values()]);
+  }
+
+  private async runThumbnailGeneration(
+    mediaFileId: string,
+    sourceUrl: string,
+    duration: number,
+    fileHash: string | undefined,
+    crossOrigin: string,
+  ): Promise<void> {
 
     const generationJobId = getThumbnailGenerationJobId(mediaFileId);
     const generationAdmission = canRetainThumbnailJob({
@@ -222,8 +296,20 @@ class ThumbnailCacheService {
         if (!this.requestQueue.isSourceVersionCurrent(mediaFileId, sourceVersion)) {
           return;
         }
-        log.debug('Loaded thumbnails from IndexedDB', { mediaFileId, count: this.getCount(mediaFileId) });
-        this.events.notify(mediaFileId, 'ready');
+        const loadedCount = this.getCount(mediaFileId);
+        if (loadedCount >= Math.ceil(duration)) {
+          log.debug('Loaded thumbnails from IndexedDB', { mediaFileId, count: loadedCount });
+          this.events.notify(mediaFileId, 'ready');
+          return;
+        }
+        this.memory.evictSource(mediaFileId);
+        this.events.notify(mediaFileId, 'generating');
+        log.debug('Cached thumbnail set is incomplete; regenerating source', {
+          mediaFileId,
+          count: loadedCount,
+          expectedCount: Math.ceil(duration),
+        });
+      } else if (!this.requestQueue.isSourceVersionCurrent(mediaFileId, sourceVersion)) {
         return;
       }
 
@@ -268,6 +354,9 @@ class ThumbnailCacheService {
 
       try {
         await prepareThumbnailGenerationVideo(thumbnailVideo, abortController.signal);
+        if (!this.requestQueue.isSourceVersionCurrent(mediaFileId, sourceVersion)) {
+          return;
+        }
         reportThumbnailGenerationVideo({
           mediaFileId,
           sourceUrl,
@@ -279,22 +368,41 @@ class ThumbnailCacheService {
           duration,
           fileHash,
           abortController.signal,
+          {
+            sourceVersion,
+            getPrioritySecondRanges: () => (
+              this.generationPrioritySecondRanges.get(mediaFileId) ?? []
+            ),
+          },
         );
-        if (generated && !abortController.signal.aborted) {
+        if (
+          generated
+          && !abortController.signal.aborted
+          && this.requestQueue.isSourceVersionCurrent(mediaFileId, sourceVersion)
+        ) {
           this.events.notify(mediaFileId, 'ready');
           log.debug('Thumbnail generation complete', { mediaFileId, count: this.getCount(mediaFileId) });
-        } else if (!abortController.signal.aborted && this.getStatus(mediaFileId) === 'generating') {
+        } else if (
+          !abortController.signal.aborted
+          && this.requestQueue.isSourceVersionCurrent(mediaFileId, sourceVersion)
+          && this.getStatus(mediaFileId) === 'generating'
+        ) {
           this.events.notify(mediaFileId, 'none');
         }
       } catch (error) {
-        if (!abortController.signal.aborted) {
+        if (
+          !abortController.signal.aborted
+          && this.requestQueue.isSourceVersionCurrent(mediaFileId, sourceVersion)
+        ) {
           log.warn('Thumbnail generation failed', { mediaFileId, error });
           this.events.notify(mediaFileId, 'error');
         }
       } finally {
         cleanupThumbnailGenerationVideo(thumbnailVideo);
         releaseThumbnailRuntimeResource(getThumbnailGenerationVideoResourceId(mediaFileId));
-        this.abortControllers.delete(mediaFileId);
+        if (this.abortControllers.get(mediaFileId) === abortController) {
+          this.abortControllers.delete(mediaFileId);
+        }
       }
     } finally {
       releaseThumbnailRuntimeResource(generationJobId);
@@ -313,6 +421,10 @@ class ThumbnailCacheService {
 
   /** Clear everything for a source (memory + IndexedDB) */
   async clearSource(mediaFileId: string): Promise<void> {
+    const pendingGeneration = this.generationPromises.get(mediaFileId);
+    this.invalidation.abort(mediaFileId);
+    this.requestQueue.bumpSourceVersion(mediaFileId);
+    await pendingGeneration?.catch(() => undefined);
     await this.invalidation.clearSource(mediaFileId);
   }
 
@@ -332,8 +444,16 @@ class ThumbnailCacheService {
     duration: number,
     fileHash: string | undefined,
     signal: AbortSignal,
+    runOptions?: ThumbnailGenerationRunOptions,
   ): Promise<boolean> {
-    return this.generator.generateThumbnails(mediaFileId, video, duration, fileHash, signal);
+    return this.generator.generateThumbnails(
+      mediaFileId,
+      video,
+      duration,
+      fileHash,
+      signal,
+      runOptions,
+    );
   }
 
   /**

@@ -19,6 +19,17 @@ export interface ThumbnailGeneratorOptions {
   log: ThumbnailCacheLogger;
   notify: ThumbnailCacheNotify;
   setLastGenerationError: (mediaFileId: string, error: string) => void;
+  isSourceVersionCurrent: (mediaFileId: string, sourceVersion: number) => boolean;
+}
+
+export interface ThumbnailGenerationSecondRange {
+  startSecond: number;
+  endSecond: number;
+}
+
+export interface ThumbnailGenerationRunOptions {
+  sourceVersion?: number;
+  getPrioritySecondRanges?: () => readonly ThumbnailGenerationSecondRange[];
 }
 
 export class ThumbnailGenerator {
@@ -34,6 +45,7 @@ export class ThumbnailGenerator {
     duration: number,
     fileHash: string | undefined,
     signal: AbortSignal,
+    runOptions: ThumbnailGenerationRunOptions = {},
   ): Promise<boolean> {
     if (video.readyState < 2) {
       await new Promise<void>((resolve) => {
@@ -67,12 +79,40 @@ export class ThumbnailGenerator {
       }
 
       const totalThumbs = Math.ceil(duration);
+      const sourceVersion = runOptions.sourceVersion;
+      const isCurrent = () => (
+        !signal.aborted
+        && (
+          sourceVersion === undefined
+          || this.options.isSourceVersionCurrent(mediaFileId, sourceVersion)
+        )
+      );
+      if (!isCurrent()) return false;
+
       const sourceCache = this.options.memory.createSourceCache(mediaFileId);
       const captureErrors: string[] = [];
       let batch: StoredSourceThumbnailFrame[] = [];
+      const remainingSeconds = new Set<number>(
+        Array.from({ length: totalThumbs }, (_value, secondIndex) => secondIndex),
+      );
+      let nextSequentialSecond = 0;
 
-      for (let s = 0; s < totalThumbs; s++) {
-        if (signal.aborted) return false;
+      while (remainingSeconds.size > 0) {
+        if (!isCurrent()) return false;
+
+        const prioritizedSecond = this.findNextPrioritySecond(
+          remainingSeconds,
+          totalThumbs,
+          runOptions.getPrioritySecondRanges?.() ?? [],
+        );
+        while (
+          nextSequentialSecond < totalThumbs
+          && !remainingSeconds.has(nextSequentialSecond)
+        ) {
+          nextSequentialSecond += 1;
+        }
+        const s = prioritizedSecond ?? nextSequentialSecond;
+        if (!remainingSeconds.delete(s)) break;
 
         const seekTime = Math.min(s, duration - 0.01);
 
@@ -87,6 +127,8 @@ export class ThumbnailGenerator {
               THUMB_QUALITY,
             );
           });
+
+          if (!isCurrent()) return false;
 
           this.options.memory.setGeneratedFrame(mediaFileId, sourceCache, s, blob);
           this.options.notify(mediaFileId, 'generating', {
@@ -105,7 +147,9 @@ export class ThumbnailGenerator {
           });
 
           if (batch.length >= BATCH_SIZE) {
+            if (!isCurrent()) return false;
             await this.options.persistent.saveSourceThumbnailsBatch(batch);
+            if (!isCurrent()) return false;
             batch = [];
           }
         } catch (error) {
@@ -133,7 +177,9 @@ export class ThumbnailGenerator {
       }
 
       if (batch.length > 0) {
+        if (!isCurrent()) return false;
         await this.options.persistent.saveSourceThumbnailsBatch(batch);
+        if (!isCurrent()) return false;
       }
 
       try {
@@ -145,6 +191,27 @@ export class ThumbnailGenerator {
     } finally {
       releaseThumbnailRuntimeResource(getThumbnailGenerationCanvasResourceId(mediaFileId));
     }
+  }
+
+  private findNextPrioritySecond(
+    remainingSeconds: ReadonlySet<number>,
+    totalThumbs: number,
+    ranges: readonly ThumbnailGenerationSecondRange[],
+  ): number | null {
+    for (const range of ranges) {
+      if (!Number.isFinite(range.startSecond) || !Number.isFinite(range.endSecond)) {
+        continue;
+      }
+      const start = Math.max(0, Math.floor(Math.min(range.startSecond, range.endSecond)));
+      const end = Math.min(
+        totalThumbs - 1,
+        Math.ceil(Math.max(range.startSecond, range.endSecond)),
+      );
+      for (let secondIndex = start; secondIndex <= end; secondIndex += 1) {
+        if (remainingSeconds.has(secondIndex)) return secondIndex;
+      }
+    }
+    return null;
   }
 
   private seekVideoSafe(video: HTMLVideoElement, time: number): Promise<void> {

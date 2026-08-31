@@ -7,11 +7,13 @@ export function createThumbnailGenerationVideoFromUrl(
   }
 
   const video = document.createElement('video');
+  // crossOrigin must be set before src. Setting it afterwards can let the
+  // initial request start without CORS and taint the thumbnail canvas.
+  video.crossOrigin = crossOrigin || 'anonymous';
   video.src = sourceUrl;
   video.preload = 'auto';
   video.muted = true;
   video.playsInline = true;
-  video.crossOrigin = crossOrigin || 'anonymous';
   video.load();
   return video;
 }

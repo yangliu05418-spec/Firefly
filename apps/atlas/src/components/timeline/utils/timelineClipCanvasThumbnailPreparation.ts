@@ -29,10 +29,11 @@ export function resolveTimelineThumbnailUrls(
   staticThumbnailUrl: string | undefined,
   count: number,
 ): (string | null)[] {
-  if (generatedUrls.some(Boolean)) return [...generatedUrls];
-  return staticThumbnailUrl
-    ? Array.from({ length: count }, () => staticThumbnailUrl)
-    : [];
+  if (!staticThumbnailUrl) return generatedUrls.some(Boolean) ? [...generatedUrls] : [];
+  return Array.from(
+    { length: count },
+    (_, index) => generatedUrls[index] || staticThumbnailUrl,
+  );
 }
 
 export function collectTimelineClipCanvasWorkerThumbnailPreparation(input: {

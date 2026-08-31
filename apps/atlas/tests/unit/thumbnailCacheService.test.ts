@@ -5,6 +5,7 @@ import {
   thumbnailCacheService,
   type ThumbnailCacheEvent,
 } from '../../src/services/thumbnailCacheService';
+import type { ThumbnailGenerationRunOptions } from '../../src/services/thumbnailCache/generation';
 import { projectDB } from '../../src/services/projectDB';
 import {
   clearThumbnailBitmapCache,
@@ -31,6 +32,7 @@ type ThumbnailCacheServiceTestAccess = typeof thumbnailCacheService & {
     duration: number,
     fileHash: string | undefined,
     signal: AbortSignal,
+    runOptions?: ThumbnailGenerationRunOptions,
   ): Promise<boolean>;
 };
 
@@ -100,6 +102,27 @@ describe('thumbnailCacheService', () => {
     expect(clonedVideo.load).toHaveBeenCalled();
   });
 
+  it('sets CORS mode before assigning a remote thumbnail source', () => {
+    const assignments: string[] = [];
+    const clonedVideo = {
+      preload: 'metadata',
+      muted: false,
+      playsInline: false,
+      load: vi.fn(),
+      set crossOrigin(_value: string) {
+        assignments.push('crossOrigin');
+      },
+      set src(_value: string) {
+        assignments.push('src');
+      },
+    } as unknown as HTMLVideoElement;
+    vi.spyOn(document, 'createElement').mockReturnValue(clonedVideo);
+
+    createThumbnailGenerationVideoFromUrl('/api/atlas/project-assets/asset-1/media');
+
+    expect(assignments.slice(0, 2)).toEqual(['crossOrigin', 'src']);
+  });
+
   it('generates thumbnails from the isolated video instead of the preview video', async () => {
     const previewVideo = {
       src: 'blob:preview-video',
@@ -140,7 +163,8 @@ describe('thumbnailCacheService', () => {
       isolatedVideo,
       12,
       undefined,
-      expect.any(AbortSignal)
+      expect.any(AbortSignal),
+      expect.objectContaining({ sourceVersion: expect.any(Number) }),
     );
     expect(generateSpy).not.toHaveBeenCalledWith(
       expect.any(String),
@@ -193,6 +217,7 @@ describe('thumbnailCacheService', () => {
       12,
       'hash-a',
       expect.any(AbortSignal),
+      expect.objectContaining({ sourceVersion: expect.any(Number) }),
     );
     expect(isolatedVideo.pause).toHaveBeenCalled();
     expect(isolatedVideo.removeAttribute).toHaveBeenCalledWith('src');
@@ -516,6 +541,167 @@ describe('thumbnailCacheService', () => {
         count: 1,
       },
     ]);
+  });
+
+  it('captures visible source seconds first, then fills the remaining filmstrip', async () => {
+    const service = thumbnailCacheService as unknown as ThumbnailCacheServiceTestAccess;
+    const mediaFileId = `media-thumb-priority-${Date.now()}`;
+    const originalCreateElement = document.createElement.bind(document);
+    const seekedListeners = new Set<() => void>();
+    const soughtSeconds: number[] = [];
+    let currentTime = 0;
+    let objectUrlIndex = 0;
+    const canvas = {
+      width: 0,
+      height: 0,
+      getContext: vi.fn(() => ({ drawImage: vi.fn() })),
+      toBlob: vi.fn((callback: BlobCallback) => callback(new Blob(['thumb']))),
+    } as unknown as HTMLCanvasElement;
+    const video = {
+      readyState: 2,
+      addEventListener: vi.fn((event: string, callback: EventListenerOrEventListenerObject) => {
+        if (event === 'seeked') seekedListeners.add(callback as () => void);
+      }),
+      removeEventListener: vi.fn((event: string, callback: EventListenerOrEventListenerObject) => {
+        if (event === 'seeked') seekedListeners.delete(callback as () => void);
+      }),
+      set currentTime(value: number) {
+        currentTime = value;
+        soughtSeconds.push(value);
+        queueMicrotask(() => {
+          for (const listener of [...seekedListeners]) listener();
+        });
+      },
+      get currentTime() {
+        return currentTime;
+      },
+    } as unknown as HTMLVideoElement;
+    vi.spyOn(document, 'createElement').mockImplementation((tagName: string) => (
+      tagName === 'canvas' ? canvas : originalCreateElement(tagName)
+    ));
+    vi.spyOn(URL, 'createObjectURL').mockImplementation(() => `blob:priority-thumb-${objectUrlIndex++}`);
+    vi.spyOn(projectDB, 'saveSourceThumbnailsBatch').mockResolvedValue(undefined);
+
+    await service.generateThumbnails(
+      mediaFileId,
+      video,
+      6,
+      'hash-priority',
+      new AbortController().signal,
+      {
+        getPrioritySecondRanges: () => [{ startSecond: 4, endSecond: 5 }],
+      },
+    );
+
+    expect(soughtSeconds.slice(0, 6)).toEqual([4, 5, 0, 1, 2, 3]);
+    expect(thumbnailCacheService.getCount(mediaFileId)).toBe(6);
+  });
+
+  it('does not commit a frame after the source version changes', async () => {
+    const service = thumbnailCacheService as unknown as ThumbnailCacheServiceTestAccess;
+    const mediaFileId = `media-thumb-stale-write-${Date.now()}`;
+    const originalCreateElement = document.createElement.bind(document);
+    let currentTime = 0;
+    const seekedListeners = new Set<() => void>();
+    const canvas = {
+      width: 0,
+      height: 0,
+      getContext: vi.fn(() => ({ drawImage: vi.fn() })),
+      toBlob: vi.fn((callback: BlobCallback) => {
+        thumbnailCacheService.evictFromMemory(mediaFileId);
+        callback(new Blob(['stale-thumb']));
+      }),
+    } as unknown as HTMLCanvasElement;
+    const video = {
+      readyState: 2,
+      addEventListener: vi.fn((event: string, callback: EventListenerOrEventListenerObject) => {
+        if (event === 'seeked') seekedListeners.add(callback as () => void);
+      }),
+      removeEventListener: vi.fn((event: string, callback: EventListenerOrEventListenerObject) => {
+        if (event === 'seeked') seekedListeners.delete(callback as () => void);
+      }),
+      set currentTime(value: number) {
+        currentTime = value;
+        queueMicrotask(() => {
+          for (const listener of [...seekedListeners]) listener();
+        });
+      },
+      get currentTime() {
+        return currentTime;
+      },
+    } as unknown as HTMLVideoElement;
+    vi.spyOn(document, 'createElement').mockImplementation((tagName: string) => (
+      tagName === 'canvas' ? canvas : originalCreateElement(tagName)
+    ));
+    const createObjectUrl = vi.spyOn(URL, 'createObjectURL');
+    const saveBatch = vi.spyOn(projectDB, 'saveSourceThumbnailsBatch').mockResolvedValue(undefined);
+
+    await expect(service.generateThumbnails(
+      mediaFileId,
+      video,
+      1,
+      'hash-stale',
+      new AbortController().signal,
+      { sourceVersion: 0 },
+    )).resolves.toBe(false);
+
+    expect(createObjectUrl).not.toHaveBeenCalled();
+    expect(saveBatch).not.toHaveBeenCalled();
+    expect(thumbnailCacheService.getCount(mediaFileId)).toBe(0);
+  });
+
+  it('waits for an aborted source generation before clearing and restarting it', async () => {
+    const service = thumbnailCacheService as unknown as ThumbnailCacheServiceTestAccess;
+    const mediaFileId = `media-thumb-restart-${Date.now()}`;
+    const isolatedVideo = {
+      src: '',
+      readyState: 2,
+      duration: 4,
+      load: vi.fn(),
+      pause: vi.fn(),
+      removeAttribute: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    } as unknown as HTMLVideoElement;
+    let resolveOldGeneration: ((generated: boolean) => void) | undefined;
+    vi.spyOn(document, 'createElement').mockReturnValue(isolatedVideo);
+    vi.spyOn(service, 'loadFromDB').mockResolvedValue(false);
+    vi.spyOn(projectDB, 'deleteSourceThumbnails').mockResolvedValue(undefined);
+    const generateSpy = vi.spyOn(service, 'generateThumbnails')
+      .mockReturnValueOnce(new Promise<boolean>((resolve) => {
+        resolveOldGeneration = resolve;
+      }))
+      .mockResolvedValueOnce(true);
+
+    const oldGeneration = thumbnailCacheService.generateForSourceUrl(
+      mediaFileId,
+      'blob:old-source',
+      4,
+      'hash-old',
+    );
+    await vi.waitFor(() => expect(generateSpy).toHaveBeenCalledTimes(1));
+
+    let clearCompleted = false;
+    const clearPromise = thumbnailCacheService.clearSource(mediaFileId).then(() => {
+      clearCompleted = true;
+    });
+    await Promise.resolve();
+    expect(clearCompleted).toBe(false);
+
+    resolveOldGeneration?.(true);
+    await oldGeneration;
+    await clearPromise;
+    expect(thumbnailCacheService.getStatus(mediaFileId)).toBe('none');
+
+    await thumbnailCacheService.generateForSourceUrl(
+      mediaFileId,
+      'blob:new-source',
+      4,
+      'hash-new',
+    );
+
+    expect(generateSpy).toHaveBeenCalledTimes(2);
+    expect(thumbnailCacheService.getStatus(mediaFileId)).toBe('ready');
   });
 
   it('captures a frame when the thumbnail video is already at the seek target without firing seeked', async () => {

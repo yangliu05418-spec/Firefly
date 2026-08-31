@@ -1,5 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
-import { drawTimelineClipCanvasMainThread } from '../../src/components/timeline/utils/timelineClipCanvasMainThreadDraw';
+
+const thumbnailPainter = vi.hoisted(() => ({ draw: vi.fn(() => 1) }));
+
+vi.mock('../../src/components/timeline/utils/timelineClipCanvasThumbnailPainter', () => ({
+  drawTimelineClipCanvasThumbnails: thumbnailPainter.draw,
+}));
+
+import {
+  drawTimelineClipCanvasMainThread,
+  resolveTimelineClipCanvasStaticThumbnailUrl,
+} from '../../src/components/timeline/utils/timelineClipCanvasMainThreadDraw';
 import { resolveTimelineClipCanvasPaintVisuals } from '../../src/components/timeline/utils/timelineClipCanvasPaintVisualContributors';
 import { getTimelineClipCanvasThumbnailMediaFileId } from '../../src/components/timeline/utils/timelineClipCanvasThumbnailPreparation';
 import { createTimelineClipCanvasWorkerPaintClipInput } from '../../src/components/timeline/utils/timelineClipCanvasWorkerPaintClip';
@@ -7,10 +17,17 @@ import { createTimelineClipCanvasChromeOverlays } from '../../src/components/tim
 import type { TimelinePaintSourceClip } from '../../src/timeline';
 
 function createContext(): CanvasRenderingContext2D {
-  return {
+  const context = {
     clearRect: vi.fn(),
+    createLinearGradient: vi.fn(() => ({ addColorStop: vi.fn() })),
     roundRect: vi.fn(),
-  } as unknown as CanvasRenderingContext2D;
+  } as Record<string, unknown>;
+  return new Proxy(context, {
+    get(target, property: string) {
+      if (!(property in target)) target[property] = vi.fn();
+      return target[property];
+    },
+  }) as unknown as CanvasRenderingContext2D;
 }
 
 function createClip(): TimelinePaintSourceClip {
@@ -36,6 +53,65 @@ describe('timeline clip canvas main-thread draw', () => {
 
     expect(getTimelineClipCanvasThumbnailMediaFileId(clip)).toBe('image-1');
     expect(resolveTimelineClipCanvasPaintVisuals(clip).thumbnail).toBe(true);
+  });
+
+  it('draws the server poster as the immediate main-thread fallback for video clips', () => {
+    const clip = {
+      ...createClip(),
+      mediaFileId: 'video-1',
+      source: { mediaFileId: 'video-1', naturalDuration: 5, type: 'video' },
+    } as TimelinePaintSourceClip;
+    const posters = new Map([['video-1', '/api/generations/task-1/poster']]);
+
+    expect(resolveTimelineClipCanvasStaticThumbnailUrl(clip, 'video-1', posters)).toBe(
+      '/api/generations/task-1/poster',
+    );
+    const diagnostics = drawTimelineClipCanvasMainThread({
+      audioDisplayMode: 'detailed',
+      canvasOffsetX: 0,
+      clips: [clip],
+      cssWidth: 100,
+      ctx: createContext(),
+      getMediaStatus: () => undefined,
+      height: 48,
+      hoveredClipId: null,
+      lodBarPx: 2,
+      lodThumbnailPx: 24,
+      maxThumbnailSlots: 4,
+      mediaThumbnailUrlsById: posters,
+      renderOverscanPx: 0,
+      requestRedraw: vi.fn(),
+      resolveGeometry: (current) => ({
+        duration: current.duration,
+        inPoint: current.inPoint ?? 0,
+        outPoint: current.outPoint ?? current.duration,
+        startTime: current.startTime,
+        visible: true,
+      }),
+      scrollX: 0,
+      selectedClipIds: new Set(),
+      thumbnailSlotPx: 24,
+      thumbnailViewportOverscanPx: 0,
+      timeToPixel: (time) => time * 20,
+      trackColor: '#4c9aff',
+      viewportWidth: 100,
+      waveformsEnabled: false,
+    });
+
+    expect(thumbnailPainter.draw).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ id: 'clip-1' }),
+      'video-1',
+      expect.any(Number),
+      expect.any(Number),
+      expect.any(Number),
+      expect.any(Number),
+      expect.any(Function),
+      4,
+      24,
+      '/api/generations/task-1/poster',
+    );
+    expect(diagnostics.thumbnailDrawCount).toBe(1);
   });
 
   it('passes solid colors to the canvas worker body fill', () => {

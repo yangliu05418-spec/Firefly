@@ -8,6 +8,7 @@ import {
   reportThumbnailBitmapResource,
 } from './thumbnailRuntimeReporting';
 import { timelineRuntimeCoordinator } from './timelineRuntimeCoordinator';
+import { Logger } from '../logger';
 
 // Decoded ImageBitmap cache for timeline thumbnails.
 //
@@ -16,6 +17,7 @@ import { timelineRuntimeCoordinator } from './timelineRuntimeCoordinator';
 // source thumbnails are evicted or the media source is deleted.
 
 const MAX_BITMAPS = 600;
+const log = Logger.create('TimelineThumbnailBitmapCache');
 
 const cache = new Map<string, ImageBitmap>(); // insertion order = LRU order
 const inflight = new Set<string>();
@@ -67,7 +69,16 @@ export function ensureThumbnailBitmap(
   inflight.add(url);
   reportThumbnailBitmapDecodeJob(url, mediaFileId);
   fetch(url)
-    .then((r) => r.blob())
+    .then((response) => {
+      if (response.ok === false) {
+        throw new Error(`THUMBNAIL_HTTP_${response.status}`);
+      }
+      const contentType = response.headers?.get('content-type') ?? '';
+      if (contentType && !contentType.toLowerCase().startsWith('image/')) {
+        throw new Error('THUMBNAIL_INVALID_CONTENT_TYPE');
+      }
+      return response.blob();
+    })
     .then((blob) => createImageBitmap(blob))
     .then((bmp) => {
       inflight.delete(url);
@@ -90,9 +101,13 @@ export function ensureThumbnailBitmap(
       enforceBitmapLimit();
       onReady();
     })
-    .catch(() => {
+    .catch((error) => {
       inflight.delete(url);
       releaseThumbnailRuntimeResource(getThumbnailBitmapDecodeJobId(url));
+      log.warn('Timeline thumbnail bitmap decode failed', {
+        mediaFileId,
+        errorCode: error instanceof Error ? error.message : 'THUMBNAIL_DECODE_FAILED',
+      });
     });
 }
 

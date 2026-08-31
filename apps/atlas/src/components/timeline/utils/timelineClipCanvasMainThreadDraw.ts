@@ -75,6 +75,16 @@ function withAlpha(color: string, alpha: number): string {
   return color;
 }
 
+export function resolveTimelineClipCanvasStaticThumbnailUrl(
+  clip: TimelinePaintSourceClip,
+  mediaFileId: string,
+  mediaThumbnailUrlsById?: ReadonlyMap<string, string | undefined>,
+): string | undefined {
+  return clip.source?.type === 'video' || clip.source?.type === 'image'
+    ? mediaThumbnailUrlsById?.get(mediaFileId)
+    : undefined;
+}
+
 export function drawTimelineClipCanvasMainThread(
   input: TimelineClipCanvasMainThreadDrawInput,
 ): TimelineCanvasDrawDiagnostics {
@@ -284,7 +294,7 @@ export function drawTimelineClipCanvasMainThread(
         requestRedraw,
         maxThumbnailSlots,
         thumbnailSlotPx,
-        clip.source?.type === 'image' ? mediaThumbnailUrlsById?.get(mediaFileId) : undefined,
+        resolveTimelineClipCanvasStaticThumbnailUrl(clip, mediaFileId, mediaThumbnailUrlsById),
       );
       const grad = ctx.createLinearGradient(0, top + h - 16, 0, top + h);
       grad.addColorStop(0, 'rgba(0,0,0,0)');

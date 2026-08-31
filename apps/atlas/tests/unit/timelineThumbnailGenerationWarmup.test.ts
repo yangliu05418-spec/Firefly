@@ -1,4 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('../../src/stores/mediaStore', () => ({
+  useMediaStore: { getState: () => ({ files: [] }) },
+}));
+
+vi.mock('../../src/stores/timeline', () => ({
+  useTimelineStore: {
+    getState: () => ({ clips: [], isPlaying: false, clipDragPreview: null }),
+  },
+}));
+
 import {
   resetTimelineThumbnailGenerationWarmupForTest,
   scheduleVisibleTimelineThumbnailGeneration,
@@ -20,8 +31,11 @@ function createDeps(
   overrides: Partial<ReturnType<TimelineThumbnailGenerationWarmupDeps['getState']>> = {},
   status: ThumbnailStatus = 'none',
 ): TimelineThumbnailGenerationWarmupDeps {
+  let currentStatus = status;
   const generateForSourceUrl = vi.fn<TimelineThumbnailGenerationWarmupDeps['generateForSourceUrl']>()
-    .mockResolvedValue(undefined);
+    .mockImplementation(async () => {
+      currentStatus = 'ready';
+    });
   const video = createVideo();
 
   return {
@@ -50,7 +64,8 @@ function createDeps(
       clipDragPreview: null,
       ...overrides,
     }),
-    getStatus: vi.fn().mockReturnValue(status),
+    getStatus: vi.fn(() => currentStatus),
+    getCount: vi.fn(() => Math.ceil(video.duration)),
     generateForSourceUrl,
     maxConcurrentGenerations: 2,
     setTimeout,
@@ -85,6 +100,28 @@ describe('timeline thumbnail generation warmup', () => {
     );
   });
 
+  it('passes exact visible source-second ranges to the thumbnail generator', async () => {
+    const deps = createDeps();
+    const prioritySecondRanges = [{ startSecond: 2, endSecond: 3 }];
+
+    await expect(warmVisibleTimelineThumbnailGeneration([{
+      mediaFileId: 'media-a',
+      fileHash: 'hash-a',
+      prioritySecondRanges,
+    }], { deps })).resolves.toEqual([
+      { mediaFileId: 'media-a', status: 'generated' },
+    ]);
+
+    expect(deps.generateForSourceUrl).toHaveBeenCalledWith(
+      'media-a',
+      'blob:video-a',
+      4,
+      'hash-a',
+      'anonymous',
+      prioritySecondRanges,
+    );
+  });
+
   it('blocks thumbnail generation while playback is active', async () => {
     const deps = createDeps({ isPlaying: true });
 
@@ -109,6 +146,45 @@ describe('timeline thumbnail generation warmup', () => {
     expect(deps.generateForSourceUrl).not.toHaveBeenCalled();
   });
 
+  it('regenerates when a ready cache contains fewer frames than the source duration', async () => {
+    const deps = createDeps({}, 'ready');
+    vi.mocked(deps.getCount!).mockReturnValue(1);
+
+    await expect(warmVisibleTimelineThumbnailGeneration([
+      { mediaFileId: 'media-a', fileHash: 'hash-a' },
+    ], { deps })).resolves.toEqual([
+      { mediaFileId: 'media-a', status: 'generated' },
+    ]);
+
+    expect(deps.generateForSourceUrl).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a generator error instead of claiming the filmstrip was generated', async () => {
+    const deps = createDeps();
+    vi.mocked(deps.getStatus)
+      .mockReturnValueOnce('none')
+      .mockReturnValue('error');
+    vi.mocked(deps.generateForSourceUrl).mockResolvedValue(undefined);
+
+    await expect(warmVisibleTimelineThumbnailGeneration([
+      { mediaFileId: 'media-a', fileHash: 'hash-a' },
+    ], { deps })).resolves.toEqual([
+      { mediaFileId: 'media-a', status: 'error' },
+    ]);
+  });
+
+  it('reports skipped when generation finishes without producing a ready source', async () => {
+    const deps = createDeps();
+    vi.mocked(deps.getStatus).mockReturnValue('none');
+    vi.mocked(deps.generateForSourceUrl).mockResolvedValue(undefined);
+
+    await expect(warmVisibleTimelineThumbnailGeneration([
+      { mediaFileId: 'media-a', fileHash: 'hash-a' },
+    ], { deps })).resolves.toEqual([
+      { mediaFileId: 'media-a', status: 'skipped' },
+    ]);
+  });
+
   it('coalesces overlapping generation requests by media id and file hash', async () => {
     let resolveGeneration: (() => void) | undefined;
     const deps = createDeps();
@@ -125,8 +201,42 @@ describe('timeline thumbnail generation warmup', () => {
     await vi.waitFor(() => expect(deps.generateForSourceUrl).toHaveBeenCalledTimes(1));
     resolveGeneration?.();
 
-    await expect(first).resolves.toEqual([{ mediaFileId: 'media-a', status: 'generated' }]);
-    await expect(second).resolves.toEqual([{ mediaFileId: 'media-a', status: 'generated' }]);
+    await expect(first).resolves.toEqual([{ mediaFileId: 'media-a', status: 'skipped' }]);
+    await expect(second).resolves.toEqual([{ mediaFileId: 'media-a', status: 'skipped' }]);
+  });
+
+  it('promotes a newly visible range while full-source generation is in flight', async () => {
+    let resolveGeneration: (() => void) | undefined;
+    const deps = createDeps();
+    deps.prioritizeSourceSeconds = vi.fn();
+    vi.mocked(deps.generateForSourceUrl).mockReturnValue(
+      new Promise<void>((resolve) => {
+        resolveGeneration = resolve;
+      }),
+    );
+
+    const first = warmVisibleTimelineThumbnailGeneration([{
+      mediaFileId: 'media-a',
+      fileHash: 'hash-a',
+      prioritySecondRanges: [{ startSecond: 0, endSecond: 1 }],
+    }], { deps });
+    await vi.waitFor(() => expect(deps.generateForSourceUrl).toHaveBeenCalledTimes(1));
+
+    const second = warmVisibleTimelineThumbnailGeneration([{
+      mediaFileId: 'media-a',
+      fileHash: 'hash-a',
+      prioritySecondRanges: [{ startSecond: 3, endSecond: 4 }],
+    }], { deps });
+
+    expect(deps.prioritizeSourceSeconds).toHaveBeenCalledWith(
+      'media-a',
+      [{ startSecond: 3, endSecond: 4 }],
+    );
+    expect(deps.generateForSourceUrl).toHaveBeenCalledTimes(1);
+
+    resolveGeneration?.();
+    await expect(first).resolves.toEqual([{ mediaFileId: 'media-a', status: 'skipped' }]);
+    await expect(second).resolves.toEqual([{ mediaFileId: 'media-a', status: 'skipped' }]);
   });
 
   it('limits concurrent visible thumbnail generation jobs', async () => {
@@ -173,11 +283,11 @@ describe('timeline thumbnail generation warmup', () => {
     expect(deps.generateForSourceUrl).toHaveBeenCalledTimes(1);
 
     resolveFirst?.();
-    await expect(first).resolves.toEqual([{ mediaFileId: 'media-a', status: 'generated' }]);
+    await expect(first).resolves.toEqual([{ mediaFileId: 'media-a', status: 'skipped' }]);
     await vi.waitFor(() => expect(deps.generateForSourceUrl).toHaveBeenCalledTimes(2));
 
     resolveSecond?.();
-    await expect(second).resolves.toEqual([{ mediaFileId: 'media-b', status: 'generated' }]);
+    await expect(second).resolves.toEqual([{ mediaFileId: 'media-b', status: 'skipped' }]);
   });
 
   it('can cancel scheduled thumbnail generation before work starts', () => {
@@ -252,6 +362,64 @@ describe('timeline thumbnail generation warmup', () => {
       'blob:media-file-url',
       4,
       'hash-a',
+      'anonymous',
+    );
+  });
+
+  it('waits for OPFS instead of competing with a downloading Firefly remote source', async () => {
+    const deps = createDeps({
+      clips: [{
+        id: 'clip-a',
+        duration: 8,
+        source: { type: 'video', mediaFileId: 'media-a', naturalDuration: 8 },
+      }],
+      mediaFiles: [{
+        id: 'media-a',
+        duration: 8,
+        url: '/api/atlas/project-assets/asset-a/media',
+        fireflyProjectAssetId: 'asset-a',
+        remoteSourcePath: '/api/atlas/project-assets/asset-a/media',
+        remoteCacheStatus: 'downloading',
+      }],
+    });
+
+    await expect(warmVisibleTimelineThumbnailGeneration([
+      { mediaFileId: 'media-a' },
+    ], { deps })).resolves.toEqual([
+      { mediaFileId: 'media-a', status: 'blocked' },
+    ]);
+    expect(deps.generateForSourceUrl).not.toHaveBeenCalled();
+  });
+
+  it('uses the local OPFS blob after a Firefly remote source is ready', async () => {
+    const localFile = new File(['video'], 'remote.mp4', { type: 'video/mp4' });
+    const deps = createDeps({
+      clips: [{
+        id: 'clip-a',
+        duration: 8,
+        source: { type: 'video', mediaFileId: 'media-a', naturalDuration: 8 },
+      }],
+      mediaFiles: [{
+        id: 'media-a',
+        duration: 8,
+        file: localFile,
+        url: 'blob:opfs-ready',
+        fireflyProjectAssetId: 'asset-a',
+        remoteSourcePath: '/api/atlas/project-assets/asset-a/media',
+        remoteCacheStatus: 'ready',
+      }],
+    });
+
+    await expect(warmVisibleTimelineThumbnailGeneration([
+      { mediaFileId: 'media-a' },
+    ], { deps })).resolves.toEqual([
+      { mediaFileId: 'media-a', status: 'generated' },
+    ]);
+    expect(deps.generateForSourceUrl).toHaveBeenCalledWith(
+      'media-a',
+      'blob:opfs-ready',
+      8,
+      undefined,
       'anonymous',
     );
   });
