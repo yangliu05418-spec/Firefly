@@ -20,6 +20,7 @@ import { registerNativeDecoderForTimelineClip } from '../../../services/timeline
 import { loadLinkedAudio } from './videoLinkedAudioLoader';
 import { loadCachedProjectAnalysisForVideo } from './videoCachedAnalysisLoader';
 import { startVideoThumbnailGeneration } from './videoThumbnailLoader';
+import { calculateFitToFrameScale } from '../../../utils/sourcePixelScale';
 export { createVideoClipPlaceholders } from './videoClipPlaceholders';
 export type { AddVideoClipParams, AddVideoClipResult } from './videoClipPlaceholders';
 
@@ -37,6 +38,31 @@ export interface LoadVideoMediaParams {
   waveformsEnabled: boolean;
   updateClip: (id: string, updates: Partial<TimelineClip>) => void;
   setClips: (updater: (clips: TimelineClip[]) => TimelineClip[]) => void;
+  onVideoDimensionsResolved?: (dimensions: { width: number; height: number }) => void;
+}
+
+export function resolveInitialVideoTransform(
+  sourceWidth?: number,
+  sourceHeight?: number,
+): typeof DEFAULT_TRANSFORM {
+  if (!sourceWidth || !sourceHeight || !Number.isFinite(sourceWidth) || !Number.isFinite(sourceHeight)) {
+    return { ...DEFAULT_TRANSFORM, scale: { ...DEFAULT_TRANSFORM.scale } };
+  }
+  const mediaState = useMediaStore.getState();
+  const composition = mediaState.compositions?.find((item) => item.id === mediaState.activeCompositionId);
+  if (!composition?.width || !composition.height) {
+    return { ...DEFAULT_TRANSFORM, scale: { ...DEFAULT_TRANSFORM.scale } };
+  }
+  const fitScale = calculateFitToFrameScale(
+    sourceWidth,
+    sourceHeight,
+    composition.width,
+    composition.height,
+  );
+  return {
+    ...DEFAULT_TRANSFORM,
+    scale: { x: fitScale, y: fitScale },
+  };
 }
 
 /**
@@ -53,6 +79,7 @@ export async function loadVideoMedia(params: LoadVideoMediaParams): Promise<void
     waveformsEnabled,
     updateClip,
     setClips,
+    onVideoDimensionsResolved,
   } = params;
 
   // Use native decoder when Turbo Mode is on and helper is connected
@@ -102,6 +129,8 @@ export async function loadVideoMedia(params: LoadVideoMediaParams): Promise<void
 
       log.debug('Native Helper ready', { width: nativeDecoder.width, height: nativeDecoder.height, fps: nativeDecoder.fps });
 
+      onVideoDimensionsResolved?.({ width: nativeDecoder.width, height: nativeDecoder.height });
+
       // Decode initial frame so preview isn't black
       await nativeDecoder.seekToFrame(0);
 
@@ -125,7 +154,7 @@ export async function loadVideoMedia(params: LoadVideoMediaParams): Promise<void
           mediaFileId,
           filePath,
         },
-        transform: { ...DEFAULT_TRANSFORM },
+        transform: resolveInitialVideoTransform(nativeDecoder.width, nativeDecoder.height),
         isLoading: false,
       });
 
@@ -155,11 +184,15 @@ export async function loadVideoMedia(params: LoadVideoMediaParams): Promise<void
         hasAudio: importedHasAudio,
       });
 
+      const sourceWidth = importedMedia?.width;
+      const sourceHeight = importedMedia?.height;
+      if (sourceWidth && sourceHeight) onVideoDimensionsResolved?.({ width: sourceWidth, height: sourceHeight });
+
       updateClip(clipId, {
         duration: naturalDuration,
         outPoint: naturalDuration,
         source: { type: 'video', naturalDuration, mediaFileId },
-        transform: { ...DEFAULT_TRANSFORM },
+        transform: resolveInitialVideoTransform(sourceWidth, sourceHeight),
         isLoading: false,
       });
 
@@ -203,12 +236,16 @@ export async function loadVideoMedia(params: LoadVideoMediaParams): Promise<void
         log.warn('Duration unknown, estimated from file size', { file: file.name, duration: naturalDuration.toFixed(2), size: file.size });
       }
 
+      const sourceWidth = mp4Meta?.width || video.videoWidth || importedMedia?.width;
+      const sourceHeight = mp4Meta?.height || video.videoHeight || importedMedia?.height;
+      if (sourceWidth && sourceHeight) onVideoDimensionsResolved?.({ width: sourceWidth, height: sourceHeight });
+
       // Set isLoading: false immediately so clip becomes interactive
       updateClip(clipId, {
         duration: naturalDuration,
         outPoint: naturalDuration,
         source: { type: 'video', naturalDuration, mediaFileId },
-        transform: { ...DEFAULT_TRANSFORM },
+        transform: resolveInitialVideoTransform(sourceWidth, sourceHeight),
         isLoading: false,
       });
 

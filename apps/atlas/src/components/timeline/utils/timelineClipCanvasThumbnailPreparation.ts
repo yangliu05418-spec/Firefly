@@ -24,6 +24,17 @@ export function getTimelineClipCanvasThumbnailMediaFileId(clip: TimelinePaintSou
   return clip.source?.mediaFileId ?? clip.mediaFileId ?? null;
 }
 
+export function resolveTimelineThumbnailUrls(
+  generatedUrls: readonly (string | null)[],
+  staticThumbnailUrl: string | undefined,
+  count: number,
+): (string | null)[] {
+  if (generatedUrls.some(Boolean)) return [...generatedUrls];
+  return staticThumbnailUrl
+    ? Array.from({ length: count }, () => staticThumbnailUrl)
+    : [];
+}
+
 export function collectTimelineClipCanvasWorkerThumbnailPreparation(input: {
   clips: readonly TimelinePaintSourceClip[];
   height: number;
@@ -120,18 +131,21 @@ export function collectTimelineClipCanvasWorkerThumbnailPreparation(input: {
     const visibleInPoint = geometry.inPoint + sourceSpan * visibleStartRatio;
     const visibleOutPoint = geometry.inPoint + sourceSpan * visibleEndRatio;
     const count = Math.max(1, Math.min(input.maxThumbnailSlots, Math.floor(visibleW / input.thumbnailSlotPx)));
-    const staticThumbnailUrl = clip.source?.type === 'image'
-      ? input.mediaThumbnailUrlsById?.get(mediaFileId)
-      : undefined;
-    const urls = staticThumbnailUrl
-      ? Array.from({ length: count }, () => staticThumbnailUrl)
-      : thumbnailCacheService.getThumbnailsForRange(
+    const staticThumbnailUrl = input.mediaThumbnailUrlsById?.get(mediaFileId);
+    const generatedUrls = clip.source?.type === 'video'
+      ? thumbnailCacheService.getThumbnailsForRange(
         mediaFileId,
         visibleInPoint,
         visibleOutPoint,
         count,
         clip.reversed,
-      );
+      )
+      : [];
+    // Images use their thumbnail directly. Videos prefer the generated
+    // filmstrip, but immediately repeat the server poster while frame sampling
+    // warms in the background. A newly dropped remote clip therefore never
+    // looks like an empty generic block.
+    const urls = resolveTimelineThumbnailUrls(generatedUrls, staticThumbnailUrl, count);
     if (!urls.some((url) => Boolean(url))) {
       handledClipIds.add(clip.id);
       continue;

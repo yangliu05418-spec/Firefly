@@ -78,18 +78,21 @@ export async function applyAddClipAction(
     set({ clips: updater(get().clips) });
   };
   const sourceMediaFile = await loadSourceMediaFile(mediaFileId);
-  if (
-    hasVisualMediaType(mediaType)
-    && clips.every((clip) => !hasVisualMediaType(clip.source?.type ?? ''))
-    && sourceMediaFile?.width && sourceMediaFile.height
-  ) {
+  const isFirstVisualClip = hasVisualMediaType(mediaType)
+    && clips.every((clip) => !hasVisualMediaType(clip.source?.type ?? ''));
+  const initializeCompositionFromFirstVisual = (dimensions: { width: number; height: number }) => {
+    if (!isFirstVisualClip || !Number.isFinite(dimensions.width) || !Number.isFinite(dimensions.height)
+      || dimensions.width <= 0 || dimensions.height <= 0) return;
     const mediaStore = useMediaStore.getState();
     if (mediaStore.activeCompositionId) {
       mediaStore.updateComposition(mediaStore.activeCompositionId, {
-        width: Math.round(sourceMediaFile.width),
-        height: Math.round(sourceMediaFile.height),
+        width: Math.round(dimensions.width),
+        height: Math.round(dimensions.height),
       });
     }
+  };
+  if (sourceMediaFile?.width && sourceMediaFile.height) {
+    initializeCompositionFromFirstVisual({ width: sourceMediaFile.width, height: sourceMediaFile.height });
   }
   const authoritativeNaturalDuration = getPositiveFiniteDuration(options?.source?.naturalDuration)
     ?? getPositiveFiniteDuration(sourceMediaFile?.duration)
@@ -186,6 +189,7 @@ export async function applyAddClipAction(
       waveformsEnabled,
       updateClip,
       setClips,
+      onVideoDimensionsResolved: initializeCompositionFromFirstVisual,
     });
 
     invalidateCache();
