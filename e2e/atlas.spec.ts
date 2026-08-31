@@ -26,13 +26,21 @@ const originalPreview = (page: Page) => page.locator(
 );
 
 async function completeAtlasShortcutOnboarding(page: Page) {
-  const onboarding = page.getByRole('dialog').filter({
+  const setupDialog = page.getByRole('dialog').filter({
     has: page.getByRole('heading', { name: '你之前使用哪款剪辑软件？' }),
   });
-  await expect(onboarding).toBeVisible();
-  await onboarding.getByRole('button', { name: 'DaVinci Resolve' }).click();
-  await onboarding.getByRole('button', { name: '开始使用' }).click();
-  await expect(onboarding).toBeHidden();
+  await expect(setupDialog).toBeVisible();
+  await setupDialog.getByRole('button', { name: 'DaVinci Resolve' }).click();
+
+  // Selecting a preset advances the same dialog to its confirmation step, so
+  // the locator must follow the new heading instead of retaining the setup
+  // step's `has` filter.
+  const confirmationDialog = page.getByRole('dialog').filter({
+    has: page.getByRole('heading', { name: '快捷键已切换' }),
+  });
+  await expect(confirmationDialog).toBeVisible();
+  await confirmationDialog.getByRole('button', { name: '开始使用' }).click();
+  await expect(confirmationDialog).toBeHidden();
 }
 
 async function expectOriginalEditorLayout(page: Page) {
