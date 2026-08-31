@@ -269,6 +269,8 @@ jobs:
           npm ci
       - run: npm run typecheck
       - run: npm run test:firefly-release
+      - name: Verify Atlas P0 filmstrip, quality and onboarding contracts
+        run: npm run test -- --run tests/unit/thumbnailBitmapCache.test.ts tests/unit/previewResolution.test.ts tests/unit/fireflyShortcutOnboarding.test.ts tests/unit/TutorialSetupOverlay.test.tsx
       - run: npm run build
         env:
           VITE_APP_VARIANT: firefly

@@ -1,6 +1,6 @@
 import {
   closeByThumbnailUrls,
-  registerThumbnailBitmapSource,
+  registerThumbnailBitmapBlob,
 } from '../timeline/thumbnailBitmapCache';
 import type { SourceThumbnailFrame } from './types';
 
@@ -79,7 +79,7 @@ export class ThumbnailMemoryTier {
     blob: Blob,
   ): string {
     const url = URL.createObjectURL(blob);
-    registerThumbnailBitmapSource(url, mediaFileId);
+    registerThumbnailBitmapBlob(url, blob, mediaFileId);
     sourceCache.set(secondIndex, url);
     return url;
   }
@@ -89,7 +89,7 @@ export class ThumbnailMemoryTier {
     const secondIndices: number[] = [];
     for (const frame of frames) {
       const url = URL.createObjectURL(frame.blob);
-      registerThumbnailBitmapSource(url, mediaFileId);
+      registerThumbnailBitmapBlob(url, frame.blob, mediaFileId);
       sourceCache.set(frame.secondIndex, url);
       secondIndices.push(frame.secondIndex);
     }
@@ -116,6 +116,9 @@ export class ThumbnailMemoryTier {
   }
 
   clear(): void {
+    for (const mediaFileId of [...this.cache.keys()]) {
+      this.evictSource(mediaFileId);
+    }
     this.cache.clear();
   }
 }

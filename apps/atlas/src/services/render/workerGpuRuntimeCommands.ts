@@ -277,6 +277,8 @@ export interface WorkerGpuPresentWebCodecsFrameCommand extends WorkerGpuRuntimeC
   readonly type: 'gpu.presentWebCodecsFrame';
   readonly targetId: WorkerGpuGraphId;
   readonly compositionId?: string;
+  readonly logicalOutputWidth?: number;
+  readonly logicalOutputHeight?: number;
   readonly sourceId: string;
   readonly timelineTime: number;
   readonly mediaTime: number;
@@ -312,6 +314,8 @@ export interface WorkerGpuStartWebCodecsStreamCommand extends WorkerGpuRuntimeCo
   readonly type: 'gpu.startWebCodecsStream';
   readonly targetId: WorkerGpuGraphId;
   readonly compositionId?: string;
+  readonly logicalOutputWidth?: number;
+  readonly logicalOutputHeight?: number;
   readonly sourceId: string;
   readonly timelineTime: number;
   readonly mediaTime: number;

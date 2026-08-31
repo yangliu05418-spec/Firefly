@@ -111,6 +111,9 @@ export interface WorkerGpuPresentBaseOptions {
   readonly targetId?: string;
   readonly requestId?: string;
   readonly frameIndex?: number;
+  /** Project-space dimensions; backing canvas dimensions may be quality-scaled. */
+  readonly logicalOutputWidth?: number;
+  readonly logicalOutputHeight?: number;
 }
 
 export interface WorkerGpuClearOptions extends WorkerGpuPresentBaseOptions {
