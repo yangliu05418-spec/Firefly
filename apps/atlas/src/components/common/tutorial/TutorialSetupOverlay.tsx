@@ -88,8 +88,11 @@ export function TutorialSetupOverlay({
                   className="tutorial-setup-choice"
                   onClick={() => chooseBackground(choice.id)}
                 >
-                  <span className="tutorial-setup-choice-icon">
-                    <img src={choice.logo} alt="" draggable={false} />
+                  <span
+                    aria-hidden="true"
+                    className={`tutorial-setup-choice-icon tutorial-setup-choice-icon--${choice.id}`}
+                  >
+                    {choice.monogram}
                   </span>
                   <span>{choice.label}</span>
                 </button>
