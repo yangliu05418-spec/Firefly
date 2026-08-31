@@ -8,9 +8,17 @@ import { getShortcutRegistry } from '../../../services/shortcutRegistry';
 import type { ShortcutPresetId, ShortcutCategory, ShortcutMap, KeyCombo, ShortcutActionId } from '../../../services/shortcutTypes';
 import { ShortcutRecorder } from './ShortcutRecorder';
 import { SHORTCUT_CATEGORY_ZH, SHORTCUT_LABEL_ZH } from './shortcutLabelsZh';
+import { useFireflyEmbedding } from '../../../firefly/FireflyEmbeddingContext';
+import {
+  FIREFLY_SHORTCUT_ONBOARDING_PRESETS,
+  writeFireflyShortcutOnboarding,
+} from '../../../firefly/shortcutOnboarding';
 
 const IS_FIREFLY_VARIANT = import.meta.env.VITE_APP_VARIANT === 'firefly';
 const ui = (zh: string, en: string) => IS_FIREFLY_VARIANT ? zh : en;
+const SELECTABLE_PRESETS = IS_FIREFLY_VARIANT
+  ? PRESET_LIST.filter((preset) => preset.id !== 'masterselects' && preset.id !== 'beginner')
+  : PRESET_LIST;
 
 const CATEGORIES_ORDER: ShortcutCategory[] = [
   'Playback',
@@ -25,6 +33,7 @@ const CATEGORIES_ORDER: ShortcutCategory[] = [
 ];
 
 export function ShortcutsSettings() {
+  const fireflyEmbedding = useFireflyEmbedding();
   const {
     activeShortcutPreset,
     shortcutOverrides,
@@ -75,8 +84,17 @@ export function ShortcutsSettings() {
   }, [search]);
 
   const handlePresetChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
-    setActiveShortcutPreset(e.target.value as ShortcutPresetId);
-  }, [setActiveShortcutPreset]);
+    const presetId = e.target.value as ShortcutPresetId;
+    setActiveShortcutPreset(presetId);
+    const fireflyPreset = FIREFLY_SHORTCUT_ONBOARDING_PRESETS.find(
+      (preset) => preset.id === presetId,
+    );
+    if (fireflyEmbedding && fireflyPreset) {
+      const userKey = fireflyEmbedding.user.id?.trim()
+        || fireflyEmbedding.user.email.trim().toLowerCase();
+      writeFireflyShortcutOnboarding(userKey, fireflyPreset.id);
+    }
+  }, [fireflyEmbedding, setActiveShortcutPreset]);
 
   const handleRecord = useCallback((actionId: ShortcutActionId, combo: KeyCombo) => {
     setShortcutOverride(actionId, [combo]);
@@ -132,7 +150,7 @@ export function ShortcutsSettings() {
             onChange={handlePresetChange}
             className="settings-select"
           >
-            {PRESET_LIST.map((preset) => (
+            {SELECTABLE_PRESETS.map((preset) => (
               <option key={preset.id} value={preset.id}>
                 {preset.label}
               </option>

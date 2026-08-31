@@ -24,6 +24,7 @@ const inflight = new Set<string>();
 const invalidatedUrls = new Set<string>();
 const sourceUrls = new Map<string, Set<string>>();
 const urlSources = new Map<string, Set<string>>();
+const sourceBlobs = new Map<string, Blob>();
 
 export function getThumbnailBitmap(url: string): ImageBitmap | null {
   const bmp = cache.get(url);
@@ -68,17 +69,21 @@ export function ensureThumbnailBitmap(
 
   inflight.add(url);
   reportThumbnailBitmapDecodeJob(url, mediaFileId);
-  fetch(url)
-    .then((response) => {
-      if (response.ok === false) {
-        throw new Error(`THUMBNAIL_HTTP_${response.status}`);
-      }
-      const contentType = response.headers?.get('content-type') ?? '';
-      if (contentType && !contentType.toLowerCase().startsWith('image/')) {
-        throw new Error('THUMBNAIL_INVALID_CONTENT_TYPE');
-      }
-      return response.blob();
-    })
+  const registeredBlob = sourceBlobs.get(url);
+  const blobPromise = registeredBlob
+    ? Promise.resolve(registeredBlob)
+    : fetch(url).then((response) => {
+        if (response.ok === false) {
+          throw new Error(`THUMBNAIL_HTTP_${response.status}`);
+        }
+        const contentType = response.headers?.get('content-type') ?? '';
+        if (contentType && !contentType.toLowerCase().startsWith('image/')) {
+          throw new Error('THUMBNAIL_INVALID_CONTENT_TYPE');
+        }
+        return response.blob();
+      });
+
+  blobPromise
     .then((blob) => createImageBitmap(blob))
     .then((bmp) => {
       inflight.delete(url);
@@ -106,9 +111,24 @@ export function ensureThumbnailBitmap(
       releaseThumbnailRuntimeResource(getThumbnailBitmapDecodeJobId(url));
       log.warn('Timeline thumbnail bitmap decode failed', {
         mediaFileId,
+        sourceKind: registeredBlob ? 'registered-blob' : 'fetch',
         errorCode: error instanceof Error ? error.message : 'THUMBNAIL_DECODE_FAILED',
       });
     });
+}
+
+/**
+ * Registers an already-owned generated frame without fetching its object URL.
+ * Blob URLs are intentionally not part of Atlas' connect-src policy; decoding
+ * the original Blob is also faster and avoids a duplicate browser copy.
+ */
+export function registerThumbnailBitmapBlob(
+  url: string,
+  blob: Blob,
+  mediaFileId: string | undefined,
+): void {
+  sourceBlobs.set(url, blob);
+  registerThumbnailBitmapSource(url, mediaFileId);
 }
 
 export function registerThumbnailBitmapSource(
@@ -159,6 +179,7 @@ export function clearThumbnailBitmapCache(): void {
   inflight.clear();
   sourceUrls.clear();
   urlSources.clear();
+  sourceBlobs.clear();
 }
 
 export function getThumbnailBitmapCacheSize(): number {
@@ -193,4 +214,5 @@ function unlinkUrl(url: string): void {
     }
   }
   urlSources.delete(url);
+  sourceBlobs.delete(url);
 }

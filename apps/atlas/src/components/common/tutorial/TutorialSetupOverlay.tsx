@@ -1,47 +1,46 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useSettingsStore } from '../../../stores/settingsStore';
 import { ClippyMascot } from './ClippyMascot';
+import {
+  FIREFLY_SHORTCUT_ONBOARDING_PRESETS,
+  type FireflyShortcutPresetId,
+} from '../../../firefly/shortcutOnboarding';
 import './TutorialSetupOverlay.css';
-
-const BACKGROUND_CHOICES = [
-  { id: 'premiere', label: 'Premiere Pro', logo: '/logo-premiere.svg' },
-  { id: 'davinci', label: 'DaVinci Resolve', logo: '/logo-davinci.svg' },
-  { id: 'finalcut', label: 'Final Cut Pro', logo: '/logo-finalcut.png' },
-  { id: 'aftereffects', label: 'After Effects', logo: '/logo-aftereffects.svg' },
-  { id: 'beginner', label: '第一次使用剪辑软件', logo: null },
-] as const;
-
-type BackgroundId = typeof BACKGROUND_CHOICES[number]['id'];
 
 interface TutorialSetupOverlayProps {
   onCancel: () => void;
-  onComplete: () => void;
+  onComplete: (presetId: FireflyShortcutPresetId) => void;
+  required?: boolean;
 }
 
 export function TutorialSetupOverlay({
   onCancel,
   onComplete,
+  required = false,
 }: TutorialSetupOverlayProps) {
   const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
+  const [selectedPresetId, setSelectedPresetId] = useState<FireflyShortcutPresetId | null>(null);
   const setUserBackground = useSettingsStore((state) => state.setUserBackground);
   const setActiveShortcutPreset = useSettingsStore((state) => state.setActiveShortcutPreset);
 
-  const chooseBackground = useCallback((id: BackgroundId) => {
-    const choice = BACKGROUND_CHOICES.find((candidate) => candidate.id === id);
+  const chooseBackground = useCallback((id: FireflyShortcutPresetId) => {
+    const choice = FIREFLY_SHORTCUT_ONBOARDING_PRESETS.find((candidate) => candidate.id === id);
     setUserBackground(id);
     setActiveShortcutPreset(id);
+    setSelectedPresetId(id);
     setSelectedLabel(choice?.label ?? id);
   }, [setActiveShortcutPreset, setUserBackground]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
+      if (required) return;
       event.preventDefault();
       onCancel();
     };
     window.addEventListener('keydown', handleKeyDown, true);
     return () => window.removeEventListener('keydown', handleKeyDown, true);
-  }, [onCancel]);
+  }, [onCancel, required]);
 
   return (
     <div
@@ -82,7 +81,7 @@ export function TutorialSetupOverlay({
             <h1>你之前使用哪款剪辑软件？</h1>
             <p>Atlas 会自动映射你熟悉的快捷键，减少重新适应的成本。</p>
             <div className="tutorial-setup-grid">
-              {BACKGROUND_CHOICES.map((choice) => (
+              {FIREFLY_SHORTCUT_ONBOARDING_PRESETS.map((choice) => (
                 <button
                   key={choice.id}
                   type="button"
@@ -90,11 +89,7 @@ export function TutorialSetupOverlay({
                   onClick={() => chooseBackground(choice.id)}
                 >
                   <span className="tutorial-setup-choice-icon">
-                    {choice.logo ? (
-                      <img src={choice.logo} alt="" draggable={false} />
-                    ) : (
-                      <span className="tutorial-setup-beginner">★</span>
-                    )}
+                    <img src={choice.logo} alt="" draggable={false} />
                   </span>
                   <span>{choice.label}</span>
                 </button>
@@ -105,7 +100,7 @@ export function TutorialSetupOverlay({
         </div>
 
         <footer className="tutorial-setup-footer">
-          <div className="tutorial-setup-footer-exit">
+          {!required && <div className="tutorial-setup-footer-exit">
             <button
               type="button"
               className="tutorial-setup-exit"
@@ -114,20 +109,25 @@ export function TutorialSetupOverlay({
               暂时跳过
             </button>
             <span>按 Esc 可随时关闭</span>
-          </div>
+          </div>}
           {selectedLabel && (
             <div className="tutorial-setup-actions">
               <button
                 type="button"
                 className="tutorial-setup-button tutorial-setup-button--quiet"
-                onClick={() => setSelectedLabel(null)}
+                onClick={() => {
+                  setSelectedLabel(null);
+                  setSelectedPresetId(null);
+                }}
               >
                 返回
               </button>
               <button
                 type="button"
                 className="tutorial-setup-button tutorial-setup-button--primary"
-                onClick={onComplete}
+                onClick={() => {
+                  if (selectedPresetId) onComplete(selectedPresetId);
+                }}
               >
                 开始使用
               </button>

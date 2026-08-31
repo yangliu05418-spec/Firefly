@@ -19,6 +19,7 @@ import { audioRoutingManager } from './services/audioRoutingManager';
 import { useUiSettingsStore } from './stores/uiSettingsStore';
 import { FireflyEmbeddingProvider } from './firefly/FireflyEmbeddingContext';
 import { FireflyGeneratedMediaBridge } from './firefly/FireflyGeneratedMediaBridge';
+import { FireflyShortcutOnboardingGate } from './firefly/FireflyShortcutOnboardingGate';
 import './styles/app-shell.css';
 import './styles/shared-controls.css';
 
@@ -62,6 +63,7 @@ export default function FireflyEmbeddedEditor({ fireflyEmbedded }: { fireflyEmbe
         <ShortcutDisplayOverlay />
         <ProjectLoadProgressOverlay />
         <HistoryActionToast notice={historyNotice} onDone={clearHistoryNotice} />
+        <FireflyShortcutOnboardingGate user={fireflyEmbedded.user} />
       </div>
     </FireflyEmbeddingProvider>
   );

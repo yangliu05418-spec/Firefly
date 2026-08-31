@@ -310,6 +310,17 @@ export class RenderDispatcher {
     const { width, height } = d.renderTargetManager.getResolution();
     const skipEffects = false;
     const isExporting = d.exportCanvasManager.getIsExporting();
+    const mediaState = useMediaStore.getState();
+    const compositionId = frameContext?.compositionId ?? mediaState.activeCompositionId;
+    const composition = compositionId
+      ? mediaState.compositions.find((candidate) => candidate.id === compositionId)
+      : undefined;
+    const logicalOutputWidth = !isExporting && composition?.width
+      ? composition.width
+      : width;
+    const logicalOutputHeight = !isExporting && composition?.height
+      ? composition.height
+      : height;
     const frameTimelineTime = frameContext?.timelineTimeSeconds
       ?? this.getEffectiveTimelineTime();
     const timelineState = useTimelineStore.getState();
@@ -549,6 +560,7 @@ export class RenderDispatcher {
     const commandEncoder = device.createCommandEncoder();
     const result = d.compositor.composite(layerData, commandEncoder, {
       device, sampler: d.sampler, pingView, pongView, outputWidth: width, outputHeight: height,
+      logicalOutputWidth, logicalOutputHeight,
       skipEffects,
       effectTempTexture, effectTempView, effectTempTexture2, effectTempView2,
       motionTime: frameTimelineTime,

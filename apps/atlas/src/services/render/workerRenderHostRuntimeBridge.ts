@@ -174,6 +174,8 @@ export class WorkerRenderHostRuntimeBridge {
       readonly layers?: readonly WorkerGpuWebCodecsFrameLayer[];
       readonly adjustmentPlan?: MotionAdjustmentWorkerGpuExecutionPlan;
       readonly compositionId?: string;
+      readonly logicalOutputWidth?: number;
+      readonly logicalOutputHeight?: number;
     } = {},
   ): Promise<WorkerRenderHostRuntimeJobOutput> {
     return this.sendCommand({
@@ -181,6 +183,8 @@ export class WorkerRenderHostRuntimeBridge {
       commandId: requestId,
       targetId,
       compositionId: options.compositionId,
+      logicalOutputWidth: options.logicalOutputWidth,
+      logicalOutputHeight: options.logicalOutputHeight,
       sourceId,
       timelineTime,
       mediaTime,
@@ -213,6 +217,8 @@ export class WorkerRenderHostRuntimeBridge {
       readonly layers?: readonly WorkerGpuWebCodecsFrameLayer[];
       readonly adjustmentPlan?: MotionAdjustmentWorkerGpuExecutionPlan;
       readonly compositionId?: string;
+      readonly logicalOutputWidth?: number;
+      readonly logicalOutputHeight?: number;
     } = {},
   ): Promise<WorkerRenderHostRuntimeJobOutput> {
     return this.sendCommand({
@@ -220,6 +226,8 @@ export class WorkerRenderHostRuntimeBridge {
       commandId: requestId,
       targetId,
       compositionId: options.compositionId,
+      logicalOutputWidth: options.logicalOutputWidth,
+      logicalOutputHeight: options.logicalOutputHeight,
       sourceId,
       timelineTime,
       mediaTime,
@@ -258,12 +266,16 @@ export class WorkerRenderHostRuntimeBridge {
     transfer: Transferable[],
     adjustmentPlan?: MotionAdjustmentWorkerGpuExecutionPlan,
     compositionId?: string,
+    logicalOutputWidth?: number,
+    logicalOutputHeight?: number,
   ): Promise<WorkerRenderHostRuntimeJobOutput> {
     return this.sendCommand({
       type: 'presentGpuTransferredVideoFrames',
       requestId,
       targetId,
       compositionId,
+      logicalOutputWidth,
+      logicalOutputHeight,
       timelineTime,
       frameIndex,
       layers,

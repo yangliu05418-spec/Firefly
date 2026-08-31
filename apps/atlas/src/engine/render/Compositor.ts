@@ -12,7 +12,7 @@ import {
   isSupportedAdjustmentEffectType,
   UnsupportedAdjustmentEffectError,
 } from '../../services/motionDesign/adjustment/supportedEffects';
-import { calculateSourcePixelScale } from '../../utils/sourcePixelScale';
+import { resolveCompositorPixelGeometry } from './compositorPixelGeometry';
 
 const log = Logger.create('Compositor');
 
@@ -23,6 +23,9 @@ export interface CompositorState {
   pongView: GPUTextureView;
   outputWidth: number;
   outputHeight: number;
+  /** Project-space dimensions, independent from preview raster quality. */
+  logicalOutputWidth?: number;
+  logicalOutputHeight?: number;
   skipEffects?: boolean;
   // Additional textures for effect pre-processing
   effectTempTexture?: GPUTexture;
@@ -115,16 +118,18 @@ export class Compositor {
       const uniformBuffer = this.compositorPipeline.getOrCreateUniformBuffer(resourceLayerId);
 
       // Calculate aspect ratios
-      const sourceWidth = isAdjustmentLayer ? state.outputWidth : data.sourceWidth;
-      const sourceHeight = isAdjustmentLayer ? state.outputHeight : data.sourceHeight;
-      const sourceAspect = sourceWidth / sourceHeight;
-      const outputAspect = state.outputWidth / state.outputHeight;
-      const sourcePixelScale = calculateSourcePixelScale(
+      const logicalOutputWidth = state.logicalOutputWidth ?? state.outputWidth;
+      const logicalOutputHeight = state.logicalOutputHeight ?? state.outputHeight;
+      const sourceWidth = isAdjustmentLayer ? logicalOutputWidth : data.sourceWidth;
+      const sourceHeight = isAdjustmentLayer ? logicalOutputHeight : data.sourceHeight;
+      const { sourceAspect, outputAspect, sourcePixelScale } = resolveCompositorPixelGeometry({
         sourceWidth,
         sourceHeight,
-        state.outputWidth,
-        state.outputHeight,
-      );
+        renderWidth: state.outputWidth,
+        renderHeight: state.outputHeight,
+        logicalWidth: logicalOutputWidth,
+        logicalHeight: logicalOutputHeight,
+      });
 
       // Get mask texture (single lookup instead of two)
       const maskLookupId = layer.maskClipId || layer.id;

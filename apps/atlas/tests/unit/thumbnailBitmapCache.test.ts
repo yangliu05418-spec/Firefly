@@ -7,6 +7,7 @@ import {
   getThumbnailBitmap,
   getThumbnailBitmapCacheSize,
   hasThumbnailBitmap,
+  registerThumbnailBitmapBlob,
 } from '../../src/services/timeline/thumbnailBitmapCache';
 import { timelineRuntimeCoordinator } from '../../src/services/timeline/timelineRuntimeCoordinator';
 import {
@@ -46,6 +47,25 @@ describe('thumbnailBitmapCache', () => {
     expect(bitmap.close).toHaveBeenCalledTimes(1);
     expect(getThumbnailBitmap('blob:source-a-frame-0')).toBeNull();
     expect(getThumbnailBitmapCacheSize()).toBe(0);
+  });
+
+  it('decodes generated frame blobs without refetching their object URLs', async () => {
+    const bitmap = { close: vi.fn() } as unknown as ImageBitmap;
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+      new TypeError('Refused to connect to blob URL by Content Security Policy'),
+    );
+    const createImageBitmapMock = vi.fn().mockResolvedValue(bitmap);
+    vi.stubGlobal('createImageBitmap', createImageBitmapMock);
+    const frame = new Blob(['generated-frame'], { type: 'image/jpeg' });
+    const onReady = vi.fn();
+
+    registerThumbnailBitmapBlob('blob:generated-frame-0', frame, 'media-generated');
+    ensureThumbnailBitmap('blob:generated-frame-0', onReady, 'media-generated');
+
+    await vi.waitFor(() => expect(onReady).toHaveBeenCalledTimes(1));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(createImageBitmapMock).toHaveBeenCalledWith(frame);
+    expect(getThumbnailBitmap('blob:generated-frame-0')).toBe(bitmap);
   });
 
   it('closes decoded bitmaps by thumbnail URL', async () => {

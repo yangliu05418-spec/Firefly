@@ -175,6 +175,8 @@ interface WorkerGpuWebCodecsStreamSession {
   readonly sessionId: string;
   readonly targetId: RenderGraphId;
   readonly sourceId: string;
+  readonly logicalOutputWidth?: number;
+  readonly logicalOutputHeight?: number;
   readonly layers: readonly WorkerGpuWebCodecsFrameLayer[];
   readonly startedAtMs: number;
   readonly baseTimelineTime: number;
@@ -869,6 +871,8 @@ async function presentWorkerGpuVideoFrameLayers(
     readonly frameIndex: number;
     readonly layers: readonly WorkerGpuVideoFramePresentLayer[];
     readonly adjustmentPlan?: MotionAdjustmentWorkerGpuExecutionPlan;
+    readonly logicalOutputWidth?: number;
+    readonly logicalOutputHeight?: number;
     readonly isSurfaceCurrent?: () => boolean;
   },
 ): Promise<WorkerGpuPresentResult> {
@@ -1195,6 +1199,8 @@ async function presentGpuWebCodecsStreamTick(session: WorkerGpuWebCodecsStreamSe
         requestId,
         frameIndex,
         layers: layerRead.presentLayers,
+        logicalOutputWidth: session.logicalOutputWidth,
+        logicalOutputHeight: session.logicalOutputHeight,
         isSurfaceCurrent: () => (
           !session.stopped
           && state.gpuWebCodecsStreams.get(session.targetId) === session
@@ -1337,6 +1343,8 @@ async function startGpuWebCodecsStream(
     sessionId: command.commandId,
     targetId: command.targetId,
     sourceId: command.sourceId,
+    logicalOutputWidth: command.logicalOutputWidth,
+    logicalOutputHeight: command.logicalOutputHeight,
     layers: commandLayers,
     startedAtMs,
     baseTimelineTime: command.timelineTime,
@@ -1393,6 +1401,8 @@ async function startGpuWebCodecsStream(
           requestId: `${command.commandId}:start`,
           frameIndex: command.frameIndex,
           layers: firstLayerRead.presentLayers,
+          logicalOutputWidth: command.logicalOutputWidth,
+          logicalOutputHeight: command.logicalOutputHeight,
         })
       : await presentGpuVideoFrame(surface, {
           targetId: command.targetId,
@@ -1796,6 +1806,8 @@ async function presentGpuWebCodecsFrame(
         frameIndex: command.frameIndex,
         layers: layerRead.presentLayers,
         adjustmentPlan: command.adjustmentPlan,
+        logicalOutputWidth: command.logicalOutputWidth,
+        logicalOutputHeight: command.logicalOutputHeight,
         isSurfaceCurrent: () => state.targetSurfaces.get(command.targetId) === surface,
       })
     : await presentGpuVideoFrame(surface, {
@@ -2252,6 +2264,8 @@ async function presentGpuTransferredVideoFrames(
       frameIndex: command.frameIndex,
       layers: command.layers,
       adjustmentPlan: command.adjustmentPlan,
+      logicalOutputWidth: command.logicalOutputWidth,
+      logicalOutputHeight: command.logicalOutputHeight,
       isSurfaceCurrent: () => state.targetSurfaces.get(command.targetId) === surface,
     });
     const presentedFrameId = result.diagnostics.presentedFrameId;

@@ -3,6 +3,7 @@ import {
   resolvePreviewDisplaySize,
   resolvePreviewRenderResolution,
 } from '../../src/components/preview/previewResolution';
+import { resolveCompositorPixelGeometry } from '../../src/engine/render/compositorPixelGeometry';
 
 describe('preview quality geometry contract', () => {
   const composition = { width: 1920, height: 1080 };
@@ -28,5 +29,27 @@ describe('preview quality geometry contract', () => {
   it('preserves the project aspect ratio while filling the available Viewer axis', () => {
     expect(resolvePreviewDisplaySize({ width: 700, height: 1000 }, { width: 1080, height: 1920 }, false))
       .toEqual({ width: 562, height: 1000 });
+  });
+
+  it('keeps source geometry invariant when only the backing render resolution changes', () => {
+    const original = resolveCompositorPixelGeometry({
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      renderWidth: 1920,
+      renderHeight: 1080,
+      logicalWidth: 1920,
+      logicalHeight: 1080,
+    });
+
+    for (const quality of [0.5, 0.25, 0.125] as const) {
+      expect(resolveCompositorPixelGeometry({
+        sourceWidth: 1920,
+        sourceHeight: 1080,
+        renderWidth: Math.round(1920 * quality),
+        renderHeight: Math.round(1080 * quality),
+        logicalWidth: 1920,
+        logicalHeight: 1080,
+      })).toEqual(original);
+    }
   });
 });

@@ -909,6 +909,8 @@ export async function presentGpuVideoFrameCompositedLayers(
         pongView: resources.pongView,
         outputWidth: resources.width,
         outputHeight: resources.height,
+        logicalOutputWidth: options.logicalOutputWidth,
+        logicalOutputHeight: options.logicalOutputHeight,
         effectTempTexture: resources.effectTempTexture,
         effectTempView: resources.effectTempView,
         effectTempTexture2: resources.effectTempTexture2,

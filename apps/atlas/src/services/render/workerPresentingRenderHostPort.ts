@@ -112,6 +112,18 @@ const WORKER_PRESENTING_GPU_PAUSE_HOLD_BEHIND_DRIFT_SECONDS = 3 / 60;
 const WORKER_PRESENTING_GPU_PAUSE_HOLD_TTL_MS = 500;
 const WORKER_PRESENTING_GPU_SCRUB_FAST_SEEK_MIN_DRIFT_SECONDS = 0.18;
 const WORKER_PRESENTING_RAF_BACKUP_TIMEOUT_MS = 64;
+
+function resolveLogicalCompositionDimensions(compositionId?: string): {
+  width: number;
+  height: number;
+} | undefined {
+  if (!compositionId) return undefined;
+  const composition = useMediaStore.getState().compositions.find(
+    (candidate) => candidate.id === compositionId,
+  );
+  if (!composition || composition.width <= 0 || composition.height <= 0) return undefined;
+  return { width: composition.width, height: composition.height };
+}
 export type WorkerPresentingPresentationStrategy = 'worker-cpu-present' | 'worker-webgpu-present';
 
 export interface WorkerPresentingRenderHostPortOptions {
@@ -2315,6 +2327,8 @@ class WorkerPresentingRenderHostPortCore {
     }
 
     const requestId = `worker-gpu-only:stream:${input.request.source}:${input.request.sequence}`;
+    const compositionId = input.request.frameContext?.compositionId;
+    const logicalDimensions = resolveLogicalCompositionDimensions(compositionId);
     this.activeGpuStreamPresentationsByTarget.set(targetId, {
       sourceId: input.videoSource.sourceId,
       streamKey,
@@ -2343,6 +2357,9 @@ class WorkerPresentingRenderHostPortCore {
           targetFps: this.currentCadenceTargetFps(),
           timeoutMs: 48,
           layers: this.createGpuOnlyVideoFrameLayers(input.videoSources),
+          compositionId,
+          logicalOutputWidth: logicalDimensions?.width,
+          logicalOutputHeight: logicalDimensions?.height,
         },
       );
       this.pendingGpuStreamStartsByTarget.delete(targetId);
@@ -2433,6 +2450,8 @@ class WorkerPresentingRenderHostPortCore {
           htmlFramePacket.transfer,
           adjustmentPlan ?? undefined,
           request.frameContext?.compositionId,
+          resolveLogicalCompositionDimensions(request.frameContext?.compositionId)?.width,
+          resolveLogicalCompositionDimensions(request.frameContext?.compositionId)?.height,
         );
         this.lastGpuOnlyVideoFrameStats = this.runtimeOutputStats(output);
         const presented = this.runtimeOutputPresentedRequest(output, requestId);
@@ -2510,6 +2529,8 @@ class WorkerPresentingRenderHostPortCore {
             layers: this.createGpuOnlyVideoFrameLayers(videoSources),
             adjustmentPlan: adjustmentPlan ?? undefined,
             compositionId: request.frameContext?.compositionId,
+            logicalOutputWidth: resolveLogicalCompositionDimensions(request.frameContext?.compositionId)?.width,
+            logicalOutputHeight: resolveLogicalCompositionDimensions(request.frameContext?.compositionId)?.height,
           },
         );
         this.lastGpuOnlyVideoFrameStats = this.runtimeOutputStats(output);

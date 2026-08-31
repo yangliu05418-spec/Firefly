@@ -368,6 +368,8 @@ export type WorkerRenderHostRuntimeCommand =
       readonly requestId: string;
       readonly targetId: RenderGraphId;
       readonly compositionId?: string;
+      readonly logicalOutputWidth?: number;
+      readonly logicalOutputHeight?: number;
       readonly timelineTime: number;
       readonly frameIndex: number;
       readonly layers: readonly WorkerRenderHostGpuTransferredVideoFrameLayer[];

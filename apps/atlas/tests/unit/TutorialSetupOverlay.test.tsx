@@ -22,22 +22,34 @@ describe('TutorialSetupOverlay', () => {
     const onComplete = vi.fn();
     render(<TutorialSetupOverlay onCancel={vi.fn()} onComplete={onComplete} />);
 
-    expect(screen.getByText('Where are you coming from?')).toBeTruthy();
+    expect(screen.getByText('你之前使用哪款剪辑软件？')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'DaVinci Resolve' }));
 
     expect(setUserBackground).toHaveBeenCalledWith('davinci');
     expect(setActiveShortcutPreset).toHaveBeenCalledWith('davinci');
-    expect(screen.getByText('Shortcuts switched')).toBeTruthy();
+    expect(screen.getByText('快捷键已切换')).toBeTruthy();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Start walkthrough' }));
-    expect(onComplete).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: '开始使用' }));
+    expect(onComplete).toHaveBeenCalledWith('davinci');
   });
 
   it('can be ended from every setup state', () => {
     const onCancel = vi.fn();
     render(<TutorialSetupOverlay onCancel={onCancel} onComplete={vi.fn()} />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'End walkthrough' }));
+    fireEvent.click(screen.getByRole('button', { name: '暂时跳过' }));
     expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires a professional preset in Firefly onboarding mode', () => {
+    const onCancel = vi.fn();
+    render(<TutorialSetupOverlay required onCancel={onCancel} onComplete={vi.fn()} />);
+
+    expect(screen.queryByRole('button', { name: '暂时跳过' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /第一次使用/ })).toBeNull();
+    expect(screen.getAllByRole('button')).toHaveLength(4);
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onCancel).not.toHaveBeenCalled();
   });
 });
