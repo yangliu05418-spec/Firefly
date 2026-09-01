@@ -51,6 +51,9 @@ interface DockPanelContentProps {
 export function DockPanelContent({ panel }: DockPanelContentProps) {
   switch (panel.type) {
     case 'start':
+      if (OriginalAtlasAgentPanel) {
+        return <Suspense fallback={<PanelLoading />}><OriginalAtlasAgentPanel /></Suspense>;
+      }
       return LandingPanel ? <Suspense fallback={<PanelLoading />}><LandingPanel /></Suspense> : <UnavailablePanel />;
     case 'preview': {
       const previewData = panel.data as PreviewPanelData | undefined;
