@@ -4,6 +4,7 @@ import Database from "better-sqlite3";
 import { assertSchemaVersion } from "./migrations.js";
 
 const CHECKPOINT_RESET_CLAIM_TTL_MS = 10 * 60_000;
+const CHECKPOINT_STALE_TAKEOVER_GRACE_MS = 2 * 60_000;
 class CheckpointStateChanged extends Error {}
 
 export type AtlasProject = {
@@ -461,12 +462,16 @@ export class AtlasStore {
         const stale = unfinished && existing.leaseGeneration < project.leaseGeneration;
         const explicitError = Boolean(existing.error || transfer?.error);
         const samePayload = existing.digest === input.digest && existing.size === input.size;
-        if (stale && !explicitError) return { status: "stale_in_flight", version: existing, transfer: transfer! } as const;
+        const staleTakeoverTimedOut = Boolean(stale && transfer
+          && transfer.updatedAt + CHECKPOINT_STALE_TAKEOVER_GRACE_MS <= input.now);
+        if (stale && !explicitError && !staleTakeoverTimedOut) {
+          return { status: "stale_in_flight", version: existing, transfer: transfer! } as const;
+        }
         // A transient error in the current editor must keep the same multipart
         // when the document payload is unchanged. Reset only when an old lease
         // is fenced, or when the current editor is replacing that payload.
-        const abandoned = unfinished && project.revision === input.expectedRevision && explicitError
-          && (stale || !samePayload);
+        const abandoned = unfinished && project.revision === input.expectedRevision
+          && (staleTakeoverTimedOut || (explicitError && (stale || !samePayload)));
         if (abandoned && transfer) {
           // Atomically fence the stale/erroring attempt into the existing
           // claimed-reset protocol. Only the claim winner may abort/delete the
