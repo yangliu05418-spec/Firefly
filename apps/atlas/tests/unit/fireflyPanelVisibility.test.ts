@@ -36,4 +36,16 @@ describe('Firefly panel picker boundary', () => {
 
     expect(source).toMatch(/case 'start':[\s\S]*if \(OriginalAtlasAgentPanel\)[\s\S]*<OriginalAtlasAgentPanel/);
   });
+
+  it('uses the centered command composer and the reused Bloub avatar in Agent Mode', async () => {
+    const source = await readFile(
+      resolve(process.cwd(), 'src/firefly/OriginalAtlasAgentPanel.tsx'),
+      'utf8',
+    );
+
+    expect(source).toContain('<BloubAvatar state={avatarStateFor(status)} />');
+    expect(source).toContain('original-atlas-agent__composer');
+    expect(source).toContain('想怎么剪？');
+    expect(source).toContain('确认后才会修改时间线');
+  });
 });
