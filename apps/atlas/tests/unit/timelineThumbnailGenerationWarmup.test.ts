@@ -391,6 +391,35 @@ describe('timeline thumbnail generation warmup', () => {
     expect(deps.generateForSourceUrl).not.toHaveBeenCalled();
   });
 
+  it('starts OPFS recovery for a visible restored Firefly clip before native filmstrip generation', async () => {
+    const deps = createDeps({
+      clips: [{
+        id: 'clip-a',
+        duration: 8,
+        source: { type: 'video', mediaFileId: 'media-a', naturalDuration: 8 },
+      }],
+      mediaFiles: [{
+        id: 'media-a',
+        duration: 8,
+        file: new File([], 'restored.mp4', { type: 'video/mp4' }),
+        url: '/api/atlas/project-assets/asset-a/media',
+        fireflyProjectAssetId: 'asset-a',
+        remoteSourcePath: '/api/atlas/project-assets/asset-a/media',
+        remoteCacheStatus: 'idle',
+      }],
+    });
+    deps.ensureLocalSource = vi.fn();
+
+    await expect(warmVisibleTimelineThumbnailGeneration([
+      { mediaFileId: 'media-a' },
+    ], { deps })).resolves.toEqual([
+      { mediaFileId: 'media-a', status: 'blocked' },
+    ]);
+
+    expect(deps.ensureLocalSource).toHaveBeenCalledWith('media-a');
+    expect(deps.generateForSourceUrl).not.toHaveBeenCalled();
+  });
+
   it('uses the local OPFS blob after a Firefly remote source is ready', async () => {
     const localFile = new File(['video'], 'remote.mp4', { type: 'video/mp4' });
     const deps = createDeps({

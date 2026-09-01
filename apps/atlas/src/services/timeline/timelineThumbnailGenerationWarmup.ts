@@ -70,6 +70,7 @@ export interface TimelineThumbnailGenerationWarmupDeps {
     mediaFileId: string,
     prioritySecondRanges?: readonly ThumbnailGenerationSecondRange[],
   ) => void;
+  ensureLocalSource?: (mediaFileId: string) => void;
   maxConcurrentGenerations?: number;
   setTimeout: typeof setTimeout;
   clearTimeout: typeof clearTimeout;
@@ -139,6 +140,13 @@ function getDefaultDeps(): TimelineThumbnailGenerationWarmupDeps {
     ),
     prioritizeSourceSeconds: (mediaFileId, prioritySecondRanges) => {
       thumbnailCacheService.prioritizeSourceSeconds(mediaFileId, prioritySecondRanges);
+    },
+    ensureLocalSource: (mediaFileId) => {
+      void import('./timelineExternalDropMediaResolver').then(
+        ({ ensureFireflyTimelineMediaMaterialized }) => (
+          ensureFireflyTimelineMediaMaterialized(mediaFileId)
+        ),
+      );
     },
     ...getTimelineWarmupTimerDeps(),
   };
@@ -238,7 +246,7 @@ function resolveThumbnailGenerationRequest(
   };
 }
 
-function isWaitingForFireflyLocalSource(
+function requiresFireflyLocalSource(
   ref: VisibleTimelineThumbnailRef,
   state: TimelineThumbnailGenerationState,
 ): boolean {
@@ -246,8 +254,7 @@ function isWaitingForFireflyLocalSource(
   return Boolean(
     mediaFile?.fireflyProjectAssetId
     && mediaFile.remoteSourcePath
-    && mediaFile.remoteCacheStatus === 'downloading'
-    && !mediaFile.file
+    && (!mediaFile.file || mediaFile.file.size <= 0)
   );
 }
 
@@ -343,7 +350,8 @@ export async function warmVisibleTimelineThumbnailGeneration(
       continue;
     }
 
-    if (isWaitingForFireflyLocalSource(ref, state)) {
+    if (requiresFireflyLocalSource(ref, state)) {
+      deps.ensureLocalSource?.(ref.mediaFileId);
       results.push({
         mediaFileId: ref.mediaFileId,
         status: 'blocked',
