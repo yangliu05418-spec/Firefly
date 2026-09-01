@@ -70,11 +70,13 @@ describe('timeline external drop media resolver', () => {
     expect((file as File & { path?: string }).path).toBe('C:/media/clip.mp4');
   });
 
-  it('reports clip-typed media overrides only for source-specific clip types', () => {
+  it('preserves the authoritative media type when OPFS files lose their name and MIME metadata', () => {
+    expect(getTimelineDropMediaTypeOverride(mediaFile({ type: 'video' }))).toBe('video');
+    expect(getTimelineDropMediaTypeOverride(mediaFile({ type: 'audio' }))).toBe('audio');
+    expect(getTimelineDropMediaTypeOverride(mediaFile({ type: 'image' }))).toBe('image');
     expect(getTimelineDropMediaTypeOverride(mediaFile({ type: 'model' }))).toBe('model');
     expect(getTimelineDropMediaTypeOverride(mediaFile({ type: 'gaussian-splat' }))).toBe('gaussian-splat');
     expect(getTimelineDropMediaTypeOverride(mediaFile({ type: 'lottie' }))).toBe('lottie');
-    expect(getTimelineDropMediaTypeOverride(mediaFile({ type: 'audio' }))).toBeUndefined();
   });
 
   it('creates lazy 3D placeholder files with file paths', () => {

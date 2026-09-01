@@ -38,6 +38,20 @@ const largeMediaTransfers = new TransferScheduler(1);
 const transferPriority = (descriptor: LocalMediaDescriptor) => descriptor.cachePolicy === 'pin' ? 1 : descriptor.variant === 'thumbnail' ? 2 : descriptor.cachePolicy === 'warm' ? 3 : 4;
 const transferScheduler = (descriptor: LocalMediaDescriptor) => descriptor.mediaType === 'image' ? imageTransfers : largeMediaTransfers;
 
+export function restoreLocalMediaFileMetadata(
+  file: File,
+  descriptor: Pick<LocalMediaDescriptor, 'contentType'>,
+): File {
+  const contentType = descriptor.contentType.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+  if (!contentType || file.type.toLowerCase() === contentType) return file;
+  // Blob parts retain the OPFS-backed bytes; this wrapper restores response
+  // metadata without reading or copying a large media file into JavaScript.
+  return new File([file], file.name, {
+    type: contentType,
+    lastModified: file.lastModified,
+  });
+}
+
 export interface LocalMediaCacheOptions {
   report?: (event: LocalMediaEvent) => void;
   maxBytes?: number;
@@ -75,7 +89,7 @@ export class LocalMediaCache {
     const manifest = await this.store.read(this.userId, descriptor.cacheKey).catch(() => undefined);
     if (manifest?.state === 'ready' && manifest.revision === descriptor.revision) {
       try {
-        const lease = await this.localObjectUrl(descriptor.cacheKey);
+        const lease = await this.localObjectUrl(descriptor);
         void this.store.touch(this.userId, descriptor.cacheKey);
         this.emit('local_media_hit', descriptor, { bytes: manifest.downloadedBytes });
         return { ...lease, local: true };
@@ -118,8 +132,9 @@ export class LocalMediaCache {
     const manifest = await this.store.read(this.userId, descriptor.cacheKey);
     if (manifest?.state !== 'ready' || manifest.revision !== descriptor.revision) throw new Error('LOCAL_MEDIA_NOT_READY');
     const handle = await localMediaContentHandle(this.userId, descriptor.cacheKey);
-    const file = await handle.getFile();
-    if (!file.size || (descriptor.size && file.size !== descriptor.size)) throw new Error('LOCAL_MEDIA_INVALID');
+    const storedFile = await handle.getFile();
+    if (!storedFile.size || (descriptor.size && storedFile.size !== descriptor.size)) throw new Error('LOCAL_MEDIA_INVALID');
+    const file = restoreLocalMediaFileMetadata(storedFile, descriptor);
     void this.store.touch(this.userId, descriptor.cacheKey);
     return { file, handle };
   }
@@ -188,14 +203,16 @@ export class LocalMediaCache {
     this.objectUrls.clear();
   }
 
-  private async localObjectUrl(cacheKey: string) {
+  private async localObjectUrl(descriptor: LocalMediaDescriptor) {
+    const cacheKey = descriptor.cacheKey;
     const existing = this.objectUrls.get(cacheKey);
     if (existing) {
       existing.leases += 1;
       return { url: existing.url, release: () => this.releaseObjectUrl(cacheKey) };
     }
-    const file = await (await localMediaContentHandle(this.userId, cacheKey)).getFile();
-    if (!file.size) throw new Error('LOCAL_MEDIA_EMPTY');
+    const storedFile = await (await localMediaContentHandle(this.userId, cacheKey)).getFile();
+    if (!storedFile.size) throw new Error('LOCAL_MEDIA_EMPTY');
+    const file = restoreLocalMediaFileMetadata(storedFile, descriptor);
     const url = URL.createObjectURL(file);
     this.objectUrls.set(cacheKey, { url, leases: 1 });
     return { url, release: () => this.releaseObjectUrl(cacheKey) };

@@ -17,12 +17,11 @@ import type {
 import { useTimelineStore } from '../stores/timeline';
 import type { TimelinePlacementMode } from '../stores/timeline/editOperations/types';
 import type { TimelineStore, TimelineToolPreview } from '../stores/timeline/types';
-import { NativeHelperClient } from './nativeHelper/NativeHelperClient';
-import { createPrimaryMediaObjectUrl } from './project/mediaObjectUrlManager';
-import { Logger } from './logger';
 import { placeLiveInputOnTimeline } from './mediaRuntime/liveInputTimelineAdapter';
-
-const log = Logger.create('TimelinePlacementCommands');
+import {
+  getTimelineDropMediaTypeOverride,
+  resolveMediaFileForTimelineDrop,
+} from './timeline/timelineExternalDropMediaResolver';
 const DEFAULT_SOURCE_DURATION = 5;
 const DEFAULT_3D_SOURCE_DURATION = 10;
 const EPSILON = 0.001;
@@ -57,107 +56,6 @@ function clipEnd(clip: Pick<TimelineClip, 'startTime' | 'duration'>): number {
 function rangesOverlap(startTime: number, duration: number, clip: TimelineClip): boolean {
   const endTime = startTime + duration;
   return startTime < clipEnd(clip) - EPSILON && endTime > clip.startTime + EPSILON;
-}
-
-function getTimelineMediaTypeOverride(mediaFile: MediaFile): string | undefined {
-  return ['gaussian-splat', 'lottie', 'rive', 'model'].includes(mediaFile.type)
-    ? mediaFile.type
-    : undefined;
-}
-
-function getPlaceholderMimeType(mediaFile: MediaFile): string {
-  const name = mediaFile.name.toLowerCase();
-
-  if (mediaFile.type === 'model') {
-    if (name.endsWith('.glb')) return 'model/gltf-binary';
-    if (name.endsWith('.gltf')) return 'model/gltf+json';
-    if (name.endsWith('.obj')) return 'model/obj';
-  }
-
-  if (mediaFile.type === 'gaussian-splat') {
-    return 'application/octet-stream';
-  }
-
-  return '';
-}
-
-function createPlaceholderFileForMedia(mediaFile: MediaFile): File {
-  const file = new File([], mediaFile.name, { type: getPlaceholderMimeType(mediaFile) });
-  const path = mediaFile.absolutePath ?? mediaFile.filePath;
-  if (path) {
-    (file as File & { path?: string }).path = path;
-  }
-  return file;
-}
-
-function mediaFileHasLazy3DSource(mediaFile: MediaFile): boolean {
-  if (mediaFile.file || mediaFile.url || mediaFile.absolutePath || mediaFile.projectPath) {
-    return true;
-  }
-
-  if (mediaFile.modelSequence?.frames.some((frame) =>
-    Boolean(frame.file || frame.modelUrl || frame.absolutePath || frame.projectPath || frame.sourcePath)
-  )) {
-    return true;
-  }
-
-  return Boolean(mediaFile.gaussianSplatSequence?.frames.some((frame) =>
-    Boolean(frame.file || frame.splatUrl || frame.absolutePath || frame.projectPath || frame.sourcePath)
-  ));
-}
-
-async function resolveMediaFileForTimeline(mediaFile: MediaFile): Promise<File | null> {
-  if (mediaFile.file) {
-    return mediaFile.file;
-  }
-
-  if (mediaFile.type === 'model' || mediaFile.type === 'gaussian-splat') {
-    return mediaFileHasLazy3DSource(mediaFile) ? createPlaceholderFileForMedia(mediaFile) : null;
-  }
-
-  const nativeReferenceUrl = NativeHelperClient.parseFileReferenceUrl(mediaFile.url)
-    ? mediaFile.url
-    : mediaFile.absolutePath
-      ? NativeHelperClient.getFileReferenceUrl(mediaFile.absolutePath)
-      : null;
-
-  if (!nativeReferenceUrl) {
-    return null;
-  }
-
-  try {
-    const file = await NativeHelperClient.getReferencedFile(nativeReferenceUrl, mediaFile.name);
-    if (!file) return null;
-
-    const referencedPath = NativeHelperClient.parseFileReferenceUrl(nativeReferenceUrl) ?? mediaFile.absolutePath;
-    if (referencedPath) {
-      (file as File & { path?: string }).path = referencedPath;
-    }
-    const url = createPrimaryMediaObjectUrl(mediaFile.id, file);
-
-    useMediaStore.setState((state) => ({
-      files: state.files.map((currentFile) =>
-        currentFile.id === mediaFile.id
-          ? {
-              ...currentFile,
-              file,
-              url,
-              hasFileHandle: true,
-              absolutePath: currentFile.absolutePath ?? referencedPath ?? undefined,
-            }
-          : currentFile
-      ),
-    }));
-
-    return file;
-  } catch (error) {
-    log.warn('Could not resolve media source for placement command', {
-      mediaFileId: mediaFile.id,
-      name: mediaFile.name,
-      error,
-    });
-    return null;
-  }
 }
 
 function applySourceRange(duration: number, range?: { inPoint: number | null; outPoint: number | null }): { duration: number; sourceInPoint: number } {
@@ -604,7 +502,7 @@ async function placeSource(
     if (source.item.liveInput) {
       createdClipId = placeLiveInputOnTimeline({ item: source.item, trackId, startTime, duration: clipDuration });
     } else {
-      const file = await resolveMediaFileForTimeline(source.item);
+      const file = await resolveMediaFileForTimelineDrop(source.item);
       if (!file) return null;
       createdClipId = await state.addClip(
         trackId,
@@ -612,7 +510,7 @@ async function placeSource(
         startTime,
         clipDuration,
         source.item.id,
-        getTimelineMediaTypeOverride(source.item),
+        getTimelineDropMediaTypeOverride(source.item),
         { source: { naturalDuration: source.naturalDuration } },
       );
     }
