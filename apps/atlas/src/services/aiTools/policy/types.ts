@@ -1,7 +1,7 @@
 // AI Tool Policy Types
 
 export type RiskLevel = 'low' | 'medium' | 'high';
-export type CallerContext = 'chat' | 'devBridge' | 'console' | 'internal' | 'kernel';
+export type CallerContext = 'chat' | 'devBridge' | 'console' | 'internal' | 'kernel' | 'fireflyAgent';
 export type AIToolExecutionMode = 'normal' | 'plan' | 'read-only';
 
 export interface ToolAccessOptions {

@@ -101,8 +101,13 @@ export async function handleStartClipTranscription(
   selectClipAndOpenTab(clipId, 'transcript');
 
   // Import and start transcription (runs in background)
-  const { transcribeClip } = await import('../../clipTranscriber');
-  transcribeClip(clipId, 'auto'); // Don't await - runs in background
+  if (import.meta.env.VITE_APP_VARIANT === 'firefly') {
+    const { transcribeClipLocally } = await import('../../../firefly/fireflyLocalTranscriber');
+    void transcribeClipLocally(clipId, 'auto');
+  } else {
+    const { transcribeClip } = await import('../../clipTranscriber');
+    void transcribeClip(clipId, 'auto');
+  }
 
   return {
     success: true,

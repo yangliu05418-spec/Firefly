@@ -212,6 +212,8 @@ export const createAtlasRuntime = (input: {
       },
     },
     maxToolCalls: config.atlasAgentMaxToolCalls,
+    maxRounds: config.atlasAgentMaxRounds,
+    phase: config.atlasAgentPhase === "off" ? "core" : config.atlasAgentPhase,
   });
   const storage = createAtlasStorage((objectKey) => input.enqueueMediaDelete(
     objectKey,
@@ -224,7 +226,7 @@ export const createAtlasRuntime = (input: {
     resolveImportSource: resolveAtlasImportSource,
     describeAsset: describeAtlasAsset,
     enabled: config.atlasEnabled,
-    agentEnabled: config.atlasAgentEnabled,
+    agentEnabled: config.atlasAgentEnabled && config.atlasAgentPhase !== "off",
     generateEnabled: config.atlasGenerateEnabled,
     maxUploadBytes: config.atlasMaxUploadBytes,
     registerGlobalAsset: registerAtlasGlobalExport,
@@ -233,7 +235,7 @@ export const createAtlasRuntime = (input: {
     service: agentService,
     queue: input.agentQueue,
     requireAuth: input.requireAuth,
-    enabled: config.atlasEnabled && config.atlasAgentEnabled,
+    enabled: config.atlasEnabled && config.atlasAgentEnabled && config.atlasAgentPhase !== "off",
   });
   return {
     projectStore,

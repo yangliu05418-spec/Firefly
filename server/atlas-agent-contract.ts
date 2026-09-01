@@ -1,7 +1,10 @@
 import crypto from "node:crypto";
 import { z } from "zod";
+import { ATLAS_AGENT_CATALOGS, ATLAS_AGENT_GENERATED_TOOLS } from "./atlas-agent-catalog.generated.js";
 
-export const ATLAS_AGENT_CATALOG_VERSION = "1";
+export type AtlasAgentPhase = keyof typeof ATLAS_AGENT_CATALOGS;
+export const ATLAS_AGENT_CATALOG_VERSION = ATLAS_AGENT_CATALOGS.full.version;
+export const ATLAS_AGENT_CATALOG_DIGEST = ATLAS_AGENT_CATALOGS.full.digest;
 export const ATLAS_AGENT_MAX_TOOL_CALLS = 32;
 
 export type AtlasAgentRisk = "low" | "medium" | "destructive" | "external";
@@ -80,7 +83,7 @@ const milliseconds = finite.min(0).max(86_400_000);
 const strict = <T extends z.ZodRawShape>(shape: T) => z.object(shape).strict();
 const hasAtLeastOneDefinedValue = (value: Record<string, unknown>) => Object.values(value).some((item) => item !== undefined);
 
-const toolSchemas = {
+const legacyToolSchemas = {
   split_clip: strict({ clipId: id, atMs: milliseconds }),
   trim_clip: strict({ clipId: id, sourceInMs: milliseconds, sourceOutMs: milliseconds })
     .refine((value) => value.sourceOutMs > value.sourceInMs, "结束时间必须晚于开始时间"),
@@ -112,7 +115,7 @@ const toolSchemas = {
   request_export: strict({ preset: z.literal("mp4_h264_aac_1080p30"), fileName: z.string().trim().min(1).max(180).optional() }),
 } as const;
 
-export type AtlasAgentToolName = keyof typeof toolSchemas;
+export type AtlasAgentToolName = (typeof ATLAS_AGENT_GENERATED_TOOLS)[number]["name"] | keyof typeof legacyToolSchemas;
 
 type ToolDefinition = {
   description: string;
@@ -127,7 +130,7 @@ const objectSchema = (properties: Record<string, unknown>, required: string[]) =
 const idSchema = { type: "string", minLength: 1, maxLength: 128 };
 const msSchema = { type: "number", minimum: 0, maximum: 86_400_000 };
 
-export const ATLAS_AGENT_TOOL_CATALOG: Readonly<Record<AtlasAgentToolName, ToolDefinition>> = Object.freeze({
+export const ATLAS_AGENT_V1_TOOL_CATALOG: Readonly<Record<keyof typeof legacyToolSchemas, ToolDefinition>> = Object.freeze({
   split_clip: { description: "在片段内部时间点切割片段", risk: "low", requiresConfirmation: false, schema: objectSchema({ clipId: idSchema, atMs: msSchema }, ["clipId", "atMs"]) },
   trim_clip: { description: "修改片段源素材入点和出点", risk: "low", requiresConfirmation: false, schema: objectSchema({ clipId: idSchema, sourceInMs: msSchema, sourceOutMs: msSchema }, ["clipId", "sourceInMs", "sourceOutMs"]) },
   move_clip: { description: "将片段移动到轨道和时间点", risk: "low", requiresConfirmation: false, schema: objectSchema({ clipId: idSchema, trackId: idSchema, startMs: msSchema }, ["clipId", "trackId", "startMs"]) },
@@ -143,11 +146,15 @@ export const ATLAS_AGENT_TOOL_CATALOG: Readonly<Record<AtlasAgentToolName, ToolD
   request_export: { description: "请求导出当前时间线", risk: "external", requiresConfirmation: true, schema: objectSchema({ preset: { type: "string", const: "mp4_h264_aac_1080p30" }, fileName: { type: "string", minLength: 1, maxLength: 180 } }, ["preset"]) },
 });
 
-export const ATLAS_AGENT_CATALOG_DIGEST = digestJson({ version: ATLAS_AGENT_CATALOG_VERSION, tools: ATLAS_AGENT_TOOL_CATALOG });
+export const atlasAgentCatalogForPhase = (phase: AtlasAgentPhase) => ATLAS_AGENT_CATALOGS[phase];
+export const ATLAS_AGENT_TOOL_CATALOG = Object.freeze(Object.fromEntries(
+  ATLAS_AGENT_GENERATED_TOOLS.map((tool) => [tool.name, tool]),
+)) as Readonly<Record<string, (typeof ATLAS_AGENT_GENERATED_TOOLS)[number]>>;
+export const ATLAS_AGENT_V1_CATALOG_DIGEST = digestJson({ version: "1", tools: ATLAS_AGENT_V1_TOOL_CATALOG });
 
 const rawOperationSchema = strict({
   sequence: z.number().int().min(1).max(ATLAS_AGENT_MAX_TOOL_CALLS),
-  tool: z.enum(Object.keys(toolSchemas) as [AtlasAgentToolName, ...AtlasAgentToolName[]]),
+  tool: id,
   args: z.unknown(),
 });
 
@@ -177,28 +184,99 @@ export type AtlasAgentPlan = {
   planDigest: string;
 };
 
-export const normalizeAtlasAgentPlan = (raw: unknown, input: { runId: string; baseRevision: number; maxToolCalls?: number }): AtlasAgentPlan => {
+type JsonValidationResult = { valid: true } | { valid: false; message: string };
+
+export const validateAtlasAgentJsonSchema = (schema: unknown, value: unknown, path = "args"): JsonValidationResult => {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return { valid: false, message: `${path} Schema无效` };
+  const rule = schema as Record<string, unknown>;
+  if (Array.isArray(rule.enum) && !rule.enum.some((candidate) => canonicalJson(candidate) === canonicalJson(value))) {
+    return { valid: false, message: `${path} 不在允许范围内` };
+  }
+  if (Array.isArray(rule.anyOf)) {
+    const matches = rule.anyOf.some((candidate) => validateAtlasAgentJsonSchema(candidate, value, path).valid);
+    if (!matches) return { valid: false, message: `${path} 不符合任一允许结构` };
+  }
+  if (Array.isArray(rule.oneOf)) {
+    const matches = rule.oneOf.filter((candidate) => validateAtlasAgentJsonSchema(candidate, value, path).valid).length;
+    if (matches !== 1) return { valid: false, message: `${path} 必须且只能符合一种结构` };
+  }
+  if (rule.not && validateAtlasAgentJsonSchema(rule.not, value, path).valid) return { valid: false, message: `${path} 命中了禁止结构` };
+  const allowedTypes = Array.isArray(rule.type) ? rule.type : rule.type ? [rule.type] : [];
+  if (allowedTypes.length) {
+    const actual = value === null ? "null" : Array.isArray(value) ? "array" : Number.isInteger(value) ? "integer" : typeof value;
+    const compatible = allowedTypes.some((expected) => expected === actual || (expected === "number" && typeof value === "number"));
+    if (!compatible) return { valid: false, message: `${path} 类型无效` };
+  }
+  if (typeof value === "string") {
+    if (typeof rule.minLength === "number" && value.length < rule.minLength) return { valid: false, message: `${path} 过短` };
+    if (typeof rule.maxLength === "number" && value.length > rule.maxLength) return { valid: false, message: `${path} 过长` };
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return { valid: false, message: `${path} 不是有限数值` };
+    if (typeof rule.minimum === "number" && value < rule.minimum) return { valid: false, message: `${path} 小于最小值` };
+    if (typeof rule.maximum === "number" && value > rule.maximum) return { valid: false, message: `${path} 超过最大值` };
+  }
+  if (Array.isArray(value)) {
+    if (typeof rule.minItems === "number" && value.length < rule.minItems) return { valid: false, message: `${path} 项目不足` };
+    if (typeof rule.maxItems === "number" && value.length > rule.maxItems) return { valid: false, message: `${path} 项目过多` };
+    if (rule.uniqueItems === true && new Set(value.map((item) => canonicalJson(item))).size !== value.length) return { valid: false, message: `${path} 包含重复项` };
+    if (rule.items) for (let index = 0; index < value.length; index += 1) {
+      const result = validateAtlasAgentJsonSchema(rule.items, value[index], `${path}[${index}]`);
+      if (!result.valid) return result;
+    }
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>;
+    const properties = rule.properties && typeof rule.properties === "object" && !Array.isArray(rule.properties)
+      ? rule.properties as Record<string, unknown> : {};
+    const required = Array.isArray(rule.required) ? rule.required.filter((item): item is string => typeof item === "string") : [];
+    for (const name of required) if (!(name in record)) return { valid: false, message: `${path}.${name} 缺失` };
+    if (rule.additionalProperties === false) {
+      const unknown = Object.keys(record).find((name) => !(name in properties));
+      if (unknown) return { valid: false, message: `${path}.${unknown} 不受支持` };
+    }
+    for (const [name, child] of Object.entries(record)) if (name in properties) {
+      const result = validateAtlasAgentJsonSchema(properties[name], child, `${path}.${name}`);
+      if (!result.valid) return result;
+    }
+  }
+  return { valid: true };
+};
+
+export const normalizeAtlasAgentPlan = (raw: unknown, input: {
+  runId: string; baseRevision: number; maxToolCalls?: number; catalogVersion?: string; catalogDigest?: string; phase?: AtlasAgentPhase;
+}): AtlasAgentPlan => {
   assertSafeJson(raw);
   const parsed = rawPlanSchema.safeParse(raw);
   if (!parsed.success) throw new AtlasAgentProtocolError(422, "AGENT_PLAN_INVALID", "Agent 返回了无效的操作计划");
   const maxToolCalls = Math.min(ATLAS_AGENT_MAX_TOOL_CALLS, input.maxToolCalls ?? ATLAS_AGENT_MAX_TOOL_CALLS);
   if (parsed.data.operations.length > maxToolCalls) throw new AtlasAgentProtocolError(422, "AGENT_PLAN_TOO_LARGE", "Agent 操作步骤超过上限");
-  const exportIndexes = parsed.data.operations.flatMap((operation, index) => operation.tool === "request_export" ? [index] : []);
+  const useLegacyCatalog = input.catalogVersion === undefined && input.catalogDigest === undefined
+    && parsed.data.operations.every((operation) => operation.tool in legacyToolSchemas);
+  const phase = input.phase ?? "full";
+  const catalog = atlasAgentCatalogForPhase(phase);
+  const expectedVersion = input.catalogVersion ?? (useLegacyCatalog ? "1" : catalog.version);
+  const expectedDigest = input.catalogDigest ?? (useLegacyCatalog ? ATLAS_AGENT_V1_CATALOG_DIGEST : catalog.digest);
+  if (!useLegacyCatalog && (expectedVersion !== catalog.version || expectedDigest !== catalog.digest)) throw new AtlasAgentProtocolError(409, "AGENT_CATALOG_MISMATCH", "Agent工具目录已经更新");
+  const catalogByName = new Map<string, ToolDefinition & { name: string }>(useLegacyCatalog
+    ? Object.entries(ATLAS_AGENT_V1_TOOL_CATALOG).map(([name, definition]) => [name, { name, ...definition }])
+    : catalog.tools.map((tool) => [tool.name, tool]));
+  const exportIndexes = parsed.data.operations.flatMap((operation, index) => ["requestFireflyExport", "request_export"].includes(operation.tool) ? [index] : []);
   if (exportIndexes.length > 1) throw new AtlasAgentProtocolError(422, "AGENT_PLAN_EXPORT_DUPLICATE", "Agent 计划最多只能请求一次导出");
   if (exportIndexes.length === 1 && exportIndexes[0] !== parsed.data.operations.length - 1) {
     throw new AtlasAgentProtocolError(422, "AGENT_PLAN_EXPORT_ORDER_INVALID", "导出必须是 Agent 计划的最后一步");
   }
   const operations = parsed.data.operations.map((operation, index): AtlasAgentOperation => {
     if (operation.sequence !== index + 1) throw new AtlasAgentProtocolError(422, "AGENT_PLAN_SEQUENCE_INVALID", "Agent 操作序号必须连续且从 1 开始");
-    const schema = toolSchemas[operation.tool];
-    const result = schema.safeParse(operation.args);
-    if (!result.success) throw new AtlasAgentProtocolError(422, "AGENT_TOOL_ARGS_INVALID", `Agent 工具 ${operation.tool} 参数无效`);
-    const definition = ATLAS_AGENT_TOOL_CATALOG[operation.tool];
-    const operationCore = { runId: input.runId, sequence: operation.sequence, tool: operation.tool, args: result.data, baseRevision: input.baseRevision, catalogDigest: ATLAS_AGENT_CATALOG_DIGEST };
+    const definition = catalogByName.get(operation.tool);
+    if (!definition) throw new AtlasAgentProtocolError(422, "AGENT_TOOL_UNKNOWN", `Agent工具 ${operation.tool} 不可用`);
+    const result = validateAtlasAgentJsonSchema(definition.schema, operation.args);
+    if (!result.valid) throw new AtlasAgentProtocolError(422, "AGENT_TOOL_ARGS_INVALID", `Agent工具 ${operation.tool} 参数无效：${result.message}`);
+    const operationCore = { runId: input.runId, sequence: operation.sequence, tool: operation.tool, args: operation.args, baseRevision: input.baseRevision, catalogDigest: expectedDigest };
     return {
       sequence: operation.sequence,
-      tool: operation.tool,
-      args: result.data as Record<string, unknown>,
+      tool: definition.name as AtlasAgentToolName,
+      args: operation.args as Record<string, unknown>,
       risk: definition.risk,
       requiresConfirmation: definition.requiresConfirmation,
       operationKey: `${input.runId}:${operation.sequence}`,
@@ -208,8 +286,8 @@ export const normalizeAtlasAgentPlan = (raw: unknown, input: { runId: string; ba
   const core = {
     version: 1 as const,
     summary: parsed.data.summary,
-    catalogVersion: ATLAS_AGENT_CATALOG_VERSION,
-    catalogDigest: ATLAS_AGENT_CATALOG_DIGEST,
+    catalogVersion: expectedVersion,
+    catalogDigest: expectedDigest,
     baseRevision: input.baseRevision,
     operations,
   };
@@ -224,6 +302,7 @@ const clipSchema = strict({
   id, trackId: id, assetId: id.optional(), kind: z.enum(["video", "audio", "image", "text"]),
   startMs: milliseconds, durationMs: milliseconds, sourceInMs: milliseconds.optional(), sourceOutMs: milliseconds.optional(),
   volume: finite.min(0).max(4).optional(), muted: z.boolean().optional(), transform: transformSchema.optional(),
+  features: strict({ effects: z.number().int().min(0).max(256), keyframes: z.number().int().min(0).max(10_000), masks: z.number().int().min(0).max(256), transcriptWords: z.number().int().min(0).max(100_000), hasText: z.boolean(), hasCaptions: z.boolean(), hasStoryboard: z.boolean(), textPreview: z.string().max(1_000).optional(), analysisStatus: z.string().max(64).optional() }).optional(),
 });
 const trackSchema = strict({
   id, kind: z.enum(["video", "audio"]), muted: z.boolean(), locked: z.boolean(), clipIds: z.array(id).max(500),
@@ -234,13 +313,14 @@ const assetSchema = strict({
 });
 
 export const atlasAgentSemanticSnapshotSchema = strict({
-  version: z.literal(1),
+  version: z.union([z.literal(1), z.literal(2)]),
   revision: z.number().int().min(0),
   durationMs: milliseconds,
   tracks: z.array(trackSchema).max(128),
   clips: z.array(clipSchema).max(2_000),
   assets: z.array(assetSchema).max(500),
   selection: strict({ clipIds: z.array(id).max(500), trackIds: z.array(id).max(128) }),
+  markers: z.array(strict({ id, timeMs: milliseconds, label: z.string().max(300) })).max(1_000).optional(),
 }).superRefine((snapshot, context) => {
   const trackIds = new Set(snapshot.tracks.map((track) => track.id));
   const clipIds = new Set(snapshot.clips.map((clip) => clip.id));

@@ -17,6 +17,11 @@ const boundedInt = (name: string, fallback: number, minimum: number, maximum: nu
   return value;
 };
 const canvasTextModel = process.env.CANVAS_TEXT_MODEL ?? "google/gemini-2.5-flash";
+const atlasAgentPhase = (() => {
+  const value = (process.env.ATLAS_AGENT_PHASE ?? "off").trim().toLowerCase();
+  if (!["off", "core", "advanced", "full"].includes(value)) throw new Error("Invalid environment variable: ATLAS_AGENT_PHASE");
+  return value as "off" | "core" | "advanced" | "full";
+})();
 
 export const config = {
   port: Number(process.env.PORT ?? 8090),
@@ -80,8 +85,9 @@ export const config = {
   atlasEnabled: (process.env.ATLAS_ENABLED ?? "false").toLowerCase() === "true",
   atlasGenerateEnabled: (process.env.ATLAS_GENERATE_ENABLED ?? "true").toLowerCase() === "true",
   atlasAgentEnabled: (process.env.ATLAS_AGENT_ENABLED ?? "false").toLowerCase() === "true",
+  atlasAgentPhase,
   atlasMaxUploadBytes: positiveInt("ATLAS_MAX_UPLOAD_BYTES", 8 * 1024 * 1024 * 1024),
-  atlasAgentModel: process.env.ATLAS_AGENT_MODEL?.trim() || canvasTextModel,
+  atlasAgentModel: process.env.ATLAS_AGENT_MODEL?.trim() || "z-ai/glm-5.3-flash",
   atlasAgentMaxRounds: boundedInt("ATLAS_AGENT_MAX_ROUNDS", 8, 1, 24),
   atlasAgentMaxToolCalls: boundedInt("ATLAS_AGENT_MAX_TOOL_CALLS", 32, 1, 128),
   atlasAgentRequestTimeoutMs: positiveInt("ATLAS_AGENT_REQUEST_TIMEOUT_MS", 180_000),
@@ -98,6 +104,6 @@ export const config = {
   imageDigest: process.env.FIREFLY_IMAGE_DIGEST ?? "unknown"
 };
 
-if (config.atlasEnabled && config.atlasAgentEnabled && config.openrouterApiKeys.length === 0) {
+if (config.atlasEnabled && config.atlasAgentEnabled && config.atlasAgentPhase !== "off" && config.openrouterApiKeys.length === 0) {
   throw new Error("ATLAS_AGENT_ENABLED requires at least one OPENROUTER_API_KEYS entry");
 }

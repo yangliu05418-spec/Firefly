@@ -41,8 +41,8 @@ const validPlan = {
   version: 1 as const,
   summary: "切割并删除多余片段",
   operations: [
-    { sequence: 1, tool: "split_clip", args: { clipId: "clip-1", atMs: 2_500 } },
-    { sequence: 2, tool: "delete_clip", args: { clipId: "clip-2" } },
+    { sequence: 1, tool: "splitClip", args: { clipId: "clip-1", splitTime: 2.5 } },
+    { sequence: 2, tool: "deleteClip", args: { clipId: "clip-2" } },
   ],
 };
 
@@ -100,7 +100,7 @@ describe("Atlas Agent service", () => {
     const created = service.createRun({ ownerId: "user-a", projectId: "project-1", idempotencyKey: "request-1", instruction: "切割并删除", baseRevision: 0, snapshot: semanticSnapshot() });
     const planned = await service.processRun(created.queuePayload);
 
-    expect(planned).toMatchObject({ status: "awaiting_confirmation", plan: { operations: [{ risk: "low" }, { risk: "destructive", requiresConfirmation: true }] } });
+    expect(planned).toMatchObject({ status: "awaiting_confirmation", plan: { operations: [{ risk: "medium", requiresConfirmation: true }, { risk: "destructive", requiresConfirmation: true }] } });
     const confirmed = service.confirmRun("user-a", created.run.id, true, LEASE_TOKEN);
     expect(confirmed.status).toBe("ready");
     const plan = confirmed.plan!;
@@ -128,12 +128,37 @@ describe("Atlas Agent service", () => {
     database.close();
   });
 
+  it("closes the run when the browser rolls back the native editor transaction", async () => {
+    const { database, service, store } = harness();
+    const created = service.createRun({ ownerId: "user-a", projectId: "project-1", idempotencyKey: "request-rollback", instruction: "切割并删除", baseRevision: 0, snapshot: semanticSnapshot() });
+    const planned = await service.processRun(created.queuePayload);
+    const plan = service.confirmRun("user-a", created.run.id, true, LEASE_TOKEN).plan!;
+
+    const result = service.recordExecutionResults("user-a", created.run.id, {
+      planDigest: plan.planDigest,
+      leaseToken: LEASE_TOKEN,
+      results: planned!.plan!.operations.map((operation) => ({
+        sequence: operation.sequence,
+        status: "failed" as const,
+        result: { code: "EXECUTION_ROLLED_BACK" },
+      })),
+    });
+
+    expect(result).toMatchObject({ kind: "failed", run: { status: "failed", errorCode: "AGENT_EXECUTION_ROLLED_BACK" } });
+    expect(store.listEvents(created.run.id, "user-a").at(-1)).toMatchObject({ type: "run_failed" });
+    expect(() => service.recordOperationResult("user-a", created.run.id, {
+      sequence: 1, planDigest: plan.planDigest, status: "succeeded", result: { changed: true },
+      beforeRevision: 0, afterRevision: 1, historyNodeId: "history-1", leaseToken: LEASE_TOKEN,
+    })).toThrowError(/尚未获得执行授权/);
+    database.close();
+  });
+
   it("checks optional client receipt digests and rejects out-of-order revisions", async () => {
     const provider: AtlasAgentProvider = { createPlan: async () => ({ plan: { ...validPlan, operations: [validPlan.operations[0]] } }) };
     const { database, service } = harness(provider);
     const created = service.createRun({ ownerId: "user-a", projectId: "project-1", idempotencyKey: "request-1", instruction: "切割", baseRevision: 0, snapshot: semanticSnapshot() });
     const planned = await service.processRun(created.queuePayload);
-    const plan = planned!.plan!;
+    const plan = service.confirmRun("user-a", created.run.id, true, LEASE_TOKEN).plan!;
     const input = { sequence: 1, planDigest: plan.planDigest, status: "succeeded" as const, result: { changed: true }, beforeRevision: 0, afterRevision: 1, historyNodeId: "history-1", leaseToken: LEASE_TOKEN };
     const correct = atlasAgentResultReceiptDigest({
       runId: created.run.id, sequence: input.sequence, planDigest: input.planDigest, status: input.status, result: input.result,
@@ -170,9 +195,9 @@ describe("Atlas Agent service", () => {
     database.close();
   });
 
-  it("accepts request_export only after a verified Atlas asset is ready and never advances timeline revision", async () => {
+  it("opens the explicitly confirmed Firefly export workflow without advancing the timeline revision", async () => {
     const provider: AtlasAgentProvider = { createPlan: async () => ({ plan: {
-      version: 1, summary: "导出项目", operations: [{ sequence: 1, tool: "request_export", args: { preset: "mp4_h264_aac_1080p30" } }],
+      version: 1, summary: "导出项目", operations: [{ sequence: 1, tool: "requestFireflyExport", args: { preset: "mp4_h264_aac_1080p30" } }],
     } }) };
     const { database, service } = harness(provider);
     const created = service.createRun({ ownerId: "user-a", projectId: "project-1", idempotencyKey: "export-plan", instruction: "导出", baseRevision: 0, snapshot: semanticSnapshot() });
@@ -182,13 +207,13 @@ describe("Atlas Agent service", () => {
     expect(() => service.recordOperationResult("user-a", created.run.id, {
       sequence: 1, planDigest: plan.planDigest, status: "succeeded", result: { opened: true }, beforeRevision: 0, afterRevision: 0,
       leaseToken: LEASE_TOKEN,
-    })).toThrowError(/尚未完成归档/);
+    })).toThrowError(/尚未打开/);
     expect(() => service.recordOperationResult("user-a", created.run.id, {
-      sequence: 1, planDigest: plan.planDigest, status: "succeeded", result: { status: "ready", assetId: "atlas-export-1" }, beforeRevision: 0, afterRevision: 1,
+      sequence: 1, planDigest: plan.planDigest, status: "succeeded", result: { status: "opened" }, beforeRevision: 0, afterRevision: 1,
       leaseToken: LEASE_TOKEN,
     })).toThrowError(/原子事务/);
     expect(service.recordOperationResult("user-a", created.run.id, {
-      sequence: 1, planDigest: plan.planDigest, status: "succeeded", result: { status: "ready", assetId: "atlas-export-1" }, beforeRevision: 0, afterRevision: 0,
+      sequence: 1, planDigest: plan.planDigest, status: "succeeded", result: { status: "opened" }, beforeRevision: 0, afterRevision: 0,
       leaseToken: LEASE_TOKEN,
     }).run.status).toBe("succeeded");
     database.close();
@@ -200,9 +225,9 @@ describe("Atlas Agent service", () => {
     ["cross-project", { ownerId: "user-a", projectId: "project-2", status: "ready", sourceType: "atlas_export" }],
     ["not-ready", { ownerId: "user-a", projectId: "project-1", status: "uploading", sourceType: "atlas_export" }],
     ["not-export", { ownerId: "user-a", projectId: "project-1", status: "ready", sourceType: "local_upload" }],
-  ])("rejects an unverified request_export receipt: %s", async (_case, asset) => {
+  ])("rejects an invalid Firefly export-open receipt: %s", async (_case, asset) => {
     const provider: AtlasAgentProvider = { createPlan: async () => ({ plan: {
-      version: 1, summary: "导出项目", operations: [{ sequence: 1, tool: "request_export", args: { preset: "mp4_h264_aac_1080p30" } }],
+      version: 1, summary: "导出项目", operations: [{ sequence: 1, tool: "requestFireflyExport", args: { preset: "mp4_h264_aac_1080p30" } }],
     } }) };
     const assets = new Map<string, { ownerId: string; projectId: string; status: string; sourceType: string }>();
     if (asset) assets.set("claimed-export", asset);
@@ -213,7 +238,7 @@ describe("Atlas Agent service", () => {
     expect(() => service.recordOperationResult("user-a", created.run.id, {
       sequence: 1, planDigest: plan.planDigest, status: "succeeded", result: { status: "ready", assetId: "claimed-export" },
       beforeRevision: 0, afterRevision: 0, leaseToken: LEASE_TOKEN,
-    })).toThrowError(/归档校验/);
+    })).toThrowError(/尚未打开/);
     database.close();
   });
 
@@ -254,6 +279,7 @@ describe("Atlas Agent service", () => {
     const secondHarness = harness(provider);
     const executable = secondHarness.service.createRun({ ownerId: "user-a", projectId: "project-1", idempotencyKey: "stale-execute", instruction: "切割", baseRevision: 0, snapshot: semanticSnapshot() });
     const planned = await secondHarness.service.processRun(executable.queuePayload);
+    secondHarness.service.confirmRun("user-a", executable.run.id, true, LEASE_TOKEN);
     secondHarness.database.prepare("UPDATE atlas_projects SET revision = 2 WHERE id = 'project-1'").run();
     expect(() => secondHarness.service.recordOperationResult("user-a", executable.run.id, {
       sequence: 1, planDigest: planned!.plan!.planDigest, status: "succeeded", result: { changed: true },

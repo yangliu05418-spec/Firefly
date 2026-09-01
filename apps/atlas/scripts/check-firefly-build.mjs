@@ -13,16 +13,13 @@ const forbiddenAssetPatterns = [
   /AdminPage/i,
   /audioIntelligence\.worker/i,
   /Billing/i,
-  /clipTranscriber/i,
   /CreditClaim/i,
   /faceAnalysisWorker/i,
   /FlashBoard/i,
   /NativeHelper/i,
-  /ort-wasm/i,
   /sam2Worker/i,
   /sceneCutAnalysisWorker/i,
   /stemSeparationWorker/i,
-  /transcriptionWorker/i,
 ];
 
 const assets = readdirSync(assetsDir);

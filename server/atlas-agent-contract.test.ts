@@ -13,37 +13,37 @@ describe("Atlas Agent atomic contract", () => {
       version: 1,
       summary: "切割后删除多余片段",
       operations: [
-        { sequence: 1, tool: "split_clip", args: { clipId: "clip-1", atMs: 1_500 } },
-        { sequence: 2, tool: "delete_clip", args: { clipId: "clip-2" } },
+        { sequence: 1, tool: "splitClip", args: { clipId: "clip-1", splitTime: 1.5 } },
+        { sequence: 2, tool: "deleteClip", args: { clipId: "clip-2" } },
       ],
     }, { runId: "run-1", baseRevision: 7 });
 
     expect(plan.catalogDigest).toBe(ATLAS_AGENT_CATALOG_DIGEST);
-    expect(plan.operations[0]).toMatchObject({ risk: "low", requiresConfirmation: false, operationKey: "run-1:1" });
+    expect(plan.operations[0]).toMatchObject({ risk: "medium", requiresConfirmation: true, operationKey: "run-1:1" });
     expect(plan.operations[1]).toMatchObject({ risk: "destructive", requiresConfirmation: true, operationKey: "run-1:2" });
     expect(plan.planDigest).toMatch(/^[a-f0-9]{64}$/);
   });
 
   it("rejects additional tool arguments and non-contiguous sequences", () => {
     expect(() => normalizeAtlasAgentPlan({
-      version: 1, summary: "切割", operations: [{ sequence: 1, tool: "split_clip", args: { clipId: "clip-1", atMs: 500, hidden: true } }],
+      version: 1, summary: "切割", operations: [{ sequence: 1, tool: "splitClip", args: { clipId: "clip-1", splitTime: 0.5, hidden: true } }],
     }, { runId: "run-1", baseRevision: 0 })).toThrowError(AtlasAgentProtocolError);
     expect(() => normalizeAtlasAgentPlan({
-      version: 1, summary: "切割", operations: [{ sequence: 2, tool: "split_clip", args: { clipId: "clip-1", atMs: 500 } }],
+      version: 1, summary: "切割", operations: [{ sequence: 2, tool: "splitClip", args: { clipId: "clip-1", splitTime: 0.5 } }],
     }, { runId: "run-1", baseRevision: 0 })).toThrowError(/序号/);
   });
 
   it("rejects request_export in the middle or more than once", () => {
     expect(() => normalizeAtlasAgentPlan({
       version: 1, summary: "先导出再编辑", operations: [
-        { sequence: 1, tool: "request_export", args: { preset: "mp4_h264_aac_1080p30" } },
-        { sequence: 2, tool: "split_clip", args: { clipId: "clip-1", atMs: 500 } },
+        { sequence: 1, tool: "requestFireflyExport", args: { preset: "mp4_h264_aac_1080p30" } },
+        { sequence: 2, tool: "splitClip", args: { clipId: "clip-1", splitTime: 0.5 } },
       ],
     }, { runId: "run-middle-export", baseRevision: 0 })).toThrowError(/最后一步/);
     expect(() => normalizeAtlasAgentPlan({
       version: 1, summary: "重复导出", operations: [
-        { sequence: 1, tool: "request_export", args: { preset: "mp4_h264_aac_1080p30" } },
-        { sequence: 2, tool: "request_export", args: { preset: "mp4_h264_aac_1080p30" } },
+        { sequence: 1, tool: "requestFireflyExport", args: { preset: "mp4_h264_aac_1080p30" } },
+        { sequence: 2, tool: "requestFireflyExport", args: { preset: "mp4_h264_aac_1080p30" } },
       ],
     }, { runId: "run-duplicate-export", baseRevision: 0 })).toThrowError(/一次导出/);
   });
