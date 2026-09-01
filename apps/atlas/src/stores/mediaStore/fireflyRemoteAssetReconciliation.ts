@@ -58,6 +58,7 @@ export function reconcileFireflyRemoteAsset(
   const sourceRevisionChanged = hasFireflyRemoteAssetSourceChanged(existing, asset);
   const hasMaterializedSource = Boolean(
     existing.file
+    && existing.file.size > 0
     && existing.url.startsWith('blob:')
   );
   const keepMaterializedSource = Boolean(

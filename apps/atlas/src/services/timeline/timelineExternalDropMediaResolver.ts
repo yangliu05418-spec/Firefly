@@ -5,6 +5,7 @@ import {
   isSignalAssetImportResult,
 } from '../../stores/mediaStore/helpers/importResult';
 import { useMediaStore } from '../../stores/mediaStore';
+import { useTimelineStore } from '../../stores/timeline';
 import { NativeHelperClient } from '../nativeHelper/NativeHelperClient';
 import { createPrimaryMediaObjectUrl } from '../project/mediaObjectUrlManager';
 import { Logger } from '../logger';
@@ -23,7 +24,23 @@ async function warmMaterializedVideoFilmstrip(
   mediaFile: MediaFile,
   localUrl: string,
 ): Promise<void> {
-  if (mediaFile.type !== 'video' || !mediaFile.duration || mediaFile.duration <= 0) return;
+  if (mediaFile.type !== 'video') return;
+
+  const timelineDuration = useTimelineStore.getState().clips
+    .filter((clip) => (
+      clip.source?.type === 'video'
+      && (clip.source.mediaFileId ?? clip.mediaFileId) === mediaFile.id
+    ))
+    .reduce((duration, clip) => Math.max(
+      duration,
+      clip.source?.naturalDuration ?? 0,
+      clip.outPoint ?? 0,
+      clip.duration ?? 0,
+    ), 0);
+  const duration = mediaFile.duration && mediaFile.duration > 0
+    ? mediaFile.duration
+    : timelineDuration;
+  if (!Number.isFinite(duration) || duration <= 0) return;
 
   const { thumbnailCacheService } = await import('../thumbnailCacheService');
   const status = thumbnailCacheService.getStatus(mediaFile.id);
@@ -35,7 +52,7 @@ async function warmMaterializedVideoFilmstrip(
   await thumbnailCacheService.generateForSourceUrl(
     mediaFile.id,
     localUrl,
-    mediaFile.duration,
+    duration,
     mediaFile.fileHash,
     'anonymous',
   );
@@ -74,7 +91,7 @@ function getCurrentFireflyTimelineMedia(mediaFile: MediaFile): MediaFile | undef
   return current && isSameFireflyTimelineContent(mediaFile, current) ? current : undefined;
 }
 
-function materializeFireflyTimelineMedia(mediaFile: MediaFile): Promise<File | null> {
+export function materializeFireflyTimelineMedia(mediaFile: MediaFile): Promise<File | null> {
   const materializationKey = getFireflyTimelineMaterializationKey(mediaFile);
   const existing = fireflyTimelineMaterializations.get(materializationKey);
   if (existing) return existing;
@@ -177,7 +194,11 @@ function materializeFireflyTimelineMedia(mediaFile: MediaFile): Promise<File | n
     }
     if (shouldMaterializeCurrentRevision) {
       const current = useMediaStore.getState().files.find((file) => file.id === mediaFile.id);
-      if (current?.fireflyProjectAssetId && current.remoteSourcePath && !current.file) {
+      if (
+        current?.fireflyProjectAssetId
+        && current.remoteSourcePath
+        && (!current.file || current.file.size <= 0)
+      ) {
         void materializeFireflyTimelineMedia(current);
       }
     }
@@ -331,7 +352,10 @@ export async function resolveTimelineDropMediaFile(params: {
 }
 
 export async function resolveMediaFileForTimelineDrop(mediaFile: MediaFile): Promise<File | null> {
-  if (mediaFile.file) {
+  // A zero-byte File is Atlas' lazy clip-admission placeholder, not a usable
+  // local media source. Treating it as materialized bypasses OPFS recovery and
+  // the editor's native thumbnail cache, leaving a permanent generic icon.
+  if (mediaFile.file && mediaFile.file.size > 0) {
     return mediaFile.file;
   }
 
@@ -401,4 +425,18 @@ export async function resolveMediaFileForTimelineDrop(mediaFile: MediaFile): Pro
     });
     return null;
   }
+}
+
+/**
+ * Makes a persisted Firefly project asset available through the same real
+ * File/object-URL contract used by Atlas' original local import pipeline.
+ * Visible timeline warmups call this after project restore so an existing clip
+ * does not need to be dragged again before its native filmstrip can recover.
+ */
+export function ensureFireflyTimelineMediaMaterialized(mediaFileId: string): Promise<File | null> {
+  const mediaFile = useMediaStore.getState().files.find((file) => file.id === mediaFileId);
+  if (!mediaFile) return Promise.resolve(null);
+  if (mediaFile.file && mediaFile.file.size > 0) return Promise.resolve(mediaFile.file);
+  if (!mediaFile.fireflyProjectAssetId || !mediaFile.remoteSourcePath) return Promise.resolve(null);
+  return materializeFireflyTimelineMedia(mediaFile);
 }

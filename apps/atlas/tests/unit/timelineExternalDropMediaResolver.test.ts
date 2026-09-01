@@ -132,6 +132,27 @@ describe('timeline external drop media resolver', () => {
     expect(remoteCache.materialize).toHaveBeenCalledWith(remote, expect.objectContaining({ onProgress: expect.any(Function) }));
   });
 
+  it('does not mistake a restored zero-byte Firefly placeholder for local media', async () => {
+    remoteCache.materialize.mockReturnValue(new Promise(() => undefined));
+    const remote = mediaFile({
+      id: 'restored-placeholder-video',
+      name: 'restored.mp4',
+      type: 'video',
+      file: new File([], 'restored.mp4', { type: 'video/mp4' }),
+      fireflyProjectAssetId: 'asset-restored-video',
+      remoteSourcePath: '/api/atlas/project-assets/asset-restored-video/media',
+      url: '/api/atlas/project-assets/asset-restored-video/media',
+      duration: 8,
+    });
+    useMediaStore.setState({ files: [remote] });
+
+    const resolved = await resolveMediaFileForTimelineDrop(remote);
+
+    expect(resolved).not.toBe(remote.file);
+    expect(resolved).toEqual(expect.objectContaining({ name: 'restored.mp4', size: 0 }));
+    expect(remoteCache.materialize).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps the OPFS source and starts local filmstrip generation after a remote video materializes', async () => {
     const localFile = new File(['local-video-bytes'], 'remote.mp4', { type: 'video/mp4' });
     remoteCache.materialize.mockResolvedValue({
