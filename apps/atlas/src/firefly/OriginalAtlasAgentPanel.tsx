@@ -15,6 +15,8 @@ import {
 } from './OriginalAtlasAgentRuntime';
 import './OriginalAtlasAgentPanel.css';
 import { ATLAS_AGENT_CATALOGS } from './atlas-agent-catalog.generated';
+import { BloubAvatar } from './avatar/BloubAvatar';
+import type { StateId } from './avatar/bloub/states';
 
 type PanelStatus = 'idle' | 'saving' | 'planning' | 'ready' | 'applying' | 'reporting' | 'completed' | 'failed';
 
@@ -37,6 +39,28 @@ const errorMessage = (code?: string) => ({
   AGENT_REVISION_CONFLICT: '时间线已发生变化，请重新生成计划。',
   OPERATION_REPLAY_CONFLICT: '操作回执冲突，已停止执行以保护项目。',
 } as Record<string, string>)[code ?? ''] ?? 'Atlas Agent 暂时无法完成该操作。';
+
+const avatarStateFor = (status: PanelStatus): StateId => ({
+  idle: 'idle',
+  saving: 'orbit',
+  planning: 'thinking',
+  ready: 'notify',
+  applying: 'play',
+  reporting: 'thinking',
+  completed: 'wink',
+  failed: 'alert',
+})[status] as StateId;
+
+const statusLabel = (status: PanelStatus) => ({
+  idle: '待命',
+  saving: '保存中',
+  planning: '正在理解时间线',
+  ready: '计划待确认',
+  applying: '正在执行',
+  reporting: '正在校验',
+  completed: '已完成',
+  failed: '需要处理',
+})[status];
 
 export default function OriginalAtlasAgentPanel() {
   const embedding = useFireflyEmbedding();
@@ -210,24 +234,58 @@ export default function OriginalAtlasAgentPanel() {
 
   const busy = ['saving', 'planning', 'applying', 'reporting'].includes(status);
   return <section className="original-atlas-agent" aria-busy={busy}>
-    <header><div><small>FIREFLY</small><strong>Atlas Agent</strong></div><span className={`original-atlas-agent__status is-${status}`}>{({
-      idle: '待命', saving: '保存中', planning: '规划中', ready: '待确认', applying: '执行中', reporting: '校验中', completed: '已完成', failed: '需要处理',
-    } as Record<PanelStatus, string>)[status]}</span></header>
-    <div className="original-atlas-agent__body">
-      <p>用自然语言安排剪辑。Agent 只会生成受限操作计划，确认后由 Atlas 原生撤销事务执行。</p>
-      <textarea value={instruction} maxLength={4_000} disabled={busy} onChange={(event) => setInstruction(event.target.value)} placeholder="例如：把第一个片段在 3 秒处切开，并将后半段移到下一条视频轨道" />
+    <div className="original-atlas-agent__stage">
+      <div className="original-atlas-agent__intro">
+        <span>ATLAS AGENT</span>
+        <h1>想怎么剪？</h1>
+        <p>描述你的剪辑意图。Atlas 会先给出操作计划，确认后才会修改时间线。</p>
+      </div>
+      <div className={`original-atlas-agent__composer is-${status}`}>
+        <div className="original-atlas-agent__avatar" aria-hidden="true">
+          <BloubAvatar state={avatarStateFor(status)} />
+        </div>
+        <label className="original-atlas-agent__input">
+          <span className="sr-only">剪辑指令</span>
+          <textarea
+            value={instruction}
+            maxLength={4_000}
+            rows={1}
+            disabled={busy}
+            onChange={(event) => setInstruction(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                void submit();
+              }
+            }}
+            placeholder="例如：把第一个片段在 3 秒处切开，并将后半段移到下一条视频轨道"
+          />
+          <span className={`original-atlas-agent__status is-${status}`} aria-live="polite">{statusLabel(status)}</span>
+        </label>
+        <button
+          type="button"
+          className="original-atlas-agent__send"
+          aria-label="生成操作计划"
+          title="生成操作计划（Enter）"
+          onClick={() => void submit()}
+          disabled={busy || !instruction.trim() || Boolean(plan)}
+        >
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 6l4 4-4 4" /></svg>
+        </button>
+      </div>
+      <div className="original-atlas-agent__body">
       {plan && <article className="original-atlas-agent__plan">
         <b>{plan.summary}</b>
         <ol>{plan.operations.map((operation) => <li key={operation.operationKey}><span>{operation.sequence}</span><strong title={operation.tool}>{operationLabel(plan, operation.tool)}</strong><em>{operation.risk === 'destructive' ? '高风险' : operation.risk === 'external' ? '外部操作' : '需要确认'}</em></li>)}</ol>
         <div className="original-atlas-agent__warning">请核对全部步骤。确认后将作为一个撤销事务执行；任一步失败都会回滚整组操作。</div>
       </article>}
       {error && <div className="original-atlas-agent__error" role="alert">{error}</div>}
+      {status === 'completed' && !error && <div className="original-atlas-agent__completed" role="status">更改已应用，可使用编辑器的撤销功能恢复。</div>}
+      {(plan || busy || status === 'completed' || error) && <div className="original-atlas-agent__actions">
+        <button type="button" className="agent-button agent-button--quiet" onClick={() => void cancel()} disabled={status === 'reporting' || Boolean(appliedRef.current)}>{busy ? '停止' : '清空'}</button>
+        {plan && <button type="button" className="agent-button agent-button--primary" onClick={() => void apply()} disabled={busy}>{appliedRef.current ? '同步执行结果' : '确认并应用'}</button>}
+      </div>}
+      </div>
     </div>
-    <footer>
-      {(plan || busy || status === 'completed') && <button type="button" className="agent-button agent-button--quiet" onClick={() => void cancel()} disabled={status === 'reporting' || Boolean(appliedRef.current)}>{busy ? '停止' : '清空'}</button>}
-      {plan
-        ? <button type="button" className="agent-button agent-button--primary" onClick={() => void apply()} disabled={busy}>{appliedRef.current ? '同步执行结果' : '确认并应用'}</button>
-        : <button type="button" className="agent-button agent-button--primary" onClick={() => void submit()} disabled={busy || !instruction.trim()}>{busy ? '正在处理…' : '生成操作计划'}</button>}
-    </footer>
   </section>;
 }
