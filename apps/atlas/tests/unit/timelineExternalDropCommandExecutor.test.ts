@@ -147,7 +147,7 @@ describe('timeline external drop command executor', () => {
       3,
       12,
       'media-audio',
-      undefined,
+      'audio',
     );
   });
 
@@ -209,7 +209,7 @@ describe('timeline external drop command executor', () => {
       4,
       8,
       'media-video',
-      undefined,
+      'video',
       { linkedAudioTrackId: 'audio-2' },
     );
   });
@@ -304,8 +304,68 @@ describe('timeline external drop command executor', () => {
       7,
       60,
       'long-video',
-      undefined,
+      'video',
       { linkedAudioTrackId: 'audio-1' },
     );
+  });
+
+  it('waits for asynchronous clip placement before reporting the drop as handled', async () => {
+    let resolvePlacement!: (clipId: string) => void;
+    const actions = createActions();
+    actions.addClip.mockReturnValue(new Promise<string>((resolve) => {
+      resolvePlacement = resolve;
+    }));
+    const file = new File(['video'], 'complete', { type: '' });
+    setMediaState({
+      files: [mediaFile({
+        id: 'cached-video',
+        name: 'bad case',
+        type: 'video',
+        file,
+        duration: 4,
+      })],
+    });
+
+    let settled = false;
+    const resultPromise = executeTimelineExternalDropCommand({
+      actions,
+      command: { kind: 'media-file', itemId: 'cached-video' },
+      isAudioOnlyMediaFile: () => false,
+      isVideoTrack: true,
+      mediaFilePolicy: 'strict-track-type',
+      resolveStartTime: () => 0,
+      trackId: 'video-1',
+    }).then((result) => {
+      settled = true;
+      return result;
+    });
+
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(actions.addClip).toHaveBeenCalledWith(
+      'video-1', file, 0, 4, 'cached-video', 'video',
+    );
+
+    resolvePlacement('clip-1');
+    await expect(resultPromise).resolves.toEqual({ handled: true });
+  });
+
+  it('returns a structured rejection when asynchronous clip placement fails', async () => {
+    const actions = createActions();
+    actions.addClip.mockRejectedValue(new Error('placement failed'));
+    const file = new File(['video'], 'complete', { type: '' });
+    setMediaState({
+      files: [mediaFile({ id: 'cached-video', name: 'bad case', type: 'video', file })],
+    });
+
+    await expect(executeTimelineExternalDropCommand({
+      actions,
+      command: { kind: 'media-file', itemId: 'cached-video' },
+      isAudioOnlyMediaFile: () => false,
+      isVideoTrack: true,
+      mediaFilePolicy: 'strict-track-type',
+      resolveStartTime: () => 0,
+      trackId: 'video-1',
+    })).resolves.toEqual({ handled: true, reason: 'clip-placement-failed' });
   });
 });

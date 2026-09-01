@@ -139,25 +139,34 @@ async function executeMediaFileDropCommand(
   }
   const placementTrackId = linkedVideoTrackId ?? params.trackId;
   const mediaTypeOverride = getTimelineDropMediaTypeOverride(mediaFile);
-  if (routesLinkedVideoFromAudioTrack) {
-    params.actions.addClip(
-      placementTrackId,
-      file,
-      startTime,
-      mediaFile.duration,
+  try {
+    if (routesLinkedVideoFromAudioTrack) {
+      await params.actions.addClip(
+        placementTrackId,
+        file,
+        startTime,
+        mediaFile.duration,
+        mediaFileId,
+        mediaTypeOverride,
+        { linkedAudioTrackId: params.trackId },
+      );
+    } else {
+      await params.actions.addClip(
+        placementTrackId,
+        file,
+        startTime,
+        mediaFile.duration,
+        mediaFileId,
+        mediaTypeOverride,
+      );
+    }
+  } catch (error) {
+    log.warn('Could not add media panel item to timeline', {
       mediaFileId,
-      mediaTypeOverride,
-      { linkedAudioTrackId: params.trackId },
-    );
-  } else {
-    params.actions.addClip(
-      placementTrackId,
-      file,
-      startTime,
-      mediaFile.duration,
-      mediaFileId,
-      mediaTypeOverride,
-    );
+      mediaType: mediaFile.type,
+      error,
+    });
+    return rejected('clip-placement-failed');
   }
   return handled();
 }

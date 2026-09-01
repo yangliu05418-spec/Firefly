@@ -18,7 +18,15 @@ const fireflyTimelineMaterializationSources = new Map<string, MediaFile>();
 
 type FileWithPath = File & { path?: string };
 
-const CLIP_TYPED_MEDIA_TYPES = new Set<MediaFile['type']>(['gaussian-splat', 'lottie', 'rive', 'model']);
+const CLIP_TYPED_MEDIA_TYPES = new Set<MediaFile['type']>([
+  'video',
+  'audio',
+  'image',
+  'gaussian-splat',
+  'lottie',
+  'rive',
+  'model',
+]);
 
 async function warmMaterializedVideoFilmstrip(
   mediaFile: MediaFile,

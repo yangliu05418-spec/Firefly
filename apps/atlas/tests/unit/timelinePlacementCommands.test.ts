@@ -156,6 +156,41 @@ describe('timeline placement commands', () => {
     expect(source?.naturalDuration).toBe(12);
   });
 
+  it('places an OPFS-cached video from commands using its stable media type', async () => {
+    const cachedFile = new File(['cached-video'], 'complete', { type: '' });
+    setMediaState({
+      files: [{
+        id: 'cached-video',
+        name: 'bad case',
+        type: 'video',
+        parentId: null,
+        createdAt: 1,
+        file: cachedFile,
+        url: 'blob:cached-video',
+        duration: 4,
+        hasAudio: true,
+      }],
+      selectedIds: ['cached-video'],
+    });
+    const addClip = vi.fn().mockResolvedValue('placed-cached-video');
+    type AddClip = ReturnType<typeof useTimelineStore.getState>['addClip'];
+    useTimelineStore.setState({ addClip: addClip as unknown as AddClip });
+
+    await expect(runTimelinePlacementCommand('overwrite')).resolves.toEqual({
+      success: true,
+      createdClipId: 'placed-cached-video',
+    });
+    expect(addClip).toHaveBeenCalledWith(
+      'video-1',
+      cachedFile,
+      0,
+      4,
+      'cached-video',
+      'video',
+      { source: { naturalDuration: 4 } },
+    );
+  });
+
   it('stores NativeHelper-resolved placement files under the managed primary media URL key', async () => {
     const resolvedFile = new File(['image'], 'Resolved.png', { type: 'image/png' });
     const nativeClient = NativeHelperClient as unknown as {

@@ -17,7 +17,11 @@ vi.mock('../../../../packages/local-media/src/manifest-store', () => ({
   }),
 }));
 
-import { LocalMediaCache, type LocalMediaDescriptor } from '../../../../packages/local-media/src';
+import {
+  LocalMediaCache,
+  restoreLocalMediaFileMetadata,
+  type LocalMediaDescriptor,
+} from '../../../../packages/local-media/src';
 
 class FakeWorker {
   static instances: FakeWorker[] = [];
@@ -61,6 +65,25 @@ const descriptor: LocalMediaDescriptor = {
   url: '/api/media/watchdog-video',
   cachePolicy: 'on-demand',
 };
+
+describe('LocalMediaCache file metadata boundary', () => {
+  it('restores the authoritative content type without changing the OPFS byte length', () => {
+    const storedFile = new File(['cached-video'], 'complete', { type: '' });
+
+    const restored = restoreLocalMediaFileMetadata(storedFile, descriptor);
+
+    expect(restored).not.toBe(storedFile);
+    expect(restored.name).toBe('complete');
+    expect(restored.type).toBe('video/mp4');
+    expect(restored.size).toBe(storedFile.size);
+  });
+
+  it('keeps an already typed OPFS file unchanged', () => {
+    const storedFile = new File(['cached-video'], 'preview.mp4', { type: 'video/mp4' });
+
+    expect(restoreLocalMediaFileMetadata(storedFile, descriptor)).toBe(storedFile);
+  });
+});
 
 describe('LocalMediaCache worker inactivity watchdog', () => {
   beforeEach(() => {

@@ -6,6 +6,7 @@ const thumbnailCache = vi.hoisted(() => ({
 const bitmapCache = vi.hoisted(() => ({
   ensure: vi.fn(),
   get: vi.fn((url: string) => ({ url })),
+  has: vi.fn(() => false),
 }));
 const cover = vi.hoisted(() => ({ draw: vi.fn() }));
 
@@ -15,14 +16,17 @@ vi.mock('../../src/services/thumbnailCacheService', () => ({
 vi.mock('../../src/services/timeline/thumbnailBitmapCache', () => ({
   ensureThumbnailBitmap: bitmapCache.ensure,
   getThumbnailBitmap: bitmapCache.get,
-  hasThumbnailBitmap: vi.fn(() => false),
+  hasThumbnailBitmap: bitmapCache.has,
 }));
 vi.mock('../../src/components/timeline/utils/timelineClipCanvasCoverDraw', () => ({
   drawTimelineClipCanvasCover: cover.draw,
 }));
 
 import { drawTimelineClipCanvasThumbnails } from '../../src/components/timeline/utils/timelineClipCanvasThumbnailPainter';
-import { resolveTimelineThumbnailUrls } from '../../src/components/timeline/utils/timelineClipCanvasThumbnailPreparation';
+import {
+  collectTimelineClipCanvasWorkerThumbnailPreparation,
+  resolveTimelineThumbnailUrls,
+} from '../../src/components/timeline/utils/timelineClipCanvasThumbnailPreparation';
 import type { TimelinePaintSourceClip } from '../../src/timeline';
 
 const clip: TimelinePaintSourceClip = {
@@ -41,6 +45,7 @@ describe('timeline video thumbnail fallback', () => {
     thumbnailCache.getThumbnailsForRange.mockReset();
     bitmapCache.get.mockClear();
     bitmapCache.ensure.mockClear();
+    bitmapCache.has.mockReset().mockReturnValue(false);
     cover.draw.mockClear();
   });
 
@@ -104,5 +109,86 @@ describe('timeline video thumbnail fallback', () => {
     ]);
     expect(cover.draw).toHaveBeenCalledTimes(3);
     expect(drawn).toBe(3);
+  });
+
+  it('fills every visible strip slot from the poster while sampled frames decode', () => {
+    thumbnailCache.getThumbnailsForRange.mockReturnValue([
+      'blob:frame-0',
+      'blob:frame-1',
+      'blob:frame-2',
+    ]);
+    bitmapCache.has.mockImplementation((url: string) => url === '/media/poster.webp');
+
+    const preparation = collectTimelineClipCanvasWorkerThumbnailPreparation({
+      clips: [clip],
+      height: 40,
+      cssWidth: 240,
+      canvasOffsetX: 0,
+      scrollX: 0,
+      viewportWidth: 240,
+      timeToPixel: (time) => time * 24,
+      resolveGeometry: () => ({
+        duration: 3,
+        inPoint: 0,
+        outPoint: 3,
+        startTime: 0,
+        visible: true,
+      }),
+      renderOverscanPx: 0,
+      thumbnailViewportOverscanPx: 0,
+      minThumbnailWidth: 1,
+      thumbnailSlotPx: 24,
+      maxThumbnailSlots: 12,
+      mediaThumbnailUrlsById: new Map([['media-1', '/media/poster.webp']]),
+    });
+
+    expect(preparation.visibleBitmapClipIds.has('clip-1')).toBe(true);
+    expect(preparation.plansByClipId.get('clip-1')?.urls).toEqual([
+      '/media/poster.webp',
+      '/media/poster.webp',
+      '/media/poster.webp',
+    ]);
+    expect(preparation.missingBitmapRefs.map((ref) => ref.url)).toEqual([
+      'blob:frame-0',
+      'blob:frame-1',
+      'blob:frame-2',
+    ]);
+  });
+
+  it('uses the first decoded sampled frame to avoid holes before the poster is ready', () => {
+    thumbnailCache.getThumbnailsForRange.mockReturnValue([
+      'blob:frame-0',
+      'blob:frame-1',
+      'blob:frame-2',
+    ]);
+    bitmapCache.has.mockImplementation((url: string) => url === 'blob:frame-0');
+
+    const preparation = collectTimelineClipCanvasWorkerThumbnailPreparation({
+      clips: [clip],
+      height: 40,
+      cssWidth: 240,
+      canvasOffsetX: 0,
+      scrollX: 0,
+      viewportWidth: 240,
+      timeToPixel: (time) => time * 24,
+      resolveGeometry: () => ({ duration: 3, inPoint: 0, outPoint: 3, startTime: 0, visible: true }),
+      renderOverscanPx: 0,
+      thumbnailViewportOverscanPx: 0,
+      minThumbnailWidth: 1,
+      thumbnailSlotPx: 24,
+      maxThumbnailSlots: 12,
+      mediaThumbnailUrlsById: new Map([['media-1', '/media/poster.webp']]),
+    });
+
+    expect(preparation.plansByClipId.get('clip-1')?.urls).toEqual([
+      'blob:frame-0',
+      'blob:frame-0',
+      'blob:frame-0',
+    ]);
+    expect(preparation.missingBitmapRefs.map((ref) => ref.url)).toEqual([
+      'blob:frame-1',
+      'blob:frame-2',
+      '/media/poster.webp',
+    ]);
   });
 });

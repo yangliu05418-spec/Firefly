@@ -146,27 +146,38 @@ export function collectTimelineClipCanvasWorkerThumbnailPreparation(input: {
     // filmstrip, but immediately repeat the server poster while frame sampling
     // warms in the background. A newly dropped remote clip therefore never
     // looks like an empty generic block.
-    const urls = resolveTimelineThumbnailUrls(generatedUrls, staticThumbnailUrl, count);
-    if (!urls.some((url) => Boolean(url))) {
+    const preferredUrls = resolveTimelineThumbnailUrls(generatedUrls, staticThumbnailUrl, count);
+    if (!preferredUrls.some((url) => Boolean(url))) {
       handledClipIds.add(clip.id);
       continue;
     }
-    let hasMissingBitmap = false;
-    urls.forEach((url) => {
+
+    // Keep the strip complete while sampled frames decode progressively. The
+    // first available frame (preferably the server poster) fills any warming
+    // slots, then each slot promotes to its sampled frame as soon as that
+    // bitmap is ready. A single slow frame must never blank the whole strip.
+    const fallbackUrl = staticThumbnailUrl && hasThumbnailBitmap(staticThumbnailUrl)
+      ? staticThumbnailUrl
+      : preferredUrls.find((url) => Boolean(url && hasThumbnailBitmap(url))) ?? null;
+    const urls = preferredUrls.map((url) => (
+      url && hasThumbnailBitmap(url) ? url : fallbackUrl ?? url
+    ));
+
+    preferredUrls.forEach((url) => {
       if (!url) return;
-      if (hasThumbnailBitmap(url)) {
-        visibleBitmapClipIds.add(clip.id);
-        return;
-      }
-      hasMissingBitmap = true;
+      if (hasThumbnailBitmap(url)) return;
       missingBitmapRefsByUrl.set(url, { url, mediaFileId });
     });
-    if (hasMissingBitmap) {
+    if (staticThumbnailUrl && !hasThumbnailBitmap(staticThumbnailUrl)) {
+      missingBitmapRefsByUrl.set(staticThumbnailUrl, { url: staticThumbnailUrl, mediaFileId });
+    }
+    if (!fallbackUrl) {
       handledClipIds.add(clip.id);
       continue;
     }
 
     handledClipIds.add(clip.id);
+    visibleBitmapClipIds.add(clip.id);
     plansByClipId.set(clip.id, {
       clipId: clip.id,
       mediaFileId,
