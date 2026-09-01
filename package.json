@@ -4,6 +4,8 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "atlas-agent:catalog": "tsx scripts/generate-atlas-agent-catalog.ts",
+    "atlas-agent:catalog:check": "npm run atlas-agent:catalog && git diff --exit-code -- server/atlas-agent-catalog.generated.ts apps/atlas/src/firefly/atlas-agent-catalog.generated.ts",
     "dev": "concurrently \"vite\" \"tsx watch server/index.ts\" \"tsx watch server/worker.ts\" \"tsx watch server/image-worker.ts\"",
     "build": "vite build && tsc -p tsconfig.server.json",
     "start": "node dist-server/index.js",

@@ -11,7 +11,7 @@ export type AtlasAgentOperation = {
 };
 
 export type AtlasAgentPlan = {
-  version: 1;
+  version: 1 | 2;
   summary: string;
   catalogVersion: string;
   catalogDigest: string;
@@ -30,7 +30,7 @@ export type AtlasAgentRun = {
 };
 
 export type AtlasAgentSemanticSnapshot = {
-  version: 1;
+  version: 1 | 2;
   revision: number;
   durationMs: number;
   tracks: Array<{ id: string; kind: 'video' | 'audio'; muted: boolean; locked: boolean; clipIds: string[] }>;
@@ -46,9 +46,11 @@ export type AtlasAgentSemanticSnapshot = {
     volume?: number;
     muted?: boolean;
     transform?: { positionX?: number; positionY?: number; scaleX?: number; scaleY?: number; rotationDeg?: number; opacity?: number };
+    features?: { effects: number; keyframes: number; masks: number; transcriptWords: number; hasText: boolean; hasCaptions: boolean; hasStoryboard: boolean; textPreview?: string; analysisStatus?: string };
   }>;
   assets: Array<{ id: string; kind: 'video' | 'audio' | 'image'; name: string; durationMs?: number; width?: number; height?: number }>;
   selection: { clipIds: string[]; trackIds: string[] };
+  markers?: Array<{ id: string; timeMs: number; label: string }>;
 };
 
 export class OriginalAtlasAgentApiError extends Error {
@@ -155,12 +157,17 @@ export const originalAtlasAgentApi = {
     parseRun(await request(`${projectPath(projectId)}/runs`, { method: 'POST', body: JSON.stringify(input) })),
   readRun: async (projectId: string, runId: string) =>
     parseRun(await request(`${projectPath(projectId)}/runs/${encodeURIComponent(runId)}`)),
+  eventsUrl: (projectId: string, runId: string) => `${projectPath(projectId)}/runs/${encodeURIComponent(runId)}/events`,
   confirmRun: async (projectId: string, runId: string, approved: boolean, leaseToken: string) =>
     parseRun(await request(`${projectPath(projectId)}/runs/${encodeURIComponent(runId)}/confirm`, {
       method: 'POST', body: JSON.stringify({ approved, leaseToken }),
     })),
   reportResult: (projectId: string, runId: string, body: Record<string, unknown>) =>
     request(`${projectPath(projectId)}/runs/${encodeURIComponent(runId)}/operation-results`, {
+      method: 'POST', body: JSON.stringify(body),
+    }),
+  reportExecutionResults: (projectId: string, runId: string, body: Record<string, unknown>) =>
+    request(`${projectPath(projectId)}/runs/${encodeURIComponent(runId)}/execution-results`, {
       method: 'POST', body: JSON.stringify(body),
     }),
   cancelRun: (projectId: string, runId: string) =>

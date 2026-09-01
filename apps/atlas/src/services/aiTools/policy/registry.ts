@@ -619,7 +619,12 @@ export function checkToolAccess(
   const kernelEditorAccess = caller === 'kernel'
     && policy.allowedCallers.includes('chat')
     && isKernelEditorToolName(name);
-  if (!policy.allowedCallers.includes(caller) && !kernelEditorAccess) {
+  const fireflyAgentAccess = caller === 'fireflyAgent'
+    && policy.allowedCallers.includes('chat')
+    && isKernelEditorToolName(name)
+    && policy.localFileAccess === false
+    && policy.sensitiveDataAccess === false;
+  if (!policy.allowedCallers.includes(caller) && !kernelEditorAccess && !fireflyAgentAccess) {
     return { allowed: false, reason: `Tool "${name}" is not allowed for caller "${caller}"` };
   }
   if (

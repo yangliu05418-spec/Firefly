@@ -286,7 +286,8 @@ export class AtlasAgentSqliteStore {
       if (!(["ready", "running"] as AtlasAgentRunStatus[]).includes(current.status)) throw new AtlasAgentProtocolError(409, "AGENT_RUN_NOT_EXECUTABLE", "Agent 任务尚未获得执行授权");
       const project = this.readProjectRevision(input.ownerId, current.projectId);
       if (!project) throw new AtlasAgentProtocolError(404, "ATLAS_PROJECT_NOT_FOUND", "Atlas 项目不存在");
-      const planChangesTimeline = input.plan.operations.some((operation) => operation.tool !== "request_export");
+      const isExportRequest = (tool: string) => tool === "request_export" || tool === "requestFireflyExport";
+      const planChangesTimeline = input.plan.operations.some((operation) => !isExportRequest(operation.tool));
       const maximumExpectedProjectRevision = current.baseRevision + (planChangesTimeline ? 1 : 0);
       if (project.revision < current.baseRevision || project.revision > maximumExpectedProjectRevision) {
         throw new AtlasAgentProtocolError(409, "AGENT_REVISION_CONFLICT", "项目版本已超出 Agent 计划的原子事务范围");
@@ -294,9 +295,9 @@ export class AtlasAgentSqliteStore {
       const previous = input.sequence > 1 ? this.database.prepare("SELECT * FROM atlas_agent_operations WHERE run_id = ? AND sequence = ?").get(input.runId, input.sequence - 1) as OperationRow | undefined : undefined;
       if (input.sequence > 1 && !previous) throw new AtlasAgentProtocolError(409, "AGENT_OPERATION_OUT_OF_ORDER", "Agent 操作回执必须按顺序提交");
       const operation = input.plan.operations[input.sequence - 1]!;
-      const priorHasEdit = input.plan.operations.slice(0, input.sequence - 1).some((candidate) => candidate.tool !== "request_export");
+      const priorHasEdit = input.plan.operations.slice(0, input.sequence - 1).some((candidate) => !isExportRequest(candidate.tool));
       const expectedBeforeRevision = current.baseRevision + (priorHasEdit ? 1 : 0);
-      const expectedAfterRevision = input.status === "succeeded" && operation.tool !== "request_export"
+      const expectedAfterRevision = input.status === "succeeded" && !isExportRequest(operation.tool)
         ? current.baseRevision + 1
         : expectedBeforeRevision;
       if (input.beforeRevision !== expectedBeforeRevision || input.afterRevision !== expectedAfterRevision) {
@@ -307,7 +308,7 @@ export class AtlasAgentSqliteStore {
         WHERE run_id = ? AND history_node_id IS NOT NULL
         ORDER BY sequence ASC LIMIT 1
       `).get(input.runId) as Pick<OperationRow, "history_node_id"> | undefined;
-      if (operation.tool !== "request_export" && input.status === "succeeded"
+      if (!isExportRequest(operation.tool) && input.status === "succeeded"
         && priorHistory?.history_node_id && input.historyNodeId !== priorHistory.history_node_id) {
         throw new AtlasAgentProtocolError(409, "AGENT_HISTORY_CONFLICT", "同一 Agent 计划必须归入一个撤销事务");
       }

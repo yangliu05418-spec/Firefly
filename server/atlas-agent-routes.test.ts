@@ -31,7 +31,7 @@ describe("Atlas Agent HTTP routes", () => {
     database.prepare("INSERT INTO atlas_projects (id, owner_id, revision, deleted_at) VALUES ('project-1', 'user-a', 0, NULL)").run();
     const store = new AtlasAgentSqliteStore(database);
     const provider: AtlasAgentProvider = { createPlan: async () => ({ plan: {
-      version: 1, summary: "切割", operations: [{ sequence: 1, tool: "split_clip", args: { clipId: "clip-1", atMs: 500 } }],
+      version: 1, summary: "切割", operations: [{ sequence: 1, tool: "splitClip", args: { clipId: "clip-1", splitTime: 0.5 } }],
     } }) };
     const service = new AtlasAgentService({ store, provider });
     const jobs: Array<{ payload: AtlasAgentQueuePayload; jobId: string }> = [];
@@ -79,6 +79,12 @@ describe("Atlas Agent HTTP routes", () => {
     expect(text).not.toContain("event: run_created");
     expect(text).toContain("id: 2\nevent: planning_started");
     expect(text).toContain("event: plan_ready");
+
+    const capabilities = await fetch(`${base}/projects/project-1/agent/capabilities`);
+    expect(capabilities.status).toBe(200);
+    expect(await capabilities.json()).toMatchObject({ phase: "core", requiresConfirmation: true });
+    const hidden = await fetch(`${base}/projects/project-owned-by-someone-else/agent/capabilities`);
+    expect(hidden.status).toBe(404);
   });
 
   it("does not intercept core Atlas routes when Agent is disabled", async () => {
@@ -86,7 +92,7 @@ describe("Atlas Agent HTTP routes", () => {
     schema(database);
     const store = new AtlasAgentSqliteStore(database);
     const provider: AtlasAgentProvider = { createPlan: async () => ({ plan: {
-      version: 1, summary: "noop", operations: [{ sequence: 1, tool: "create_track", args: { trackId: "track-2", kind: "video" } }],
+      version: 1, summary: "noop", operations: [{ sequence: 1, tool: "createTrack", args: { type: "video" } }],
     } }) };
     const service = new AtlasAgentService({ store, provider });
     let authenticationCalls = 0;

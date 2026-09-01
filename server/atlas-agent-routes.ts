@@ -18,7 +18,7 @@ export type AtlasAgentRouterDependencies = {
 };
 
 const route = (handler: (request: Request, response: Response) => Promise<unknown> | unknown): RequestHandler =>
-  (request, response, next) => void Promise.resolve(handler(request, response)).catch((error) => {
+  (request, response, next) => void Promise.resolve().then(() => handler(request, response)).catch((error) => {
     if (error instanceof AtlasAgentProtocolError) return response.status(error.status).json({ error: error.message, code: error.code });
     next(error);
   });
@@ -56,6 +56,12 @@ export const createAtlasAgentRouter = (dependencies: AtlasAgentRouterDependencie
     ? response.status(404).json({ error: "Atlas Agent 尚未开放", code: "ATLAS_AGENT_DISABLED" })
     : next());
   router.use("/projects/:projectId/agent", dependencies.requireAuth);
+
+  router.get("/projects/:projectId/agent/capabilities", route((request, response) => {
+    const ownerId = userId(response);
+    const projectId = parameter(request.params.projectId);
+    response.json(dependencies.service.capabilities(ownerId, projectId));
+  }));
 
   router.post("/projects/:projectId/agent/runs", route(async (request, response) => {
     const ownerId = userId(response);
@@ -159,6 +165,20 @@ export const createAtlasAgentRouter = (dependencies: AtlasAgentRouterDependencie
       requestDigest: result.requestDigest,
       run: publicRun(result.run),
       receipt: result.receipt,
+    });
+  }));
+
+  router.post("/projects/:projectId/agent/runs/:runId/execution-results", route((request, response) => {
+    const ownerId = userId(response);
+    const projectId = parameter(request.params.projectId);
+    const runId = parameter(request.params.runId);
+    runInProject(dependencies.service, ownerId, projectId, runId);
+    const result = dependencies.service.recordExecutionResults(ownerId, runId, request.body);
+    response.status(result.kind === "duplicate" ? 200 : 201).json({
+      duplicate: result.kind === "duplicate",
+      run: publicRun(result.run),
+      ...("requestDigest" in result ? { requestDigest: result.requestDigest } : {}),
+      ...("receipt" in result ? { receipt: result.receipt } : {}),
     });
   }));
 

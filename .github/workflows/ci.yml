@@ -144,6 +144,7 @@ jobs:
           grep -q 'failed_reedit_smoke' ops/firefly-deploy.sh
           grep -q 'atlas-agent:dist-server/atlas-agent-worker.js' ops/firefly-deploy.sh
           grep -q 'env_flag_enabled ATLAS_ENABLED.*env_flag_enabled ATLAS_AGENT_ENABLED' ops/firefly-deploy.sh
+          grep -q 'ATLAS_AGENT_PHASE.*off' ops/firefly-deploy.sh
           grep -q '^sync_host_runtime' ops/firefly-deploy.sh
           grep -q '^sync_atlas_assets' ops/firefly-deploy.sh
           grep -q 'Atlas index references a missing asset' ops/firefly-deploy.sh
@@ -232,6 +233,7 @@ jobs:
           npm install --global npm@10
           npm config set registry https://registry.npmjs.org
           npm ci
+      - run: npm run atlas-agent:catalog:check
       - run: npm run typecheck
       - run: npm test -- --maxWorkers=1
       - run: npm run build
@@ -421,6 +423,7 @@ jobs:
               -e MEDIA_STORAGE_BACKEND=legacy \
               -e ATLAS_ENABLED=true \
               -e ATLAS_AGENT_ENABLED=true \
+              -e ATLAS_AGENT_PHASE=full \
               -e OPENROUTER_API_KEYS=ci-agent-provider-key \
               firefly-ci:${{ github.sha }} node "$command"
           done
@@ -434,6 +437,7 @@ jobs:
             -e MEDIA_STORAGE_BACKEND=legacy \
             -e ATLAS_ENABLED=true \
             -e ATLAS_AGENT_ENABLED=true \
+            -e ATLAS_AGENT_PHASE=full \
             -e OPENROUTER_API_KEYS=ci-agent-provider-key \
             firefly-ci:${{ github.sha }}
           ready=0

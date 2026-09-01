@@ -5,7 +5,7 @@ import { config } from "./config.js";
 export const workerRoles = ["generation", "image", "media", "canvas", "atlas-agent"] as const;
 export type WorkerRole = (typeof workerRoles)[number];
 
-export const requiredWorkerRoles = (): readonly WorkerRole[] => config.atlasEnabled && config.atlasAgentEnabled
+export const requiredWorkerRoles = (): readonly WorkerRole[] => config.atlasEnabled && config.atlasAgentEnabled && config.atlasAgentPhase !== "off"
   ? workerRoles
   : workerRoles.filter((role) => role !== "atlas-agent");
 

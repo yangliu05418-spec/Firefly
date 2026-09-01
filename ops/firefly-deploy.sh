@@ -304,7 +304,7 @@ worker_commands='worker:dist-server/worker.js media-worker:dist-server/media-wor
 if /usr/bin/docker run --rm --entrypoint /bin/sh "$image" -c 'test -f /app/dist-server/image-worker.js'; then
   worker_commands='worker:dist-server/worker.js image-worker:dist-server/image-worker.js media-worker:dist-server/media-worker.js canvas-worker:dist-server/canvas-worker.js'
 fi
-if env_flag_enabled ATLAS_ENABLED && env_flag_enabled ATLAS_AGENT_ENABLED; then
+if env_flag_enabled ATLAS_ENABLED && env_flag_enabled ATLAS_AGENT_ENABLED && [ "${ATLAS_AGENT_PHASE:-off}" != "off" ]; then
   if /usr/bin/docker run --rm --entrypoint /bin/sh "$image" -c 'test -f /app/dist-server/atlas-agent-worker.js'; then
     worker_commands="$worker_commands atlas-agent:dist-server/atlas-agent-worker.js"
   else

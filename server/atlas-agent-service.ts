@@ -1,16 +1,16 @@
 import crypto from "node:crypto";
 import { config } from "./config.js";
 import {
-  ATLAS_AGENT_CATALOG_DIGEST,
-  ATLAS_AGENT_CATALOG_VERSION,
   ATLAS_AGENT_MAX_TOOL_CALLS,
   AtlasAgentProtocolError,
   assertSafeJson,
   atlasAgentResultReceiptDigest,
   digestJson,
   normalizeAtlasAgentPlan,
+  atlasAgentCatalogForPhase,
   parseAtlasAgentSemanticSnapshot,
   type AtlasAgentSemanticSnapshot,
+  type AtlasAgentPhase,
 } from "./atlas-agent-contract.js";
 import { AtlasAgentProviderError, type AtlasAgentProvider } from "./atlas-agent-provider.js";
 import { AtlasAgentSqliteStore, type AtlasAgentEvent, type AtlasAgentRun } from "./atlas-agent-store.js";
@@ -23,6 +23,7 @@ const positiveInteger = (value: string | undefined, fallback: number, maximum: n
 export const atlasAgentServiceDefaults = () => ({
   maxToolCalls: positiveInteger(String(config.atlasAgentMaxToolCalls), ATLAS_AGENT_MAX_TOOL_CALLS, ATLAS_AGENT_MAX_TOOL_CALLS),
   maxRounds: positiveInteger(String(config.atlasAgentMaxRounds), 8, 8),
+  phase: config.atlasAgentPhase === "off" ? "core" as const : config.atlasAgentPhase,
 });
 
 export type AtlasAgentQueuePayload = {
@@ -31,6 +32,9 @@ export type AtlasAgentQueuePayload = {
   projectId: string;
   requestDigest: string;
   snapshot: AtlasAgentSemanticSnapshot;
+  phase?: AtlasAgentPhase;
+  catalogVersion?: string;
+  catalogDigest?: string;
 };
 
 export type CreateAtlasAgentRunInput = {
@@ -99,6 +103,8 @@ export class AtlasAgentService {
   private readonly provider: AtlasAgentProvider;
   private readonly executionAuthorizer: AtlasAgentExecutionAuthorizer;
   private readonly maxToolCalls: number;
+  private readonly maxRounds: number;
+  private readonly phase: AtlasAgentPhase;
   private readonly activeControllers = new Map<string, AbortController>();
 
   constructor(input: {
@@ -106,23 +112,28 @@ export class AtlasAgentService {
     provider: AtlasAgentProvider;
     executionAuthorizer?: AtlasAgentExecutionAuthorizer;
     maxToolCalls?: number;
+    maxRounds?: number;
+    phase?: AtlasAgentPhase;
   }) {
     this.store = input.store;
     this.provider = input.provider;
     this.executionAuthorizer = input.executionAuthorizer ?? denyExecution;
     this.maxToolCalls = Math.max(1, Math.min(ATLAS_AGENT_MAX_TOOL_CALLS, input.maxToolCalls ?? atlasAgentServiceDefaults().maxToolCalls));
+    this.maxRounds = Math.max(1, Math.min(8, input.maxRounds ?? atlasAgentServiceDefaults().maxRounds));
+    this.phase = input.phase ?? atlasAgentServiceDefaults().phase;
   }
 
   createRun(input: CreateAtlasAgentRunInput): { run: AtlasAgentRun; created: boolean; queuePayload: AtlasAgentQueuePayload } {
     const validated = validateCreateInput(input);
+    const catalog = atlasAgentCatalogForPhase(this.phase);
     const requestDigest = digestJson({
       ownerId: validated.ownerId,
       projectId: validated.projectId,
       instruction: validated.instruction,
       baseRevision: validated.baseRevision,
       snapshot: validated.snapshot,
-      catalogVersion: ATLAS_AGENT_CATALOG_VERSION,
-      catalogDigest: ATLAS_AGENT_CATALOG_DIGEST,
+      catalogVersion: catalog.version,
+      catalogDigest: catalog.digest,
     });
     const result = this.store.createRun({
       id: crypto.randomUUID(),
@@ -131,32 +142,37 @@ export class AtlasAgentService {
       idempotencyKey: validated.idempotencyKey,
       instruction: validated.instruction,
       baseRevision: validated.baseRevision,
-      catalogVersion: ATLAS_AGENT_CATALOG_VERSION,
-      catalogDigest: ATLAS_AGENT_CATALOG_DIGEST,
+      catalogVersion: catalog.version,
+      catalogDigest: catalog.digest,
       requestDigest,
       now: Date.now(),
     });
     return {
       ...result,
-      queuePayload: { runId: result.run.id, ownerId: validated.ownerId, projectId: validated.projectId, requestDigest, snapshot: validated.snapshot },
+      queuePayload: { runId: result.run.id, ownerId: validated.ownerId, projectId: validated.projectId, requestDigest, snapshot: validated.snapshot, phase: this.phase, catalogVersion: catalog.version, catalogDigest: catalog.digest },
     };
   }
 
   async processRun(payload: AtlasAgentQueuePayload, attempt = { number: 1, maximum: 1 }) {
     assertSafeJson(payload, { maxDepth: 16, maxNodes: 60_000, maxStringLength: 20_000 });
     if (!payload || typeof payload !== "object" || Array.isArray(payload)
-      || Object.keys(payload).some((key) => !["runId", "ownerId", "projectId", "requestDigest", "snapshot"].includes(key))) {
+      || Object.keys(payload).some((key) => !["runId", "ownerId", "projectId", "requestDigest", "snapshot", "phase", "catalogVersion", "catalogDigest"].includes(key))) {
       throw new AtlasAgentProtocolError(400, "AGENT_QUEUE_PAYLOAD_INVALID", "Agent 队列数据格式无效");
     }
     boundedText(payload.runId, "任务标识", 128);
     boundedText(payload.ownerId, "用户标识", 128);
     boundedText(payload.projectId, "项目标识", 128);
+    const phase = payload.phase ?? this.phase;
+    if (!["core", "advanced", "full"].includes(phase)) throw new AtlasAgentProtocolError(400, "AGENT_PHASE_INVALID", "Agent能力阶段无效");
     if (!/^[a-f0-9]{64}$/.test(payload.requestDigest)) throw new AtlasAgentProtocolError(400, "AGENT_QUEUE_PAYLOAD_INVALID", "Agent 请求摘要无效");
     const snapshot = parseAtlasAgentSemanticSnapshot(payload.snapshot);
     const run = this.store.readRun(payload.runId);
     if (!run) return null;
+    const catalog = atlasAgentCatalogForPhase(phase);
+    const payloadCatalogVersion = payload.catalogVersion ?? run.catalogVersion;
+    const payloadCatalogDigest = payload.catalogDigest ?? run.catalogDigest;
     if (["queued", "planning"].includes(run.status)
-      && (run.catalogVersion !== ATLAS_AGENT_CATALOG_VERSION || run.catalogDigest !== ATLAS_AGENT_CATALOG_DIGEST)) {
+      && (run.catalogVersion !== payloadCatalogVersion || run.catalogDigest !== payloadCatalogDigest || catalog.version !== payloadCatalogVersion || catalog.digest !== payloadCatalogDigest)) {
       this.store.failRun(run.id, "AGENT_CATALOG_MISMATCH", Date.now());
       throw new AtlasAgentProtocolError(409, "AGENT_CATALOG_MISMATCH", "Agent 工具目录已经更新，请重新发起指令");
     }
@@ -175,15 +191,15 @@ export class AtlasAgentService {
     cancellationPoll.unref();
     safeLog("info", { type: "atlas_agent_planning_started", runId: run.id, userId: run.ownerId, projectId: run.projectId, attempt: attempt.number });
     try {
-      const response = await this.provider.createPlan({ instruction: run.instruction, snapshot, maxToolCalls: this.maxToolCalls }, controller.signal);
+      const response = await this.provider.createPlan({ instruction: run.instruction, snapshot, maxToolCalls: this.maxToolCalls, maxRounds: this.maxRounds, phase, catalogVersion: payloadCatalogVersion, catalogDigest: payloadCatalogDigest }, controller.signal);
       const current = this.store.readRun(run.id);
       if (!current || current.status === "cancelled") return current;
-      const plan = normalizeAtlasAgentPlan(response.plan, { runId: run.id, baseRevision: run.baseRevision, maxToolCalls: this.maxToolCalls });
+      const plan = normalizeAtlasAgentPlan(response.plan, { runId: run.id, baseRevision: run.baseRevision, maxToolCalls: this.maxToolCalls, phase, catalogVersion: payloadCatalogVersion, catalogDigest: payloadCatalogDigest });
       const saved = this.store.savePlan(run.id, plan, Date.now());
       safeLog("info", {
         type: "atlas_agent_plan_ready", runId: run.id, userId: run.ownerId, projectId: run.projectId,
         operationCount: plan.operations.length, requiresConfirmation: plan.operations.some((operation) => operation.requiresConfirmation),
-        providerRequestId: response.requestId,
+        providerRequestId: response.requestId, rounds: response.rounds, catalogInspections: response.catalogInspections, repaired: response.repaired,
       });
       return saved;
     } catch (error) {
@@ -210,6 +226,21 @@ export class AtlasAgentService {
     return run;
   }
 
+  capabilities(ownerId: string, projectId: string) {
+    if (!this.store.readProjectRevision(ownerId, projectId)) {
+      throw new AtlasAgentProtocolError(404, "ATLAS_PROJECT_NOT_FOUND", "Atlas 项目不存在");
+    }
+    const catalog = atlasAgentCatalogForPhase(this.phase);
+    return {
+      phase: this.phase,
+      catalogVersion: catalog.version,
+      catalogDigest: catalog.digest,
+      categories: [...new Map(catalog.tools.map((tool) => [tool.category, tool.categoryLabel])).entries()].map(([id, label]) => ({ id, label })),
+      model: config.atlasAgentModel,
+      requiresConfirmation: true,
+    };
+  }
+
   listEvents(ownerId: string, runId: string, afterSequence = 0, limit = 200) {
     return this.store.listEvents(runId, ownerId, afterSequence, limit);
   }
@@ -227,7 +258,12 @@ export class AtlasAgentService {
   confirmRun(ownerId: string, runId: string, approved: boolean, leaseToken: string) {
     const run = this.getRun(ownerId, runId);
     this.requireActiveLease(run, leaseToken);
-    return this.store.confirmRun(runId, ownerId, approved, Date.now());
+    const confirmed = this.store.confirmRun(runId, ownerId, approved, Date.now());
+    safeLog("info", {
+      type: "atlas_agent_confirmation_received", runId, userId: ownerId,
+      projectId: run.projectId, approved,
+    });
+    return confirmed;
   }
 
   cancelRun(ownerId: string, runId: string) {
@@ -263,24 +299,29 @@ export class AtlasAgentService {
       return { kind: "duplicate" as const, receipt: existing, run, requestDigest: receiptDigest };
     }
     this.requireActiveLease(run, input.leaseToken);
-    if (input.status === "succeeded" && operation.tool !== "request_export") {
+    const isLegacyExport = operation.tool === "request_export";
+    const isExportRequest = isLegacyExport || operation.tool === "requestFireflyExport";
+    if (input.status === "succeeded" && !isExportRequest) {
       if (!input.historyNodeId) throw new AtlasAgentProtocolError(400, "AGENT_HISTORY_REQUIRED", "编辑操作必须归入可撤销事务");
       if (!input.result || typeof input.result !== "object" || Array.isArray(input.result)
         || (input.result as { changed?: unknown }).changed !== true) {
         throw new AtlasAgentProtocolError(409, "AGENT_OPERATION_NOT_APPLIED", "编辑器未确认操作已经生效");
       }
     }
-    if (operation.tool === "request_export") {
+    if (isExportRequest) {
       if (input.historyNodeId !== undefined) throw new AtlasAgentProtocolError(400, "AGENT_EXPORT_HISTORY_INVALID", "导出操作不能伪装成可撤销编辑");
       if (input.status === "succeeded") {
         const result = input.result as { status?: unknown; assetId?: unknown } | null;
-        if (!result || typeof result !== "object" || result.status !== "ready"
-          || typeof result.assetId !== "string" || !result.assetId.trim()) {
+        if (!isLegacyExport && (!result || typeof result !== "object" || result.status !== "opened")) {
+          throw new AtlasAgentProtocolError(409, "AGENT_EXPORT_NOT_OPENED", "导出界面尚未打开");
+        }
+        if (isLegacyExport && (!result || typeof result !== "object" || result.status !== "ready"
+          || typeof result.assetId !== "string" || !result.assetId.trim())) {
           throw new AtlasAgentProtocolError(409, "AGENT_EXPORT_NOT_READY", "导出尚未完成归档，不能标记为成功");
         }
-        const asset = this.executionAuthorizer.resolveExportAsset({ ownerId, projectId: run.projectId, assetId: result.assetId.trim() });
-        if (!asset || asset.ownerId !== ownerId || asset.projectId !== run.projectId
-          || asset.status !== "ready" || asset.sourceType !== "atlas_export") {
+        const asset = isLegacyExport ? this.executionAuthorizer.resolveExportAsset({ ownerId, projectId: run.projectId, assetId: String(result?.assetId).trim() }) : null;
+        if (isLegacyExport && (!asset || asset.ownerId !== ownerId || asset.projectId !== run.projectId
+          || asset.status !== "ready" || asset.sourceType !== "atlas_export")) {
           throw new AtlasAgentProtocolError(409, "AGENT_EXPORT_NOT_READY", "导出资产尚未通过项目归档校验");
         }
       }
@@ -292,6 +333,58 @@ export class AtlasAgentService {
     });
     if (stored.kind === "digest_conflict") throw new AtlasAgentProtocolError(409, "OPERATION_REPLAY_CONFLICT", "同一操作序号收到了不同回执");
     return { ...stored, requestDigest: receiptDigest };
+  }
+
+  recordExecutionResults(ownerId: string, runId: string, input: {
+    planDigest: string; historyNodeId?: string; leaseToken: string;
+    results: Array<{ sequence: number; status: "succeeded" | "failed"; result: unknown }>;
+  }) {
+    const run = this.getRun(ownerId, runId);
+    if (!run.plan || input.planDigest !== run.plan.planDigest) throw new AtlasAgentProtocolError(409, "AGENT_PLAN_CHANGED", "Agent 操作计划已经变化");
+    if (!Array.isArray(input.results) || input.results.length !== run.plan.operations.length) throw new AtlasAgentProtocolError(400, "AGENT_EXECUTION_RESULTS_INVALID", "Agent 整组执行回执不完整");
+    for (const operation of run.plan.operations) {
+      const receipt = input.results[operation.sequence - 1];
+      if (!receipt || receipt.sequence !== operation.sequence || !(["succeeded", "failed"] as const).includes(receipt.status)) {
+        throw new AtlasAgentProtocolError(400, "AGENT_EXECUTION_RESULTS_INVALID", "Agent 整组执行回执顺序无效");
+      }
+    }
+    const failed = input.results.find((receipt) => receipt.status === "failed");
+    if (failed) {
+      this.requireActiveLease(run, input.leaseToken);
+      if (!(run.status === "ready" || run.status === "running")) {
+        if (run.status === "failed") return { kind: "duplicate" as const, run };
+        throw new AtlasAgentProtocolError(409, "AGENT_RUN_NOT_EXECUTABLE", "Agent 任务尚未获得执行授权");
+      }
+      const failedRun = this.store.failRun(runId, "AGENT_EXECUTION_ROLLED_BACK", Date.now());
+      if (!failedRun) throw new AtlasAgentProtocolError(404, "AGENT_RUN_NOT_FOUND", "Agent 任务不存在");
+      safeLog("warn", {
+        type: "atlas_agent_execution_rolled_back", runId, userId: ownerId,
+        projectId: run.projectId, failedSequence: failed.sequence,
+      });
+      return { kind: "failed" as const, run: failedRun };
+    }
+    safeLog("info", {
+      type: "atlas_agent_execution_started", runId, userId: ownerId,
+      projectId: run.projectId, operationCount: run.plan.operations.length,
+    });
+    let latest: ReturnType<AtlasAgentService["recordOperationResult"]> | undefined;
+    for (const operation of run.plan.operations) {
+      const receipt = input.results[operation.sequence - 1];
+      if (!receipt) throw new AtlasAgentProtocolError(400, "AGENT_EXECUTION_RESULTS_INVALID", "Agent 整组执行回执顺序无效");
+      const exportRequest = operation.tool === "request_export" || operation.tool === "requestFireflyExport";
+      const priorEdit = run.plan.operations.slice(0, operation.sequence - 1).some((item) => item.tool !== "request_export" && item.tool !== "requestFireflyExport");
+      const beforeRevision = run.baseRevision + (priorEdit ? 1 : 0);
+      latest = this.recordOperationResult(ownerId, runId, {
+        sequence: operation.sequence, planDigest: input.planDigest, status: receipt.status, result: receipt.result,
+        beforeRevision, afterRevision: receipt.status === "succeeded" && !exportRequest ? run.baseRevision + 1 : beforeRevision,
+        historyNodeId: exportRequest ? undefined : input.historyNodeId, leaseToken: input.leaseToken,
+      });
+    }
+    safeLog("info", {
+      type: "atlas_agent_execution_completed", runId, userId: ownerId,
+      projectId: run.projectId, operationCount: run.plan.operations.length,
+    });
+    return latest!;
   }
 }
 
