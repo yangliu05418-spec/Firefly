@@ -144,7 +144,7 @@ jobs:
           grep -q 'failed_reedit_smoke' ops/firefly-deploy.sh
           grep -q 'atlas-agent:dist-server/atlas-agent-worker.js' ops/firefly-deploy.sh
           grep -q 'env_flag_enabled ATLAS_ENABLED.*env_flag_enabled ATLAS_AGENT_ENABLED' ops/firefly-deploy.sh
-          grep -q 'ATLAS_AGENT_PHASE.*off' ops/firefly-deploy.sh
+          grep -q 'atlas_agent_phase=$(env_value ATLAS_AGENT_PHASE off)' ops/firefly-deploy.sh
           grep -q '^sync_host_runtime' ops/firefly-deploy.sh
           grep -q '^sync_atlas_assets' ops/firefly-deploy.sh
           grep -q 'Atlas index references a missing asset' ops/firefly-deploy.sh

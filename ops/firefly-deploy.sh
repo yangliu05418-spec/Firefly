@@ -39,6 +39,15 @@ env_flag_enabled() {
     END { exit(value == "true" ? 0 : 1) }
   ' "$app_env"
 }
+env_value() {
+  value_name=$1
+  fallback_value=$2
+  [ -r "$app_env" ] || { printf '%s\n' "$fallback_value"; return; }
+  awk -F= -v name="$value_name" -v fallback="$fallback_value" '
+    $1 == name { value = $2 }
+    END { print(value == "" ? fallback : value) }
+  ' "$app_env"
+}
 if [ -r "$release_env" ]; then
   # shellcheck disable=SC1090
   . "$release_env"
@@ -304,7 +313,8 @@ worker_commands='worker:dist-server/worker.js media-worker:dist-server/media-wor
 if /usr/bin/docker run --rm --entrypoint /bin/sh "$image" -c 'test -f /app/dist-server/image-worker.js'; then
   worker_commands='worker:dist-server/worker.js image-worker:dist-server/image-worker.js media-worker:dist-server/media-worker.js canvas-worker:dist-server/canvas-worker.js'
 fi
-if env_flag_enabled ATLAS_ENABLED && env_flag_enabled ATLAS_AGENT_ENABLED && [ "${ATLAS_AGENT_PHASE:-off}" != "off" ]; then
+atlas_agent_phase=$(env_value ATLAS_AGENT_PHASE off)
+if env_flag_enabled ATLAS_ENABLED && env_flag_enabled ATLAS_AGENT_ENABLED && [ "$atlas_agent_phase" != "off" ]; then
   if /usr/bin/docker run --rm --entrypoint /bin/sh "$image" -c 'test -f /app/dist-server/atlas-agent-worker.js'; then
     worker_commands="$worker_commands atlas-agent:dist-server/atlas-agent-worker.js"
   else
