@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 describe('Firefly panel picker boundary', () => {
@@ -24,5 +26,14 @@ describe('Firefly panel picker boundary', () => {
       'export',
     ]);
     expect(VIEW_AI_PANEL_TYPES).toEqual(['atlas-agent']);
+  });
+
+  it('mounts the Firefly Agent in the factory Agent Mode start panel', async () => {
+    const source = await readFile(
+      resolve(process.cwd(), 'src/components/dock/DockPanelContent.tsx'),
+      'utf8',
+    );
+
+    expect(source).toMatch(/case 'start':[\s\S]*if \(OriginalAtlasAgentPanel\)[\s\S]*<OriginalAtlasAgentPanel/);
   });
 });
