@@ -183,6 +183,32 @@ describe("Atlas durable project store", () => {
     })).toMatchObject({ status: "ok", version: { status: "uploading", leaseGeneration: 2, digest: "b".repeat(64) } });
   });
 
+  it("recovers a stale checkpoint after the takeover grace window without waiting for the 24 hour upload expiry", () => {
+    const { store, owner } = fresh();
+    store.createProject({ id: "stale-timeout", ownerId: owner.id, title: "超时恢复", now: 1 });
+    store.acquireLease("stale-timeout", owner.id, "tab-old", "lease-old", 2, 45_000, false);
+    store.reserveCheckpoint({
+      id: "stale-timeout-version", transferId: "stale-timeout-transfer", ownerId: owner.id, projectId: "stale-timeout",
+      expectedRevision: 0, objectKey: "atlas/checkpoints/stale-timeout/1.json.gz", digest: "a".repeat(64), size: 8,
+      partSize: 8, partCount: 1, now: 3, expiresAt: 86_403, leaseTokenHash: "lease-old",
+    });
+    store.activateTransfer("stale-timeout-transfer", owner.id, "stale-timeout-upload", 4);
+    store.acquireLease("stale-timeout", owner.id, "tab-new", "lease-new", 6, 500_000, true);
+
+    const reserve = (now: number) => store.reserveCheckpoint({
+      id: "unused-version", transferId: "unused-transfer", ownerId: owner.id, projectId: "stale-timeout",
+      expectedRevision: 0, objectKey: "atlas/checkpoints/stale-timeout/1.json.gz", digest: "b".repeat(64), size: 9,
+      partSize: 9, partCount: 1, now, expiresAt: now + 86_400_000, leaseTokenHash: "lease-new",
+    });
+
+    expect(reserve(120_003)).toMatchObject({ status: "stale_in_flight" });
+    expect(reserve(120_004)).toMatchObject({
+      status: "recoverable",
+      version: { id: "stale-timeout-version", status: "failed", error: "ABANDONED_LEASE_GENERATION" },
+      transfer: { id: "stale-timeout-transfer", status: "failed", error: "ABANDONED_LEASE_GENERATION" },
+    });
+  });
+
   it("fails closed when a checkpoint generation is impossibly ahead of its project", () => {
     const { store, owner, databasePath } = fresh();
     store.createProject({ id: "future-generation", ownerId: owner.id, title: "异常代次", now: 1 });
