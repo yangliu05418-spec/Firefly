@@ -69,6 +69,8 @@ export const config = {
   tosSourceReadConcurrency: boundedInt("TOS_SOURCE_READ_CONCURRENCY", 8, 2, 16),
   tosRequestTimeoutMs: positiveInt("TOS_REQUEST_TIMEOUT_MS", 60000),
   tosUploadRequestTimeoutMs: positiveInt("TOS_UPLOAD_REQUEST_TIMEOUT_MS", 180000),
+  tosArchivePartRequestTimeoutMs: positiveInt("TOS_ARCHIVE_PART_REQUEST_TIMEOUT_MS", 60000),
+  tosArchivePartHedgeDelayMs: positiveInt("TOS_ARCHIVE_PART_HEDGE_DELAY_MS", 20000),
   tosTranscodeDeadlineMs: positiveInt("TOS_TRANSCODE_DEADLINE_MS", 10 * 60 * 1000),
   tosFetchDeadlineMs: positiveInt("TOS_FETCH_DEADLINE_MS", 30000),
   tosFetchMaxWaitMs: positiveInt("TOS_FETCH_MAX_WAIT_MS", 60000),

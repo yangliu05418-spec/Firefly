@@ -79,6 +79,25 @@ describe("enterprise identity and isolation", () => {
     store.close();
   });
 
+  it("paginates generation history without dropping equal-timestamp tasks", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-task-pages-")); directories.push(directory);
+    const store = openStore(path.join(directory, "firefly.db"));
+    const owner = store.upsertFromFeishu({ openId: "ou_pages", unionId: "on_pages", tenantKey: "tenant-dokuai", email: "pages@dokuai.tv", name: "Pages", avatarUrl: "" });
+    const session = store.createCreationSession({ id: "11111111-1111-4111-8111-111111111111", ownerId: owner.id, title: "长会话", createdAt: 1, updatedAt: 1 });
+    for (let index = 0; index < 69; index += 1) {
+      store.saveTask(task({ id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`, ownerId: owner.id, sessionId: session.id, createdAt: 1_000 - Math.floor(index / 3), updatedAt: 1_000 }));
+    }
+
+    const first = store.listTasksForSession(owner.id, session.id, 50);
+    const last = first.at(-1)!;
+    const second = store.listTasksForSession(owner.id, session.id, 50, { createdAt: last.createdAt, id: last.id });
+
+    expect(first).toHaveLength(50);
+    expect(second).toHaveLength(19);
+    expect(new Set([...first, ...second].map((item) => item.id)).size).toBe(69);
+    store.close();
+  });
+
   it("admits four concurrent generations per user and rejects only the fifth", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "firefly-generation-limit-")); directories.push(directory);
     const store = openStore(path.join(directory, "firefly.db"));
@@ -333,6 +352,8 @@ describe("enterprise identity and isolation", () => {
     expect(recoverable.map((item) => item.id)).toContain("trace-1");
     store.saveTask({ ...loaded, mediaAttempts: 3, updatedAt: Date.now() });
     expect(store.recoverableMediaTasks(now + 5 * 60_000, now - 60_000, 20).map((item) => item.id)).not.toContain("trace-1");
+    store.saveMediaArchiveCheckpoint({ taskId: "trace-1", strategy: "stream_multipart", tosUploadId: "tos-upload-legacy", objectKey: "outputs/trace-1.mp4", sourceSize: 20_000_000, contentType: "video/mp4", partSize: 16 * 1024 * 1024, parts: [{ partNumber: 2, eTag: "etag-2" }], attemptCount: 3, lastErrorCode: "TOS_REQUEST_TIMEOUT", createdAt: now, updatedAt: now, expiresAt: now + 86_400_000 });
+    expect(store.recoverableTimedOutMultipartTasks(now + 5 * 60_000, 5 * 1024 * 1024, 20).map((item) => item.id)).toContain("trace-1");
     store.close();
   });
 

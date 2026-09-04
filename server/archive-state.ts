@@ -8,6 +8,14 @@ export const shouldRecoverArchiveHandoff = (
 
 export type ArchiveTransferStrategy = "existing_object" | "url_fetch" | "stream_multipart";
 
+export const shouldRepartitionTimedOutArchive = (
+  checkpoint: { strategy?: "url_fetch" | "stream_multipart"; partSize?: number; lastErrorCode?: string } | null,
+  targetPartSize: number,
+) => checkpoint?.strategy === "stream_multipart"
+  && checkpoint.lastErrorCode === "TOS_REQUEST_TIMEOUT"
+  && Number.isSafeInteger(checkpoint.partSize)
+  && checkpoint.partSize! > targetPartSize;
+
 export const archiveTransferStrategy = (
   checkpoint: { strategy?: "url_fetch" | "stream_multipart"; fetchStartedAt?: number } | null,
   existingObjectOnly = false,

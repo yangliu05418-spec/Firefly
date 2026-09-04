@@ -30,8 +30,12 @@ export const publicTask = (
 ) => {
   const revision = task.mediaRevision ?? 0;
   const downloadable = task.status === "succeeded" && task.mediaStatus === "ready" && stableOutputReady;
-  const temporaryOriginalAvailable = task.status === "succeeded" && Boolean(sourceVideoUrl)
-    && (!sourceVideoExpiresAt || sourceVideoExpiresAt > Date.now());
+  const temporaryOriginalStatus = task.status !== "succeeded" || !sourceVideoUrl
+    ? "unavailable" as const
+    : sourceVideoExpiresAt && sourceVideoExpiresAt <= Date.now()
+      ? "expired" as const
+      : "ready" as const;
+  const temporaryOriginalAvailable = temporaryOriginalStatus === "ready";
   const previewable = task.status === "succeeded" && (stablePreviewReady || (outputIsPreview && downloadable));
   const previewStatus = previewable
     ? "ready" as const
@@ -49,6 +53,7 @@ export const publicTask = (
     : task.mediaStatus;
   const temporary =
     temporaryOriginalAvailable &&
+    !downloadable &&
     !previewable &&
     Boolean(sourceVideoUrl);
   return {
@@ -58,7 +63,9 @@ export const publicTask = (
     caseId: task.id,
     videoUrl: previewable ? `/api/generations/${task.id}/media?rev=${revision}` : undefined,
     downloadUrl: downloadable ? `/api/generations/${task.id}/download?rev=${revision}` : undefined,
-    immediateDownloadUrl: temporaryOriginalAvailable ? `/api/generations/${task.id}/download/temporary` : undefined,
+    immediateDownloadUrl: temporaryOriginalAvailable && !downloadable ? `/api/generations/${task.id}/download/temporary` : undefined,
+    temporaryOriginalStatus,
+    temporaryOriginalExpiresAt: temporaryOriginalAvailable ? sourceVideoExpiresAt : undefined,
     originalDownloadStatus: downloadable ? "ready" as const : temporaryOriginalAvailable ? "archiving" as const : "unavailable" as const,
     originalArchiveStatus: downloadable ? "ready" as const : temporaryOriginalAvailable ? "archiving" as const : "unavailable" as const,
     previewStatus,
