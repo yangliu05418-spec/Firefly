@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ImageResultBundle, Task } from "./types";
-import { createSessionRecoverably, hasActiveStudioWork, isAmbiguousSubmissionFailure, replaceSessionSnapshot, selectSessionSnapshot, upsertStudioItem } from "./studio-sync";
+import { createSessionRecoverably, hasActiveStudioWork, isAmbiguousSubmissionFailure, mergeGenerationHistoryHead, mergeSessionHistoryHead, replaceSessionSnapshot, selectSessionSnapshot, upsertStudioItem } from "./studio-sync";
 
 const task = (patch: Partial<Task> = {}): Task => ({
   id: "task-1", sessionId: "session-a", caseId: "task-1", status: "succeeded", mediaStatus: "ready",
@@ -34,6 +34,18 @@ describe("studio synchronization", () => {
     const optimistic = task({ id: "same", status: "queued", updatedAt: 1 });
     const authoritative = task({ id: "same", status: "running", updatedAt: 2 });
     expect(upsertStudioItem([optimistic], authoritative)).toEqual([authoritative]);
+  });
+
+  it("refreshes only the authoritative head without dropping older history", () => {
+    const current = [task({ id: "new", createdAt: 300 }), task({ id: "stale-head", createdAt: 275 }), task({ id: "old", createdAt: 100 })];
+    const head = [task({ id: "new", status: "running", createdAt: 300 }), task({ id: "replacement", createdAt: 250 })];
+    expect(mergeGenerationHistoryHead(current, head, 2).map((item) => item.id)).toEqual(["new", "replacement", "old"]);
+  });
+
+  it("keeps other sessions untouched during a head refresh", () => {
+    const current = [task({ id: "a-old", createdAt: 100 }), task({ id: "b", sessionId: "session-b", createdAt: 400 })];
+    const merged = mergeSessionHistoryHead(current, "session-a", [task({ id: "a-new", createdAt: 300 })], 1);
+    expect(merged.map((item) => item.id)).toEqual(["b", "a-new", "a-old"]);
   });
 
   it("treats video generation, TOS archiving and image generation as active work", () => {

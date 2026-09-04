@@ -65,6 +65,13 @@ describe("publicTask media exposure", () => {
     expect(task.originalDownloadStatus).toBe("unavailable");
   });
 
+  it("does not advertise a provider original without an explicit expiry", () => {
+    const task = publicTask(makeTask("archiving", { sourceVideoExpiresAt: undefined }));
+    expect(task.temporaryOriginalStatus).toBe("unavailable");
+    expect(task.immediateDownloadUrl).toBeUndefined();
+    expect(task.temporaryVideoUrl).toBeUndefined();
+  });
+
   it("only exposes stable Firefly routes after TOS verification", () => {
     const task = publicTask(makeTask("ready"), { stablePosterReady: true });
 

@@ -8,7 +8,7 @@ import { z } from "zod";
 import { config } from "./config.js";
 import { MODELS, availableModels } from "./capabilities.js";
 import { clearSession, createSession, getSessionUser, publicUser, requireAuth, type SessionUser } from "./auth.js";
-import type { AssetCategory, CanvasJob, CanvasProject, CanvasProjectAsset, CreationSession, CreationSnapshotBundle, ImageGenerationTask, UploadSession, UserAsset } from "./db.js";
+import type { AssetCategory, CanvasJob, CanvasProject, CanvasProjectAsset, CreationSession, CreationSnapshotBundle, ImageGenerationTask, MediaObject, UploadSession, UserAsset } from "./db.js";
 import { users } from "./store.js";
 import { canvasDocumentSchema, DEFAULT_CANVAS_DOCUMENT, DEFAULT_CANVAS_DOCUMENT_V1, parseCanvasDocumentSafe, toCanvasDocumentV2 } from "./canvas-document.js";
 import { resolveCanvasContext } from "./canvas-context.js";
@@ -52,6 +52,7 @@ import { assertPromptLength, EDITOR_PROMPT_STORAGE_MAX_CHARS, IMAGE_PROVIDER_PRO
 import { journeyNames, recordJourneyEvent } from "./journey-observability.js";
 import { createAtlasRuntime } from "./atlas-runtime.js";
 import { publicLocalMedia, publicLocalMediaFromSource } from "./local-media-public.js";
+import { applyDownloadResponseHeaders, temporaryDownloadTarget, temporaryOriginalStatus } from "./download-contract.js";
 
 let atlasRuntime: ReturnType<typeof createAtlasRuntime>;
 
@@ -145,10 +146,13 @@ const rejectGeneration = (res: express.Response, status: number, code: string, e
   return res.status(status).json({ error, code, requestId: res.locals.requestId });
 };
 const param = (value: string | string[]) => Array.isArray(value) ? value[0] : value;
-const publicGenerationTask = (task: StoredTask) => {
-  const previewMedia = users.readTaskMedia(task.id, "preview");
-  const posterMedia = users.readTaskMedia(task.id, "poster");
-  const outputMedia = users.readTaskMedia(task.id, "output");
+const publicGenerationTask = (task: StoredTask, mediaPage?: ReadonlyMap<string, MediaObject>) => {
+  const readMedia = (kind: "preview" | "poster" | "output") => mediaPage
+    ? mediaPage.get(`${task.id}:${kind}`) ?? null
+    : users.readTaskMedia(task.id, kind);
+  const previewMedia = readMedia("preview");
+  const posterMedia = readMedia("poster");
+  const outputMedia = readMedia("output");
   const effectivePreview = config.tosPreviewTranscodeEnabled ? previewMedia : previewMedia ?? outputMedia;
   const stablePreviewReady = tosEnabled() && config.tosPreviewTranscodeEnabled && Boolean(previewMedia);
   const stablePosterReady = tosEnabled() && Boolean(posterMedia);
@@ -164,6 +168,10 @@ const publicGenerationTask = (task: StoredTask) => {
     original: outputMedia ? publicLocalMedia(outputMedia, { variant: "original", url: `/api/generations/${task.id}/download?rev=${revision}`, cachePolicy: "on-demand" }) : undefined,
   } : undefined;
   return publicTask(task, { stableOutputReady, stablePreviewReady, stablePosterReady, outputIsPreview: !config.tosPreviewTranscodeEnabled, localMedia });
+};
+const publicGenerationTasks = (tasks: StoredTask[]) => {
+  const mediaPage = users.readTaskMediaPage(tasks.map((task) => task.id));
+  return tasks.map((task) => publicGenerationTask(task, mediaPage));
 };
 const publicUserAssetResponse = (asset: UserAsset) => {
   const media = asset.uploadId ? users.readUpload(asset.uploadId) : null;
@@ -805,9 +813,9 @@ app.get("/api/generations", requireAuth, async (req, res) => {
   if (sessionId) {
     const session = users.readCreationSession(sessionId);
     if (!session || session.ownerId !== user.id) return res.status(404).json({ error: "创作会话不存在" });
-    return res.json(users.listTasksForSession(user.id, sessionId, query.pageSize, before).map(publicGenerationTask));
+    return res.json(publicGenerationTasks(users.listTasksForSession(user.id, sessionId, query.pageSize, before)));
   }
-  res.json(users.listTasksForUser(user.id, query.pageSize, before).map(publicGenerationTask));
+  res.json(publicGenerationTasks(users.listTasksForUser(user.id, query.pageSize, before)));
 });
 app.get("/api/generations/:id", requireAuth, async (req, res) => {
   const task = await readTask(param(req.params.id));
@@ -931,8 +939,7 @@ app.get("/api/generations/:id/poster", requireAuth, async (req, res) => {
 });
 
 app.get("/api/generations/:id/download", requireAuth, async (req, res) => {
-  res.setHeader("Cache-Control", "no-store");
-  res.setHeader("Vary", "Cookie");
+  applyDownloadResponseHeaders(res);
   const taskId = param(req.params.id);
   const userId = (res.locals.user as SessionUser).id;
   try {
@@ -959,8 +966,7 @@ app.get("/api/generations/:id/download", requireAuth, async (req, res) => {
 });
 
 app.get("/api/generations/:id/download/temporary", requireAuth, async (req, res) => {
-  res.setHeader("Cache-Control", "no-store");
-  res.setHeader("Vary", "Cookie");
+  applyDownloadResponseHeaders(res);
   const taskId = param(req.params.id);
   const userId = (res.locals.user as SessionUser).id;
   try {
@@ -970,12 +976,19 @@ app.get("/api/generations/:id/download/temporary", requireAuth, async (req, res)
       return res.status(404).json({ error: "下载入口暂不可用，请刷新页面后重试", code: "DOWNLOAD_NOT_AVAILABLE" });
     }
     console.info(JSON.stringify({ type: "download_request_admitted", at: new Date().toISOString(), requestId: res.locals.requestId, taskId, userId, target: "temporary_original" }));
-    const available = Boolean(task.sourceVideoUrl)
-      && (!task.sourceVideoExpiresAt || task.sourceVideoExpiresAt > Date.now());
-    if (!available) {
-      const code = task.sourceVideoUrl ? "TEMPORARY_ORIGINAL_EXPIRED" : "TEMPORARY_ORIGINAL_UNAVAILABLE";
+    const archived = users.readTaskMedia(task.id, "output");
+    const downloadTarget = temporaryDownloadTarget(task, Boolean(archived));
+    if (downloadTarget === "tos_original" && archived) {
+      const target = signedObjectUrl(archived.objectKey, { download: true, fileName: archived.fileName });
+      res.setHeader("X-Firefly-Media-Source", "tos");
+      console.info(JSON.stringify({ type: "download_redirect", at: new Date().toISOString(), requestId: res.locals.requestId, taskId, userId, target: "tos_original", status: 302, bytes: archived.size, upgradedFrom: "temporary_original" }));
+      return res.redirect(302, target);
+    }
+    const temporaryStatus = temporaryOriginalStatus(task);
+    if (!downloadTarget) {
+      const code = temporaryStatus === "expired" ? "TEMPORARY_ORIGINAL_EXPIRED" : "TEMPORARY_ORIGINAL_UNAVAILABLE";
       console.info(JSON.stringify({ type: "download_rejected", at: new Date().toISOString(), requestId: res.locals.requestId, taskId, userId, target: "temporary_original", status: 410, code }));
-      return res.status(410).json({ error: task.sourceVideoUrl ? "立即下载入口已失效；原片仍在后台归档或已可高速下载" : "立即下载入口暂不可用；原片仍在后台归档或已可高速下载", code });
+      return res.status(410).json({ error: temporaryStatus === "expired" ? "临时下载入口已失效；原片仍在后台恢复归档" : "临时下载入口暂不可用；原片仍在后台恢复归档", code });
     }
     res.setHeader("X-Firefly-Media-Source", "provider");
     console.info(JSON.stringify({ type: "download_redirect", at: new Date().toISOString(), requestId: res.locals.requestId, taskId, userId, target: "temporary_original", status: 302, archivePending: task.mediaStatus !== "ready" }));

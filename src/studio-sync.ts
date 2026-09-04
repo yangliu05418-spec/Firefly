@@ -21,6 +21,23 @@ export const replaceSessionSnapshot = <T extends SessionItem>(current: T[], sess
   ...snapshot,
 ].sort((a, b) => b.createdAt - a.createdAt);
 
+const newestFirst = <T extends SessionItem>(a: T, b: T) => b.createdAt - a.createdAt || b.id.localeCompare(a.id);
+const isOlderThan = <T extends SessionItem>(item: T, boundary: T) => item.createdAt < boundary.createdAt
+  || (item.createdAt === boundary.createdAt && item.id.localeCompare(boundary.id) < 0);
+
+/** Reconciles the authoritative first page while retaining already loaded older history. */
+export const mergeGenerationHistoryHead = <T extends SessionItem>(current: T[], head: T[], pageSize: number) => {
+  if (head.length < pageSize) return [...head].sort(newestFirst);
+  const boundary = head.at(-1)!;
+  const ids = new Set(head.map((item) => item.id));
+  return [...head, ...current.filter((item) => !ids.has(item.id) && isOlderThan(item, boundary))].sort(newestFirst);
+};
+
+export const mergeSessionHistoryHead = <T extends SessionItem>(current: T[], sessionId: string, head: T[], pageSize: number) => [
+  ...current.filter((item) => item.sessionId !== sessionId),
+  ...mergeGenerationHistoryHead(current.filter((item) => item.sessionId === sessionId), head, pageSize),
+].sort(newestFirst);
+
 export const isVideoTaskActive = (task: Task) =>
   !["succeeded", "failed"].includes(task.status)
   || task.mediaStatus === "archiving"

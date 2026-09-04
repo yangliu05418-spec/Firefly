@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { listGenerationHistory } from "./generation-history";
+import { listGenerationHistory, readGenerationHistoryPage } from "./generation-history";
 import type { Task } from "./types";
 
 const task = (index: number): Task => ({
@@ -35,5 +35,12 @@ describe("generation history pagination", () => {
   it("fails closed if a server repeats a full page without advancing the cursor", async () => {
     const page = Array.from({ length: 100 }, (_, index) => task(index));
     await expect(listGenerationHistory(undefined, async () => page)).rejects.toThrow("分页游标没有前进");
+  });
+
+  it("reads only the authoritative head page for active polling", async () => {
+    const read = vi.fn(async (_url: string) => [task(1)]);
+    await expect(readGenerationHistoryPage("11111111-1111-4111-8111-111111111111", undefined, read)).resolves.toHaveLength(1);
+    expect(read).toHaveBeenCalledOnce();
+    expect(read.mock.calls[0]?.[0]).toContain("pageSize=100");
   });
 });
