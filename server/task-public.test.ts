@@ -30,7 +30,9 @@ describe("publicTask media exposure", () => {
     expect(task.temporaryVideoUrl).toBe("https://provider.example/temporary.mp4?secret=1");
     expect(task.temporaryVideoExpiresAt).toBeGreaterThan(Date.now());
     expect(task.mediaSource).toBeUndefined();
-    expect(task.downloadUrl).toBe("/api/generations/task-1/download?rev=3");
+    expect(task.downloadUrl).toBeUndefined();
+    expect(task.immediateDownloadUrl).toBe("/api/generations/task-1/download/temporary");
+    expect(task.originalDownloadStatus).toBe("archiving");
     expect(task.posterUrl).toBeUndefined();
     expect(task.posterStatus).toBe("processing");
     expect(task).not.toHaveProperty("sourceVideoUrl");
@@ -42,7 +44,8 @@ describe("publicTask media exposure", () => {
     expect(publicTask(makeTask("failed")).temporaryVideoUrl).toBe("https://provider.example/temporary.mp4?secret=1");
     expect(publicTask(makeTask("failed")).videoUrl).toBeUndefined();
     expect(publicTask(makeTask("failed")).mediaSource).toBeUndefined();
-    expect(publicTask(makeTask("failed")).downloadUrl).toBe("/api/generations/task-1/download?rev=3");
+    expect(publicTask(makeTask("failed")).downloadUrl).toBeUndefined();
+    expect(publicTask(makeTask("failed")).immediateDownloadUrl).toBe("/api/generations/task-1/download/temporary");
   });
 
   it("hides the temporary source once it expired", () => {
@@ -52,6 +55,8 @@ describe("publicTask media exposure", () => {
     expect(task.temporaryVideoExpiresAt).toBeUndefined();
     expect(task.mediaSource).toBeUndefined();
     expect(task.downloadUrl).toBeUndefined();
+    expect(task.immediateDownloadUrl).toBeUndefined();
+    expect(task.originalDownloadStatus).toBe("unavailable");
   });
 
   it("only exposes stable Firefly routes after TOS verification", () => {
@@ -60,6 +65,8 @@ describe("publicTask media exposure", () => {
     expect(task.caseId).toBe("task-1");
     expect(task.videoUrl).toBe("/api/generations/task-1/media?rev=3");
     expect(task.downloadUrl).toBe("/api/generations/task-1/download?rev=3");
+    expect(task.immediateDownloadUrl).toBe("/api/generations/task-1/download/temporary");
+    expect(task.originalDownloadStatus).toBe("ready");
     expect(task.posterUrl).toBe("/api/generations/task-1/poster?rev=3");
     expect(task.posterStatus).toBe("ready");
     expect(task.mediaSource).toBe("tos");
@@ -71,7 +78,9 @@ describe("publicTask media exposure", () => {
 
     expect(task.mediaStatus).toBe("archiving");
     expect(task.videoUrl).toBeUndefined();
-    expect(task.downloadUrl).toBe("/api/generations/task-1/download?rev=3");
+    expect(task.downloadUrl).toBeUndefined();
+    expect(task.immediateDownloadUrl).toBe("/api/generations/task-1/download/temporary");
+    expect(task.originalDownloadStatus).toBe("archiving");
     expect(task.posterUrl).toBeUndefined();
     expect(task.posterStatus).toBe("processing");
     expect(task.temporaryVideoUrl).toBe("https://provider.example/temporary.mp4?secret=1");
@@ -83,7 +92,9 @@ describe("publicTask media exposure", () => {
 
     expect(task.mediaStatus).toBe("archiving");
     expect(task.videoUrl).toBe("/api/generations/task-1/media?rev=3");
-    expect(task.downloadUrl).toBe("/api/generations/task-1/download?rev=3");
+    expect(task.downloadUrl).toBeUndefined();
+    expect(task.immediateDownloadUrl).toBe("/api/generations/task-1/download/temporary");
+    expect(task.originalDownloadStatus).toBe("archiving");
     expect(task.temporaryVideoUrl).toBeUndefined();
     expect(task.mediaSource).toBe("tos");
   });
@@ -93,6 +104,7 @@ describe("publicTask media exposure", () => {
 
     expect(task.mediaStatus).toBe("ready");
     expect(task.downloadUrl).toBe("/api/generations/task-1/download?rev=3");
+    expect(task.immediateDownloadUrl).toBe("/api/generations/task-1/download/temporary");
     expect(task.videoUrl).toBeUndefined();
     expect(task.temporaryVideoUrl).toBe("https://provider.example/temporary.mp4?secret=1");
   });
@@ -101,6 +113,7 @@ describe("publicTask media exposure", () => {
     const task = publicTask(makeTask("ready", { status: "running" }));
     expect(task.videoUrl).toBeUndefined();
     expect(task.downloadUrl).toBeUndefined();
+    expect(task.immediateDownloadUrl).toBeUndefined();
     expect(task.posterUrl).toBeUndefined();
     expect(task.posterStatus).toBe("unavailable");
     expect(task.temporaryVideoUrl).toBeUndefined();

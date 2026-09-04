@@ -926,17 +926,28 @@ app.get("/api/generations/:id/download", requireAuth, async (req, res) => {
     const task = await accessibleTask(req, res);
     if (!task || task.status !== "succeeded") return res.status(404).json({ error: "成片不存在或尚未就绪" });
     const media = task.mediaStatus === "ready" ? users.readTaskMedia(task.id, "output") : null;
-    const temporaryOriginalAvailable = Boolean(task.sourceVideoUrl)
-      && (!task.sourceVideoExpiresAt || task.sourceVideoExpiresAt > Date.now());
-    if (!media && !temporaryOriginalAvailable) return res.status(425).json({ error: "原片临时地址已过期，正在等待TOS归档恢复" });
-    const target = media
-      ? signedObjectUrl(media.objectKey, { download: true, fileName: media.fileName })
-      : task.sourceVideoUrl!;
-    const source = media ? "tos" as const : "provider" as const;
+    if (!media) return res.status(425).json({ error: "高速原片仍在归档，请稍后重试", code: "ORIGINAL_ARCHIVING" });
+    const target = signedObjectUrl(media.objectKey, { download: true, fileName: media.fileName });
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("Vary", "Cookie");
-    console.info(JSON.stringify({ type: "tos_media_redirect", at: new Date().toISOString(), taskId: task.id, userId: (res.locals.user as SessionUser).id, source, kind: "original_download", archivePending: !media }));
+    res.setHeader("X-Firefly-Media-Source", "tos");
+    console.info(JSON.stringify({ type: "tos_media_redirect", at: new Date().toISOString(), taskId: task.id, userId: (res.locals.user as SessionUser).id, source: "tos", kind: "original_download", archivePending: false }));
     res.redirect(302, target);
+  } catch (error) { respondError(res, error, 502); }
+});
+
+app.get("/api/generations/:id/download/temporary", requireAuth, async (req, res) => {
+  try {
+    const task = await accessibleTask(req, res);
+    if (!task || task.status !== "succeeded") return res.status(404).json({ error: "成片不存在或尚未就绪" });
+    const available = Boolean(task.sourceVideoUrl)
+      && (!task.sourceVideoExpiresAt || task.sourceVideoExpiresAt > Date.now());
+    if (!available) return res.status(410).json({ error: "临时原片地址已过期，请使用高速下载", code: "TEMPORARY_ORIGINAL_EXPIRED" });
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Vary", "Cookie");
+    res.setHeader("X-Firefly-Media-Source", "provider");
+    console.info(JSON.stringify({ type: "tos_media_redirect", at: new Date().toISOString(), taskId: task.id, userId: (res.locals.user as SessionUser).id, source: "provider", kind: "temporary_original_download", archivePending: task.mediaStatus !== "ready" }));
+    res.redirect(302, task.sourceVideoUrl!);
   } catch (error) { respondError(res, error, 502); }
 });
 

@@ -15,8 +15,8 @@ const publicFailure = (error: string | undefined, errorCode: string | undefined)
  * 任务公开投影。
  * 媒体可用性分层：
  * - ready：稳定 Firefly 路由（TOS 已归档，长期有效）
- * - archiving / fallback / failed：预览仍只使用稳定 TOS；原片下载通过受登录保护的 Firefly
- *   路由按需跳转临时源，任务对象不暴露 provider 地址或密钥字段。
+ * - archiving / fallback / failed：预览仍只使用稳定 TOS；临时源和 TOS 原片使用两个
+ *   明确分离的受保护入口，禁止同一下载地址静默切换数据源。
  */
 export const publicTask = (
   { ownerId: _ownerId, request: _request, sourceVideoUrl, sourceVideoExpiresAt, deletedAt: _deletedAt, ...task }: StoredTask,
@@ -52,7 +52,9 @@ export const publicTask = (
     mediaStatus,
     caseId: task.id,
     videoUrl: previewable ? `/api/generations/${task.id}/media?rev=${revision}` : undefined,
-    downloadUrl: downloadable || temporaryOriginalAvailable ? `/api/generations/${task.id}/download?rev=${revision}` : undefined,
+    downloadUrl: downloadable ? `/api/generations/${task.id}/download?rev=${revision}` : undefined,
+    immediateDownloadUrl: temporaryOriginalAvailable ? `/api/generations/${task.id}/download/temporary` : undefined,
+    originalDownloadStatus: downloadable ? "ready" as const : temporaryOriginalAvailable ? "archiving" as const : "unavailable" as const,
     posterStatus,
     posterUrl: posterReady ? `/api/generations/${task.id}/poster?rev=${revision}` : undefined,
     localMedia,

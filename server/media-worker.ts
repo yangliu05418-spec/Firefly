@@ -212,7 +212,7 @@ const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputF
   // use the configured larger part size, reducing cross-region round trips.
   const archivePartSize = checkpoint?.strategy === "stream_multipart"
     ? checkpoint.partSize
-    : config.tosUploadPartSize;
+    : config.tosArchivePartSize;
   const saveCheckpoint = (patch: Partial<NonNullable<typeof checkpoint>> & { strategy: "url_fetch" | "stream_multipart" }) => {
     const current = users.readMediaArchiveCheckpoint(task.id);
     const timestamp = Date.now();
@@ -237,12 +237,14 @@ const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputF
       await rangedObjectFromUrl(
         objectKey, data.sourceUrl, `result.${data.outputFormat}`, data.outputFormat === "mov" ? "video/quicktime" : "video/mp4",
         (partNumber, bytes) => console.info(JSON.stringify({ type: "tos_range_part_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, partNumber, bytes })),
-        archivePartSize, config.tosUploadConcurrency,
+        archivePartSize, config.tosArchivePartConcurrency,
         { uploadId: checkpoint.tosUploadId, sourceSize: checkpoint.sourceSize, contentType: checkpoint.contentType, parts: checkpoint.parts },
         {
           resumed: (uploadId, skippedParts) => console.info(JSON.stringify({ type: "tos_archive_checkpoint_resumed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, uploadId, skippedParts })),
           listPartsDegraded: (uploadId, statusCode, code) => console.warn(JSON.stringify({ type: "tos_archive_list_parts_degraded", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, uploadId, statusCode, providerCode: code, fallback: "durable_checkpoint" })),
           partRetry: (partNumber, attemptNumber, delayMs, statusCode, code) => console.warn(JSON.stringify({ type: "tos_range_part_retry", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, partNumber, attemptNumber, delayMs, statusCode, code })),
+          sourcePartRead: (partNumber, bytes, elapsedMs) => console.info(JSON.stringify({ type: "tos_archive_source_part_read", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, partNumber, bytes, elapsedMs })),
+          targetPartUploaded: (partNumber, bytes, elapsedMs, requestId) => console.info(JSON.stringify({ type: "tos_archive_target_part_uploaded", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, partNumber, bytes, elapsedMs, requestId })),
           checkpoint: (state) => { saveCheckpoint({ strategy: "stream_multipart", tosUploadId: state.uploadId, sourceSize: state.sourceSize, contentType: state.contentType, parts: state.parts }); },
         },
       );
