@@ -61,6 +61,7 @@ describe("TOS archive latency configuration", () => {
     delete process.env.TOS_FETCH_MAX_WAIT_MS;
     delete process.env.TOS_FETCH_POLL_INTERVAL_MS;
     delete process.env.TOS_URL_FETCH_ENABLED;
+    delete process.env.TOS_ARCHIVE_CONCURRENCY;
     delete process.env.TOS_ARCHIVE_PART_SIZE;
     delete process.env.TOS_ARCHIVE_PART_CONCURRENCY;
     vi.resetModules();
@@ -71,8 +72,9 @@ describe("TOS archive latency configuration", () => {
     expect(config.tosFetchDeadlineMs).toBe(30_000);
     expect(config.tosFetchMaxWaitMs).toBe(60_000);
     expect(config.tosFetchPollIntervalMs).toBe(3_000);
-    expect(config.tosArchivePartSize).toBe(8 * 1024 * 1024);
-    expect(config.tosArchivePartConcurrency).toBe(2);
+    expect(config.tosArchiveConcurrency).toBe(3);
+    expect(config.tosArchivePartSize).toBe(5 * 1024 * 1024);
+    expect(config.tosArchivePartConcurrency).toBe(4);
   });
 
   it("keeps the fetch deadline configurable for controlled rollback", async () => {
