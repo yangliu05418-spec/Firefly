@@ -485,7 +485,7 @@ test("an archived preview separates the temporary download from the pending TOS 
   }] });
   await page.goto("/studio");
 
-  await expect(page.getByText("可立即下载临时原片；TOS 高速原片正在归档")).toBeVisible();
+  await expect(page.getByText("可立即下载原片；TOS 高速原片正在归档")).toBeVisible();
   await expect(page.getByRole("link", { name: "立即下载 · 较慢" })).toHaveAttribute("href", `/api/generations/${taskId}/download/temporary`);
   await expect(page.getByRole("button", { name: "高速下载归档中" })).toBeDisabled();
   await expect(page.getByRole("link", { name: "高速下载" })).toHaveCount(0);
