@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { config } from "./config.js";
 import { abortIncompleteUploadsForKey, deleteObject, headObject, signedObjectUrl, streamObjectToTos, transcodeVideoOnTos, verifyProgressiveMp4, type VideoTranscodeObserver } from "./tos.js";
+import { withMediaSourceRead } from "./media-source-budget.js";
 
 const serverTranscodeCooldownMs = 15 * 60 * 1000;
 let serverTranscodeDisabledUntil = 0;
@@ -64,7 +65,7 @@ export const transcodePreviewFromUrl = async (sourceUrl: string, targetKey: stri
   const existing = await existingPreview(targetKey);
   if (existing) return existing;
   await abortIncompleteUploadsForKey(targetKey);
-  return transcodePreviewLocally(sourceUrl, targetKey, onPart);
+  return withMediaSourceRead("preview", () => transcodePreviewLocally(sourceUrl, targetKey, onPart));
 };
 
 export const transcodePreview = async (sourceKey: string, targetKey: string, onPart?: (partNumber: number, bytes: number, requestId?: string) => void, observer: VideoTranscodeObserver = {}) => {

@@ -64,6 +64,7 @@ describe("TOS archive latency configuration", () => {
     delete process.env.TOS_ARCHIVE_CONCURRENCY;
     delete process.env.TOS_ARCHIVE_PART_SIZE;
     delete process.env.TOS_ARCHIVE_PART_CONCURRENCY;
+    delete process.env.TOS_SOURCE_READ_CONCURRENCY;
     vi.resetModules();
 
     const { config } = await import("./config.js");
@@ -75,6 +76,7 @@ describe("TOS archive latency configuration", () => {
     expect(config.tosArchiveConcurrency).toBe(3);
     expect(config.tosArchivePartSize).toBe(5 * 1024 * 1024);
     expect(config.tosArchivePartConcurrency).toBe(4);
+    expect(config.tosSourceReadConcurrency).toBe(8);
   });
 
   it("keeps the fetch deadline configurable for controlled rollback", async () => {

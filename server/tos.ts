@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { TosClient } from "@volcengine/tos-sdk";
 import { config } from "./config.js";
+import { withMediaSourceRead } from "./media-source-budget.js";
 import { inspectMp4Prefix } from "./mp4-structure.js";
 import { withTosArchiveStage, type TosArchiveStage } from "./tos-errors.js";
 
@@ -560,16 +561,19 @@ export const rangedObjectFromUrl = async (
   try { return await verifyStoredObject(key); }
   catch (error) { if ((error as { statusCode?: number }).statusCode !== 404) throw withTosArchiveStage(error, "tos_head"); }
 
-  const probeController = new AbortController();
-  const probeTimer = setTimeout(() => probeController.abort(), config.tosUploadRequestTimeoutMs);
   let probe: Response;
   try {
-    probe = await fetch(url, { headers: { range: "bytes=0-0" }, signal: probeController.signal });
+    probe = await withMediaSourceRead("archive", async () => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), config.tosUploadRequestTimeoutMs);
+      try { return await fetch(url, { headers: { range: "bytes=0-0" }, signal: controller.signal }); }
+      finally { clearTimeout(timer); }
+    });
     if (probe.status !== 206) throw archiveHttpError(`上游成片不支持 Range 归档 (${probe.status})`, probe.status, "source_probe", probe.headers.get("x-request-id") ?? undefined);
     await probe.arrayBuffer();
   } catch (error) {
     throw withTosArchiveStage(error, "source_probe");
-  } finally { clearTimeout(probeTimer); }
+  }
   const totalSize = sourceSizeFromContentRange(probe.headers.get("content-range"));
   if (!totalSize) throw new Error("上游成片 Range 响应缺少有效总大小");
   const contentType = probe.headers.get("content-type") || contentTypeHint;
@@ -622,18 +626,24 @@ export const rangedObjectFromUrl = async (
       const { partNumber, start, end, size: expectedBytes } = ranges[index]!;
       if (completed.has(partNumber)) return transferNext();
       let body: Uint8Array;
-      const sourceStartedAt = Date.now();
-      const sourceController = new AbortController();
-      const sourceTimer = setTimeout(() => sourceController.abort(), partDeadlineMs);
       try {
-        const source = await fetch(url, { headers: { range: `bytes=${start}-${end}` }, signal: sourceController.signal });
-        if (source.status !== 206) throw archiveHttpError(`上游 Range 分片读取失败 (${source.status})`, source.status, "source_read", source.headers.get("x-request-id") ?? undefined);
-        body = new Uint8Array(await source.arrayBuffer());
+        const sourceResult = await withMediaSourceRead("archive", async () => {
+          const sourceStartedAt = Date.now();
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), partDeadlineMs);
+          try {
+            const source = await fetch(url, { headers: { range: `bytes=${start}-${end}` }, signal: controller.signal });
+            if (source.status !== 206) throw archiveHttpError(`上游 Range 分片读取失败 (${source.status})`, source.status, "source_read", source.headers.get("x-request-id") ?? undefined);
+            const bytes = new Uint8Array(await source.arrayBuffer());
+            observer.sourcePartRead?.(partNumber, bytes.byteLength, Date.now() - sourceStartedAt);
+            return bytes;
+          } finally { clearTimeout(timer); }
+        });
+        body = sourceResult;
         if (body.byteLength !== expectedBytes) throw new Error(`上游 Range 分片大小不一致 (${body.byteLength}/${expectedBytes})`);
-        observer.sourcePartRead?.(partNumber, body.byteLength, Date.now() - sourceStartedAt);
       } catch (error) {
         throw withTosArchiveStage(error, "source_read");
-      } finally { clearTimeout(sourceTimer); }
+      }
       let eTag = "";
       const uploadBody = Uint8Array.from(body);
       for (let uploadAttempt = 1; uploadAttempt <= 3; uploadAttempt += 1) {

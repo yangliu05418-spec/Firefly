@@ -247,7 +247,7 @@ jobs:
           DATABASE_PATH="$test_dir/source.db" BACKUP_PATH="$test_dir/backup.db" node ops/backup-db.mjs
           BACKUP_PATH="$test_dir/backup.db" node -e "const Database=require('better-sqlite3');const db=new Database(process.env.BACKUP_PATH,{readonly:true});if(db.pragma('integrity_check',{simple:true})!=='ok'||db.prepare('SELECT value FROM smoke').pluck().get()!=='ok')process.exit(1);db.close()"
       - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
+        run: sh ops/npm-audit-with-retry.sh
 
   atlas-test-build:
     name: Atlas Node 24 test and slim build
@@ -317,7 +317,7 @@ jobs:
             || editorOpen.projectLifecycle.bytes > 1700 * 1024) process.exit(1);
           NODE
       - name: Audit Atlas production dependencies
-        run: npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
+        run: sh ../../ops/npm-audit-with-retry.sh
 
   browser-e2e:
     name: Authenticated browser journeys

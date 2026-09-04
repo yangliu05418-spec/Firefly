@@ -33,6 +33,11 @@ export const publicTask = (
   const temporaryOriginalAvailable = task.status === "succeeded" && Boolean(sourceVideoUrl)
     && (!sourceVideoExpiresAt || sourceVideoExpiresAt > Date.now());
   const previewable = task.status === "succeeded" && (stablePreviewReady || (outputIsPreview && downloadable));
+  const previewStatus = previewable
+    ? "ready" as const
+    : task.status === "succeeded" && (temporaryOriginalAvailable || downloadable || task.mediaStatus === "archiving")
+      ? "processing" as const
+      : "unavailable" as const;
   const posterReady = task.status === "succeeded" && stablePosterReady;
   const posterStatus = posterReady
     ? "ready" as const
@@ -55,6 +60,8 @@ export const publicTask = (
     downloadUrl: downloadable ? `/api/generations/${task.id}/download?rev=${revision}` : undefined,
     immediateDownloadUrl: temporaryOriginalAvailable ? `/api/generations/${task.id}/download/temporary` : undefined,
     originalDownloadStatus: downloadable ? "ready" as const : temporaryOriginalAvailable ? "archiving" as const : "unavailable" as const,
+    originalArchiveStatus: downloadable ? "ready" as const : temporaryOriginalAvailable ? "archiving" as const : "unavailable" as const,
+    previewStatus,
     posterStatus,
     posterUrl: posterReady ? `/api/generations/${task.id}/poster?rev=${revision}` : undefined,
     localMedia,

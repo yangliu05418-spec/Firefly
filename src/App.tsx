@@ -10,7 +10,7 @@ import { ImageAssetManager } from "./features/assets/ImageAssetManager";
 import { Composer } from "./features/composer/Composer";
 import { AssetCacheScope } from "./asset-cache-context";
 import { assetMetadataCache } from "./asset-metadata-cache";
-import { createSessionRecoverably, hasActiveStudioWork, isAmbiguousSubmissionFailure, replaceSessionSnapshot, selectSessionSnapshot, upsertStudioItem } from "./studio-sync";
+import { createSessionRecoverably, hasActiveStudioWork, isAmbiguousSubmissionFailure, isVideoTaskActive, replaceSessionSnapshot, selectSessionSnapshot, upsertStudioItem } from "./studio-sync";
 import { loadStudioBootstrap } from "./studio-bootstrap";
 import { useAdaptiveRefresh } from "./use-adaptive-refresh";
 import { composerDraftCache } from "./composer-draft-cache";
@@ -23,7 +23,7 @@ import { ArchivePoster } from "./features/assets/ArchivePoster";
 import { clientRouteElapsed, markClientRouteStart, reportClientJourney } from "./client-observability";
 import { activateLocalMediaCache, clearLocalMedia, configureLocalMedia, deactivateLocalMediaCache, localMediaStats, useLocalMediaSource, warmLocalMedia } from "./local-media-client";
 const statusText: Record<Task["status"], string> = { queued: "等待调度", submitting: "正在提交", running: "正在生成", succeeded: "生成完成", failed: "生成失败" };
-const taskStatusText = (task: Task) => task.status === "succeeded" && task.mediaStatus === "archiving" ? "正在归档成片" : task.status === "succeeded" && task.mediaStatus === "failed" ? "成片归档待恢复" : statusText[task.status];
+const taskStatusText = (task: Task) => task.status === "succeeded" && task.previewStatus === "processing" ? "正在准备兼容预览" : task.status === "succeeded" && task.mediaStatus === "archiving" ? "正在归档成片" : task.status === "succeeded" && task.mediaStatus === "failed" ? "成片归档待恢复" : statusText[task.status];
 const waitingMoments = [
   { title: "镜头正在成形", detail: "正在理解画面、运动与声音之间的关系" },
   { title: "让画面慢慢呼吸", detail: "细节会在时间里找到自己的位置" },
@@ -469,7 +469,7 @@ function Studio({ user, route, navigate, logout }: { user: SessionUser; route: s
     }
   };
   const [now, setNow] = useState(Date.now());
-  const activeTasks = useMemo(() => tasks.filter((task) => !["succeeded", "failed"].includes(task.status) || task.mediaStatus === "archiving"), [tasks]);
+  const activeTasks = useMemo(() => tasks.filter(isVideoTaskActive), [tasks]);
   const activeWork = useMemo(() => hasActiveStudioWork(tasks, imageResults) || (generationCapacity?.active ?? 0) > 0, [tasks, imageResults, generationCapacity?.active]);
   const archivedCount = useMemo(() => assetTasks.filter((task) => task.visibility !== "shared" && task.status === "succeeded" && task.videoUrl).length, [assetTasks]);
   const latestVideoTaskId = useMemo(() => tasks.find((task) => task.status === "succeeded" && task.videoUrl && (!task.videoExpiresAt || task.videoExpiresAt > now))?.id, [tasks, now]);
