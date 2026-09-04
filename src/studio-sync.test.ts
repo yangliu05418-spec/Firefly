@@ -39,8 +39,10 @@ describe("studio synchronization", () => {
   it("treats video generation, TOS archiving and image generation as active work", () => {
     expect(hasActiveStudioWork([task({ status: "running" })], [])).toBe(true);
     expect(hasActiveStudioWork([task({ mediaStatus: "archiving" })], [])).toBe(true);
+    expect(hasActiveStudioWork([task({ mediaStatus: "ready", previewStatus: "processing", originalArchiveStatus: "ready" })], [])).toBe(true);
+    expect(hasActiveStudioWork([task({ mediaStatus: "archiving", previewStatus: "ready", originalArchiveStatus: "archiving" })], [])).toBe(true);
     expect(hasActiveStudioWork([], [image({ status: "generating" })])).toBe(true);
-    expect(hasActiveStudioWork([task()], [image()])).toBe(false);
+    expect(hasActiveStudioWork([task({ previewStatus: "ready", originalArchiveStatus: "ready" })], [image()])).toBe(false);
   });
 
   it("distinguishes ambiguous transport/server failures from deterministic rejection", () => {

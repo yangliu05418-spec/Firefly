@@ -33,6 +33,8 @@ describe("publicTask media exposure", () => {
     expect(task.downloadUrl).toBeUndefined();
     expect(task.immediateDownloadUrl).toBe("/api/generations/task-1/download/temporary");
     expect(task.originalDownloadStatus).toBe("archiving");
+    expect(task.originalArchiveStatus).toBe("archiving");
+    expect(task.previewStatus).toBe("processing");
     expect(task.posterUrl).toBeUndefined();
     expect(task.posterStatus).toBe("processing");
     expect(task).not.toHaveProperty("sourceVideoUrl");
@@ -67,6 +69,8 @@ describe("publicTask media exposure", () => {
     expect(task.downloadUrl).toBe("/api/generations/task-1/download?rev=3");
     expect(task.immediateDownloadUrl).toBe("/api/generations/task-1/download/temporary");
     expect(task.originalDownloadStatus).toBe("ready");
+    expect(task.originalArchiveStatus).toBe("ready");
+    expect(task.previewStatus).toBe("ready");
     expect(task.posterUrl).toBe("/api/generations/task-1/poster?rev=3");
     expect(task.posterStatus).toBe("ready");
     expect(task.mediaSource).toBe("tos");
@@ -81,6 +85,7 @@ describe("publicTask media exposure", () => {
     expect(task.downloadUrl).toBeUndefined();
     expect(task.immediateDownloadUrl).toBe("/api/generations/task-1/download/temporary");
     expect(task.originalDownloadStatus).toBe("archiving");
+    expect(task.originalArchiveStatus).toBe("archiving");
     expect(task.posterUrl).toBeUndefined();
     expect(task.posterStatus).toBe("processing");
     expect(task.temporaryVideoUrl).toBe("https://provider.example/temporary.mp4?secret=1");
@@ -97,6 +102,7 @@ describe("publicTask media exposure", () => {
     expect(task.originalDownloadStatus).toBe("archiving");
     expect(task.temporaryVideoUrl).toBeUndefined();
     expect(task.mediaSource).toBe("tos");
+    expect(task.previewStatus).toBe("ready");
   });
 
   it("opens the verified original for download without waiting for a separate streaming preview", () => {
@@ -107,6 +113,8 @@ describe("publicTask media exposure", () => {
     expect(task.immediateDownloadUrl).toBe("/api/generations/task-1/download/temporary");
     expect(task.videoUrl).toBeUndefined();
     expect(task.temporaryVideoUrl).toBe("https://provider.example/temporary.mp4?secret=1");
+    expect(task.originalArchiveStatus).toBe("ready");
+    expect(task.previewStatus).toBe("processing");
   });
 
   it("never exposes media for non-succeeded tasks", () => {

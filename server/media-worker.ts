@@ -270,6 +270,10 @@ const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputF
     const contentType = String(dataOut.contentType ?? headers["content-type"] ?? (data.outputFormat === "mov" ? "video/quicktime" : "video/mp4"));
     const committed = users.commitTaskMediaIfActive(task.id, { id: `${task.id}:output`, ownerId: task.ownerId, taskId: task.id, kind: "output", objectKey, status: "ready", fileName: `result.${data.outputFormat}`, contentType, size, etag, createdAt: now, updatedAt: now }, true);
     if (!committed) { await deleteObject(objectKey); return; }
+    // Preview readiness is user-facing and must not wait behind poster, Canvas,
+    // or Atlas bookkeeping. This is also the durable fallback when the direct
+    // provider-source preview job was interrupted.
+    await enqueueLivePreview(task.id).catch((error) => console.warn(JSON.stringify({ type: "tos_preview_queue_failed", at: new Date().toISOString(), taskId: task.id, code: (error as { code?: string }).code ?? "unknown" })));
     await exposeAtlasVideoDestinations(task.id);
     if (!config.tosPreviewTranscodeEnabled) await enqueueAtlasVideoDestinations(task.id);
     users.deleteMediaArchiveCheckpoint(task.id);
@@ -298,7 +302,6 @@ const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputF
       }, !config.tosPreviewTranscodeEnabled);
       if (attached && !config.tosPreviewTranscodeEnabled) await connection.publish(`canvas:events:${canvasJob.canvasId}`, JSON.stringify({ type: "canvas_job", job: attached.job }));
     }
-    await enqueueLivePreview(task.id).catch((error) => console.warn(JSON.stringify({ type: "tos_preview_queue_failed", at: new Date().toISOString(), taskId: task.id, code: (error as { code?: string }).code ?? "unknown" })));
     console.info(JSON.stringify({ type: "tos_fetch_completed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, strategy, size, posterReady, elapsedMs: Date.now() - startedAt, requestId: head.requestId }));
   } catch (error) {
     const failureCode = tosArchiveErrorCode(error);

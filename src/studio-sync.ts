@@ -21,8 +21,14 @@ export const replaceSessionSnapshot = <T extends SessionItem>(current: T[], sess
   ...snapshot,
 ].sort((a, b) => b.createdAt - a.createdAt);
 
+export const isVideoTaskActive = (task: Task) =>
+  !["succeeded", "failed"].includes(task.status)
+  || task.mediaStatus === "archiving"
+  || task.previewStatus === "processing"
+  || task.originalArchiveStatus === "archiving";
+
 export const hasActiveStudioWork = (tasks: Task[], images: ImageResultBundle[]) =>
-  tasks.some((task) => !["succeeded", "failed"].includes(task.status) || task.mediaStatus === "archiving")
+  tasks.some(isVideoTaskActive)
   || images.some((result) => result.status === "generating");
 
 /** A write may already be committed when the response is lost; only deterministic 4xx is safe to show as rejected. */

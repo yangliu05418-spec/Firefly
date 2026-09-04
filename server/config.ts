@@ -64,6 +64,9 @@ export const config = {
   tosArchiveConcurrency: boundedInt("TOS_ARCHIVE_CONCURRENCY", 3, 1, 6),
   tosArchivePartSize: boundedInt("TOS_ARCHIVE_PART_SIZE", 5 * 1024 * 1024, 5 * 1024 * 1024, 64 * 1024 * 1024),
   tosArchivePartConcurrency: boundedInt("TOS_ARCHIVE_PART_CONCURRENCY", 4, 1, 4),
+  // Archive ranges and preview transcodes read from the same temporary Provider
+  // host. Bound that shared source separately from fast TOS upload capacity.
+  tosSourceReadConcurrency: boundedInt("TOS_SOURCE_READ_CONCURRENCY", 8, 2, 16),
   tosRequestTimeoutMs: positiveInt("TOS_REQUEST_TIMEOUT_MS", 60000),
   tosUploadRequestTimeoutMs: positiveInt("TOS_UPLOAD_REQUEST_TIMEOUT_MS", 180000),
   tosTranscodeDeadlineMs: positiveInt("TOS_TRANSCODE_DEADLINE_MS", 10 * 60 * 1000),
