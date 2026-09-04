@@ -14,7 +14,7 @@ import { canvasDocumentSchema, DEFAULT_CANVAS_DOCUMENT, DEFAULT_CANVAS_DOCUMENT_
 import { resolveCanvasContext } from "./canvas-context.js";
 import { publicCanvasProject, publicCanvasProjectDetail } from "./canvas-public.js";
 import { consumeFeishuAuthorization, createFeishuAuthorization, exchangeFeishuCode } from "./feishu.js";
-import { archiveQueue, assetQueue, atlasAgentQueue, canvasQueue, generationQueue, imageGenerationQueue, listTasksForUser, mediaQueue, migrateLegacyTasks, previewQueue, queueConnection, readTask, redis, type StoredTask, uploadFinalizationQueue } from "./redis.js";
+import { archiveQueue, assetQueue, atlasAgentQueue, canvasQueue, generationQueue, imageGenerationQueue, mediaQueue, migrateLegacyTasks, previewQueue, queueConnection, readTask, redis, type StoredTask, uploadFinalizationQueue } from "./redis.js";
 import { canAccessTask } from "./task-access.js";
 import { publicTask } from "./task-public.js";
 import { validateGeneration } from "./provider.js";
@@ -790,15 +790,24 @@ app.post("/api/generations", requireAuth, async (req, res) => {
   }
 });
 
+const generationListQuerySchema = z.object({
+  sessionId: z.string().uuid().optional(),
+  pageSize: z.coerce.number().int().min(1).max(100).default(100),
+  beforeCreatedAt: z.coerce.number().int().nonnegative().optional(),
+  beforeId: z.string().uuid().optional(),
+}).refine((value) => (value.beforeCreatedAt === undefined) === (value.beforeId === undefined), { message: "分页游标不完整" });
+
 app.get("/api/generations", requireAuth, async (req, res) => {
   const user = res.locals.user as SessionUser;
-  const sessionId = typeof req.query.sessionId === "string" ? req.query.sessionId : "";
+  const query = generationListQuerySchema.parse(req.query);
+  const sessionId = query.sessionId ?? "";
+  const before = query.beforeCreatedAt !== undefined && query.beforeId ? { createdAt: query.beforeCreatedAt, id: query.beforeId } : undefined;
   if (sessionId) {
     const session = users.readCreationSession(sessionId);
     if (!session || session.ownerId !== user.id) return res.status(404).json({ error: "创作会话不存在" });
-    return res.json(users.listTasksForSession(user.id, sessionId).map(publicGenerationTask));
+    return res.json(users.listTasksForSession(user.id, sessionId, query.pageSize, before).map(publicGenerationTask));
   }
-  res.json((await listTasksForUser(user.id)).map(publicGenerationTask));
+  res.json(users.listTasksForUser(user.id, query.pageSize, before).map(publicGenerationTask));
 });
 app.get("/api/generations/:id", requireAuth, async (req, res) => {
   const task = await readTask(param(req.params.id));
@@ -895,7 +904,7 @@ const accessibleTask = async (req: express.Request, res: express.Response) => {
 app.get("/api/generations/:id/media", requireAuth, async (req, res) => {
   try {
     const task = await accessibleTask(req, res);
-    if (!task || task.status !== "succeeded") return res.status(404).json({ error: "成片不存在或尚未就绪" });
+    if (!task || task.status !== "succeeded") return res.status(404).json({ error: "预览入口暂不可用，请刷新页面后重试", code: "PREVIEW_NOT_AVAILABLE" });
     const media = config.tosPreviewTranscodeEnabled
       ? users.readTaskMedia(task.id, "preview")
       : task.mediaStatus === "ready" ? users.readTaskMedia(task.id, "preview") ?? users.readTaskMedia(task.id, "output") : null;
@@ -922,33 +931,60 @@ app.get("/api/generations/:id/poster", requireAuth, async (req, res) => {
 });
 
 app.get("/api/generations/:id/download", requireAuth, async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Vary", "Cookie");
+  const taskId = param(req.params.id);
+  const userId = (res.locals.user as SessionUser).id;
   try {
     const task = await accessibleTask(req, res);
-    if (!task || task.status !== "succeeded") return res.status(404).json({ error: "成片不存在或尚未就绪" });
+    if (!task || task.status !== "succeeded") {
+      console.info(JSON.stringify({ type: "download_rejected", at: new Date().toISOString(), requestId: res.locals.requestId, taskId, userId, target: "tos_original", status: 404, code: "DOWNLOAD_NOT_AVAILABLE" }));
+      return res.status(404).json({ error: "下载入口暂不可用，请刷新页面后重试", code: "DOWNLOAD_NOT_AVAILABLE" });
+    }
+    console.info(JSON.stringify({ type: "download_request_admitted", at: new Date().toISOString(), requestId: res.locals.requestId, taskId, userId, target: "tos_original" }));
     const media = task.mediaStatus === "ready" ? users.readTaskMedia(task.id, "output") : null;
-    if (!media) return res.status(425).json({ error: "高速原片仍在归档，请稍后重试", code: "ORIGINAL_ARCHIVING" });
+    if (!media) {
+      console.info(JSON.stringify({ type: "download_rejected", at: new Date().toISOString(), requestId: res.locals.requestId, taskId, userId, target: "tos_original", status: 425, code: "ORIGINAL_ARCHIVING" }));
+      return res.status(425).json({ error: "原片正在归档到北京 TOS，完成后即可高速下载", code: "ORIGINAL_ARCHIVING" });
+    }
     const target = signedObjectUrl(media.objectKey, { download: true, fileName: media.fileName });
-    res.setHeader("Cache-Control", "no-store");
-    res.setHeader("Vary", "Cookie");
     res.setHeader("X-Firefly-Media-Source", "tos");
+    console.info(JSON.stringify({ type: "download_redirect", at: new Date().toISOString(), requestId: res.locals.requestId, taskId, userId, target: "tos_original", status: 302, bytes: media.size }));
     console.info(JSON.stringify({ type: "tos_media_redirect", at: new Date().toISOString(), taskId: task.id, userId: (res.locals.user as SessionUser).id, source: "tos", kind: "original_download", archivePending: false }));
     res.redirect(302, target);
-  } catch (error) { respondError(res, error, 502); }
+  } catch (error) {
+    console.warn(JSON.stringify({ type: "download_rejected", at: new Date().toISOString(), requestId: res.locals.requestId, taskId, userId, target: "tos_original", status: 502, code: (error as { code?: string }).code ?? "DOWNLOAD_REDIRECT_FAILED" }));
+    respondError(res, error, 502);
+  }
 });
 
 app.get("/api/generations/:id/download/temporary", requireAuth, async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Vary", "Cookie");
+  const taskId = param(req.params.id);
+  const userId = (res.locals.user as SessionUser).id;
   try {
     const task = await accessibleTask(req, res);
-    if (!task || task.status !== "succeeded") return res.status(404).json({ error: "成片不存在或尚未就绪" });
+    if (!task || task.status !== "succeeded") {
+      console.info(JSON.stringify({ type: "download_rejected", at: new Date().toISOString(), requestId: res.locals.requestId, taskId, userId, target: "temporary_original", status: 404, code: "DOWNLOAD_NOT_AVAILABLE" }));
+      return res.status(404).json({ error: "下载入口暂不可用，请刷新页面后重试", code: "DOWNLOAD_NOT_AVAILABLE" });
+    }
+    console.info(JSON.stringify({ type: "download_request_admitted", at: new Date().toISOString(), requestId: res.locals.requestId, taskId, userId, target: "temporary_original" }));
     const available = Boolean(task.sourceVideoUrl)
       && (!task.sourceVideoExpiresAt || task.sourceVideoExpiresAt > Date.now());
-    if (!available) return res.status(410).json({ error: "临时原片地址已过期，请使用高速下载", code: "TEMPORARY_ORIGINAL_EXPIRED" });
-    res.setHeader("Cache-Control", "no-store");
-    res.setHeader("Vary", "Cookie");
+    if (!available) {
+      const code = task.sourceVideoUrl ? "TEMPORARY_ORIGINAL_EXPIRED" : "TEMPORARY_ORIGINAL_UNAVAILABLE";
+      console.info(JSON.stringify({ type: "download_rejected", at: new Date().toISOString(), requestId: res.locals.requestId, taskId, userId, target: "temporary_original", status: 410, code }));
+      return res.status(410).json({ error: task.sourceVideoUrl ? "立即下载入口已失效；原片仍在后台归档或已可高速下载" : "立即下载入口暂不可用；原片仍在后台归档或已可高速下载", code });
+    }
     res.setHeader("X-Firefly-Media-Source", "provider");
+    console.info(JSON.stringify({ type: "download_redirect", at: new Date().toISOString(), requestId: res.locals.requestId, taskId, userId, target: "temporary_original", status: 302, archivePending: task.mediaStatus !== "ready" }));
     console.info(JSON.stringify({ type: "tos_media_redirect", at: new Date().toISOString(), taskId: task.id, userId: (res.locals.user as SessionUser).id, source: "provider", kind: "temporary_original_download", archivePending: task.mediaStatus !== "ready" }));
     res.redirect(302, task.sourceVideoUrl!);
-  } catch (error) { respondError(res, error, 502); }
+  } catch (error) {
+    console.warn(JSON.stringify({ type: "download_rejected", at: new Date().toISOString(), requestId: res.locals.requestId, taskId, userId, target: "temporary_original", status: 502, code: (error as { code?: string }).code ?? "DOWNLOAD_REDIRECT_FAILED" }));
+    respondError(res, error, 502);
+  }
 });
 
 app.delete("/api/generations/:id", requireAuth, async (req, res) => {
@@ -973,7 +1009,8 @@ const mediaEventSchema = z.object({
   networkState: z.number().int().min(0).max(3).optional(),
   currentTime: z.number().nonnegative().max(24 * 3600).optional(),
   bufferedAhead: z.number().nonnegative().max(24 * 3600).optional(),
-  bufferingMs: z.number().int().nonnegative().max(3600 * 1000).optional()
+  bufferingMs: z.number().int().nonnegative().max(3600 * 1000).optional(),
+  downloadTarget: z.enum(["temporary_original", "tos_original"]).optional(),
 });
 app.post("/api/media-events", requireAuth, async (req, res) => {
   try {
@@ -1597,7 +1634,7 @@ app.post("/api/canvases/:id/media", requireAuth, async (req, res) => {
     if (!accessibleCanvas(canvasId, user.id)) return res.status(404).json({ error: "画布不存在" });
     if (body.kind === "generation") {
       const task = await readTask(body.taskId);
-      if (!task || !canAccessTask(task, user.id) || task.status !== "succeeded" || task.mediaStatus !== "ready") return res.status(404).json({ error: "成片不存在或尚未就绪" });
+      if (!task || !canAccessTask(task, user.id) || task.status !== "succeeded" || task.mediaStatus !== "ready") return res.status(404).json({ error: "视频副本仍在准备中，请稍后再加入画布", code: "MEDIA_NOT_READY" });
       const media = config.tosPreviewTranscodeEnabled
         ? users.readTaskMedia(task.id, "preview")
         : users.readTaskMedia(task.id, "output") ?? users.readTaskMedia(task.id, "preview");

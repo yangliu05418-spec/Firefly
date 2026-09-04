@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { archiveTransferStrategy, shouldRecoverArchiveHandoff } from "./archive-state.js";
+import { archiveTransferStrategy, shouldRecoverArchiveHandoff, shouldRepartitionTimedOutArchive } from "./archive-state.js";
 
 describe("generation archive handoff recovery", () => {
   const now = 1_800_000_000_000;
@@ -31,5 +31,13 @@ describe("generation archive transfer strategy", () => {
   it("starts resumable multipart immediately when URL Fetch is disabled", () => {
     expect(archiveTransferStrategy(null, false, Date.now(), 300_000, false)).toBe("stream_multipart");
     expect(archiveTransferStrategy({ strategy: "url_fetch", fetchStartedAt: Date.now() }, false, Date.now(), 300_000, false)).toBe("stream_multipart");
+  });
+});
+
+describe("generation archive multipart geometry", () => {
+  it("repartitions an oversized checkpoint only after a TOS timeout", () => {
+    expect(shouldRepartitionTimedOutArchive({ strategy: "stream_multipart", partSize: 16 * 1024 * 1024, lastErrorCode: "TOS_REQUEST_TIMEOUT" }, 5 * 1024 * 1024)).toBe(true);
+    expect(shouldRepartitionTimedOutArchive({ strategy: "stream_multipart", partSize: 5 * 1024 * 1024, lastErrorCode: "TOS_REQUEST_TIMEOUT" }, 5 * 1024 * 1024)).toBe(false);
+    expect(shouldRepartitionTimedOutArchive({ strategy: "stream_multipart", partSize: 16 * 1024 * 1024, lastErrorCode: "TOS_UPLOAD_MISSING" }, 5 * 1024 * 1024)).toBe(false);
   });
 });

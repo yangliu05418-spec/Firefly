@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { config } from "./config.js";
-import { rangedObjectFromUrl, tos } from "./tos.js";
+import { rangedObjectFromUrl, tos, uploadArchivePart } from "./tos.js";
 
 describe("resumable TOS archive", () => {
   const original = { accessKey: config.tosAccessKeyId, secret: config.tosSecretAccessKey, bucket: config.tosBucket, endpoint: config.tosEndpoint };
@@ -106,5 +106,34 @@ describe("resumable TOS archive", () => {
       5 * 1024 * 1024, 3, { uploadId: "upload-existing" },
     )).rejects.toThrow(/超出当前对象范围/);
     expect(complete).not.toHaveBeenCalled();
+  });
+});
+
+describe("archive part hedging", () => {
+  it("starts a duplicate same-part request before a stalled upload reaches the hard timeout", async () => {
+    let requests = 0;
+    const onHedge = vi.fn();
+    const fetcher = vi.fn(async (_url: string, init: RequestInit) => {
+      requests += 1;
+      if (requests === 1) {
+        return await new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+        });
+      }
+      return new Response(null, { status: 200, headers: { etag: '"hedged-etag"', "x-tos-request-id": "hedged-request" } });
+    });
+
+    const result = await uploadArchivePart({
+      sign: () => "https://tos.example.test/upload-part",
+      body: new Uint8Array([1, 2, 3]).buffer,
+      timeoutMs: 100,
+      hedgeDelayMs: 5,
+      fetcher,
+      onHedge,
+    });
+
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(onHedge).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ eTag: "hedged-etag", requestId: "hedged-request" });
   });
 });

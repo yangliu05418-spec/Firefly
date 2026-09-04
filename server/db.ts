@@ -726,13 +726,17 @@ export class UserStore {
     return this.database.prepare("DELETE FROM media_archive_checkpoints WHERE task_id = ?").run(taskId).changes > 0;
   }
 
-  listTasksForUser(userId: string, limit = 50) {
-    const rows = this.database.prepare(`SELECT * FROM generation_tasks WHERE deleted_at IS NULL AND (owner_id = ? OR visibility = 'shared') ORDER BY created_at DESC LIMIT ?`).all(userId, limit) as TaskRow[];
+  listTasksForUser(userId: string, limit = 100, before?: { createdAt: number; id: string }) {
+    const rows = before
+      ? this.database.prepare(`SELECT * FROM generation_tasks WHERE deleted_at IS NULL AND (owner_id = ? OR visibility = 'shared') AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT ?`).all(userId, before.createdAt, before.createdAt, before.id, limit) as TaskRow[]
+      : this.database.prepare(`SELECT * FROM generation_tasks WHERE deleted_at IS NULL AND (owner_id = ? OR visibility = 'shared') ORDER BY created_at DESC, id DESC LIMIT ?`).all(userId, limit) as TaskRow[];
     return rows.map((row) => mapTask(row)!);
   }
 
-  listTasksForSession(userId: string, sessionId: string, limit = 50) {
-    const rows = this.database.prepare(`SELECT * FROM generation_tasks WHERE owner_id = ? AND session_id = ? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?`).all(userId, sessionId, limit) as TaskRow[];
+  listTasksForSession(userId: string, sessionId: string, limit = 100, before?: { createdAt: number; id: string }) {
+    const rows = before
+      ? this.database.prepare(`SELECT * FROM generation_tasks WHERE owner_id = ? AND session_id = ? AND deleted_at IS NULL AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT ?`).all(userId, sessionId, before.createdAt, before.createdAt, before.id, limit) as TaskRow[]
+      : this.database.prepare(`SELECT * FROM generation_tasks WHERE owner_id = ? AND session_id = ? AND deleted_at IS NULL ORDER BY created_at DESC, id DESC LIMIT ?`).all(userId, sessionId, limit) as TaskRow[];
     return rows.map((row) => mapTask(row)!);
   }
 
@@ -959,6 +963,24 @@ export class UserStore {
         AND (media_status IN ('failed', 'fallback') OR (media_status = 'archiving' AND updated_at < ?))
       ORDER BY updated_at ASC LIMIT ?
     `).all(minimumSourceExpiry, MAX_MEDIA_RECOVERY_ATTEMPTS, staleBefore, limit) as TaskRow[];
+    return rows.map((row) => mapTask(row)!);
+  }
+
+  recoverableTimedOutMultipartTasks(minimumSourceExpiry: number, targetPartSize: number, limit = 20) {
+    const rows = this.database.prepare(`
+      SELECT generation_tasks.* FROM generation_tasks
+      INNER JOIN media_archive_checkpoints ON media_archive_checkpoints.task_id = generation_tasks.id
+      WHERE generation_tasks.deleted_at IS NULL AND generation_tasks.status = 'succeeded'
+        AND generation_tasks.media_status = 'failed'
+        AND generation_tasks.source_video_url IS NOT NULL
+        AND generation_tasks.source_video_expires_at > ?
+        AND generation_tasks.media_attempts >= ?
+        AND media_archive_checkpoints.strategy = 'stream_multipart'
+        AND media_archive_checkpoints.last_error_code = 'TOS_REQUEST_TIMEOUT'
+        AND media_archive_checkpoints.part_size > ?
+        AND media_archive_checkpoints.expires_at > ?
+      ORDER BY generation_tasks.updated_at ASC LIMIT ?
+    `).all(minimumSourceExpiry, MAX_MEDIA_RECOVERY_ATTEMPTS, targetPartSize, Date.now(), limit) as TaskRow[];
     return rows.map((row) => mapTask(row)!);
   }
 

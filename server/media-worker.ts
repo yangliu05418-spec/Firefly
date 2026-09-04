@@ -15,7 +15,7 @@ import { startWorkerHeartbeat } from "./worker-heartbeat.js";
 import { finalizeQueuedUpload } from "./upload-finalization.js";
 import { coordinateUploadFinalization } from "./upload-finalization-coordinator.js";
 import { copyCreationSnapshotReference, deleteCreationSnapshotReference } from "./creation-reference-media.js";
-import { archiveTransferStrategy } from "./archive-state.js";
+import { archiveTransferStrategy, shouldRepartitionTimedOutArchive } from "./archive-state.js";
 import { tosArchiveErrorCode } from "./tos-errors.js";
 import { AtlasStore, type AtlasGlobalAssetRegistration } from "./atlas-store.js";
 import { registerAtlasGlobalExport } from "./atlas-global-assets.js";
@@ -207,6 +207,25 @@ const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputF
     users.deleteMediaArchiveCheckpoint(task.id);
     checkpoint = null;
   }
+  if (shouldRepartitionTimedOutArchive(checkpoint, config.tosArchivePartSize)) {
+    const previousPartSize = checkpoint!.partSize;
+    if (checkpoint!.tosUploadId) {
+      try {
+        await abortMultipartUpload(checkpoint!.objectKey, checkpoint!.tosUploadId!);
+      } catch (error) {
+        const statusCode = Number((error as { statusCode?: number }).statusCode ?? 0);
+        const code = String((error as { code?: string }).code ?? "");
+        if (statusCode !== 404 && code !== "NoSuchUpload") throw error;
+      }
+    }
+    users.deleteMediaArchiveCheckpoint(task.id);
+    checkpoint = null;
+    console.warn(JSON.stringify({
+      type: "tos_archive_checkpoint_repartitioned", at: new Date().toISOString(), taskId: task.id,
+      userId: task.ownerId, previousPartSize, nextPartSize: config.tosArchivePartSize,
+      reason: "oversized_part_timeout",
+    }));
+  }
   const strategy = archiveTransferStrategy(checkpoint, data.existingObjectOnly, now, config.tosFetchMaxWaitMs, config.tosUrlFetchEnabled);
   // Keep an existing multipart session on its original geometry. New archives
   // use the tuned part size so short videos can benefit from parallel ranges.
@@ -231,7 +250,7 @@ const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputF
     if (data.existingObjectOnly) {
       await verifyStoredObject(objectKey, data.outputFormat === "mov" ? "video/quicktime" : "video/mp4");
     } else if (!data.sourceUrl) {
-      throw new Error("上游临时地址已过期，且 TOS 中没有可恢复的成片");
+      throw new Error("立即下载入口已失效，长期原片仍待恢复归档");
     } else if (strategy === "stream_multipart") {
       checkpoint = saveCheckpoint({ strategy: "stream_multipart" });
       await rangedObjectFromUrl(
@@ -243,6 +262,7 @@ const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputF
           resumed: (uploadId, skippedParts) => console.info(JSON.stringify({ type: "tos_archive_checkpoint_resumed", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, uploadId, skippedParts })),
           listPartsDegraded: (uploadId, statusCode, code) => console.warn(JSON.stringify({ type: "tos_archive_list_parts_degraded", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, uploadId, statusCode, providerCode: code, fallback: "durable_checkpoint" })),
           partRetry: (partNumber, attemptNumber, delayMs, statusCode, code) => console.warn(JSON.stringify({ type: "tos_range_part_retry", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, partNumber, attemptNumber, delayMs, statusCode, code })),
+          partHedged: (partNumber, elapsedMs) => console.warn(JSON.stringify({ type: "tos_archive_part_hedged", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, partNumber, elapsedMs })),
           sourcePartRead: (partNumber, bytes, elapsedMs) => console.info(JSON.stringify({ type: "tos_archive_source_part_read", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, partNumber, bytes, elapsedMs })),
           targetPartUploaded: (partNumber, bytes, elapsedMs, requestId) => console.info(JSON.stringify({ type: "tos_archive_target_part_uploaded", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempt, partNumber, bytes, elapsedMs, requestId })),
           checkpoint: (state) => { saveCheckpoint({ strategy: "stream_multipart", tosUploadId: state.uploadId, sourceSize: state.sourceSize, contentType: state.contentType, parts: state.parts }); },
@@ -562,6 +582,14 @@ const reconcileArchives = async () => {
   const tasks = users.recoverableMediaTasks(now + 5 * 60 * 1000, now - 30 * 60 * 1000, 20);
   for (const task of tasks) await enqueueArchiveRecovery(task);
   const sourceRecoveries = new Set(tasks.map((task) => task.id));
+  const exhaustedTimeouts = users.recoverableTimedOutMultipartTasks(now + 5 * 60 * 1000, config.tosArchivePartSize, 20);
+  for (const task of exhaustedTimeouts) {
+    if (sourceRecoveries.has(task.id)) continue;
+    if (await enqueueArchiveRecovery(task)) {
+      sourceRecoveries.add(task.id);
+      console.warn(JSON.stringify({ type: "tos_exhausted_timeout_recovery_queued", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId }));
+    }
+  }
   const stored = users.recoverableStoredMediaTasks(now - 30 * 24 * 60 * 60 * 1000, now - 30 * 60 * 1000, 20);
   for (const task of stored) {
     if (!task.ownerId || sourceRecoveries.has(task.id)) continue;

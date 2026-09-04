@@ -32,6 +32,8 @@ describe("publicTask media exposure", () => {
     expect(task.mediaSource).toBeUndefined();
     expect(task.downloadUrl).toBeUndefined();
     expect(task.immediateDownloadUrl).toBe("/api/generations/task-1/download/temporary");
+    expect(task.temporaryOriginalStatus).toBe("ready");
+    expect(task.temporaryOriginalExpiresAt).toBeGreaterThan(Date.now());
     expect(task.originalDownloadStatus).toBe("archiving");
     expect(task.originalArchiveStatus).toBe("archiving");
     expect(task.previewStatus).toBe("processing");
@@ -58,6 +60,8 @@ describe("publicTask media exposure", () => {
     expect(task.mediaSource).toBeUndefined();
     expect(task.downloadUrl).toBeUndefined();
     expect(task.immediateDownloadUrl).toBeUndefined();
+    expect(task.temporaryOriginalStatus).toBe("expired");
+    expect(task.temporaryOriginalExpiresAt).toBeUndefined();
     expect(task.originalDownloadStatus).toBe("unavailable");
   });
 
@@ -67,7 +71,8 @@ describe("publicTask media exposure", () => {
     expect(task.caseId).toBe("task-1");
     expect(task.videoUrl).toBe("/api/generations/task-1/media?rev=3");
     expect(task.downloadUrl).toBe("/api/generations/task-1/download?rev=3");
-    expect(task.immediateDownloadUrl).toBe("/api/generations/task-1/download/temporary");
+    expect(task.immediateDownloadUrl).toBeUndefined();
+    expect(task.temporaryOriginalStatus).toBe("ready");
     expect(task.originalDownloadStatus).toBe("ready");
     expect(task.originalArchiveStatus).toBe("ready");
     expect(task.previewStatus).toBe("ready");
@@ -84,6 +89,7 @@ describe("publicTask media exposure", () => {
     expect(task.videoUrl).toBeUndefined();
     expect(task.downloadUrl).toBeUndefined();
     expect(task.immediateDownloadUrl).toBe("/api/generations/task-1/download/temporary");
+    expect(task.temporaryOriginalStatus).toBe("ready");
     expect(task.originalDownloadStatus).toBe("archiving");
     expect(task.originalArchiveStatus).toBe("archiving");
     expect(task.posterUrl).toBeUndefined();
@@ -101,6 +107,7 @@ describe("publicTask media exposure", () => {
     expect(task.immediateDownloadUrl).toBe("/api/generations/task-1/download/temporary");
     expect(task.originalDownloadStatus).toBe("archiving");
     expect(task.temporaryVideoUrl).toBeUndefined();
+    expect(task.temporaryOriginalStatus).toBe("ready");
     expect(task.mediaSource).toBe("tos");
     expect(task.previewStatus).toBe("ready");
   });
@@ -110,9 +117,9 @@ describe("publicTask media exposure", () => {
 
     expect(task.mediaStatus).toBe("ready");
     expect(task.downloadUrl).toBe("/api/generations/task-1/download?rev=3");
-    expect(task.immediateDownloadUrl).toBe("/api/generations/task-1/download/temporary");
+    expect(task.immediateDownloadUrl).toBeUndefined();
     expect(task.videoUrl).toBeUndefined();
-    expect(task.temporaryVideoUrl).toBe("https://provider.example/temporary.mp4?secret=1");
+    expect(task.temporaryVideoUrl).toBeUndefined();
     expect(task.originalArchiveStatus).toBe("ready");
     expect(task.previewStatus).toBe("processing");
   });
@@ -125,6 +132,7 @@ describe("publicTask media exposure", () => {
     expect(task.posterUrl).toBeUndefined();
     expect(task.posterStatus).toBe("unavailable");
     expect(task.temporaryVideoUrl).toBeUndefined();
+    expect(task.temporaryOriginalStatus).toBe("unavailable");
   });
 
   it("does not advertise a poster route until the poster object is verified", () => {

@@ -393,6 +393,7 @@ export type RangedArchiveObserver = {
   resumed?: (uploadId: string, skippedParts: number) => void;
   listPartsDegraded?: (uploadId: string, statusCode?: number, code?: string) => void;
   partRetry?: (partNumber: number, attempt: number, delayMs: number, statusCode?: number, code?: string) => void;
+  partHedged?: (partNumber: number, elapsedMs: number) => void;
   sourcePartRead?: (partNumber: number, bytes: number, elapsedMs: number) => void;
   targetPartUploaded?: (partNumber: number, bytes: number, elapsedMs: number, requestId?: string) => void;
 };
@@ -408,6 +409,63 @@ const archiveHttpError = (message: string, statusCode: number, archiveStage: Tos
   error.statusCode = statusCode;
   error.requestId = requestId;
   return error;
+};
+
+type ArchivePartFetch = (url: string, init: RequestInit) => Promise<Response>;
+
+/** Hedge slow cross-region UploadPart requests without waiting for the generic 180s upload deadline. */
+export const uploadArchivePart = async ({
+  sign,
+  body,
+  timeoutMs = config.tosArchivePartRequestTimeoutMs,
+  hedgeDelayMs = config.tosArchivePartHedgeDelayMs,
+  fetcher = (url, init) => fetch(url, init),
+  onHedge,
+}: {
+  sign: () => string;
+  body: ArrayBuffer;
+  timeoutMs?: number;
+  hedgeDelayMs?: number;
+  fetcher?: ArchivePartFetch;
+  onHedge?: (elapsedMs: number) => void;
+}) => {
+  const startedAt = Date.now();
+  const controllers = [new AbortController(), new AbortController()];
+  const request = async (controller: AbortController) => {
+    const response = await fetcher(sign(), {
+      method: "PUT",
+      body,
+      headers: { "content-length": String(body.byteLength) },
+      signal: controller.signal,
+    });
+    const requestId = response.headers.get("x-tos-request-id") ?? undefined;
+    if (!response.ok) throw archiveHttpError(`TOS 分片上传失败 (${response.status})`, response.status, "tos_upload_part", requestId);
+    const eTag = (response.headers.get("etag") ?? "").replace(/^"|"$/g, "");
+    if (!eTag) throw withTosArchiveStage(new Error("TOS 分片上传缺少 ETag"), "tos_upload_part");
+    return { eTag, requestId, elapsedMs: Date.now() - startedAt };
+  };
+  const deadline = setTimeout(() => controllers.forEach((controller) => controller.abort()), timeoutMs);
+  let hedgeTimer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const primary = request(controllers[0]!);
+    const first = await Promise.race([
+      primary.then((value) => ({ kind: "done" as const, value }), (error) => ({ kind: "failed" as const, error })),
+      new Promise<{ kind: "hedge" }>((resolve) => { hedgeTimer = setTimeout(() => resolve({ kind: "hedge" }), Math.min(hedgeDelayMs, Math.max(1, timeoutMs - 1))); }),
+    ]);
+    if (first.kind === "done") return first.value;
+    if (first.kind === "failed") throw first.error;
+    onHedge?.(Date.now() - startedAt);
+    try {
+      return await Promise.any([primary, request(controllers[1]!)]);
+    } catch (error) {
+      if (error instanceof AggregateError) throw error.errors.at(-1) ?? error;
+      throw error;
+    }
+  } finally {
+    if (hedgeTimer) clearTimeout(hedgeTimer);
+    clearTimeout(deadline);
+    controllers.forEach((controller) => controller.abort());
+  }
 };
 
 export const listPartsSigningInput = (bucket: string, key: string, uploadId: string, marker?: number) => ({
@@ -565,7 +623,7 @@ export const rangedObjectFromUrl = async (
   try {
     probe = await withMediaSourceRead("archive", async () => {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), config.tosUploadRequestTimeoutMs);
+      const timer = setTimeout(() => controller.abort(), config.tosArchivePartRequestTimeoutMs);
       try { return await fetch(url, { headers: { range: "bytes=0-0" }, signal: controller.signal }); }
       finally { clearTimeout(timer); }
     });
@@ -580,7 +638,7 @@ export const rangedObjectFromUrl = async (
   const ranges = rangedSourceParts(totalSize, partSize);
   const partCount = ranges.length;
   const workerCount = Math.min(Math.max(1, concurrency), partCount);
-  const partDeadlineMs = config.tosUploadRequestTimeoutMs;
+  const sourcePartDeadlineMs = config.tosArchivePartRequestTimeoutMs;
   let uploadId = checkpoint.uploadId ?? "";
   let knownParts = (checkpoint.parts ?? []).filter((part) => Number.isSafeInteger(part.partNumber) && part.partNumber >= 1 && part.partNumber <= partCount && Boolean(part.eTag));
   if (uploadId && checkpoint.sourceSize && checkpoint.sourceSize !== totalSize) {
@@ -630,7 +688,7 @@ export const rangedObjectFromUrl = async (
         const sourceResult = await withMediaSourceRead("archive", async () => {
           const sourceStartedAt = Date.now();
           const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), partDeadlineMs);
+          const timer = setTimeout(() => controller.abort(), sourcePartDeadlineMs);
           try {
             const source = await fetch(url, { headers: { range: `bytes=${start}-${end}` }, signal: controller.signal });
             if (source.status !== 206) throw archiveHttpError(`上游 Range 分片读取失败 (${source.status})`, source.status, "source_read", source.headers.get("x-request-id") ?? undefined);
@@ -645,20 +703,16 @@ export const rangedObjectFromUrl = async (
         throw withTosArchiveStage(error, "source_read");
       }
       let eTag = "";
-      const uploadBody = Uint8Array.from(body);
+      const uploadBody = body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer;
       for (let uploadAttempt = 1; uploadAttempt <= 3; uploadAttempt += 1) {
-        const targetStartedAt = Date.now();
-        const targetController = new AbortController();
-        const targetTimer = setTimeout(() => targetController.abort(), partDeadlineMs);
         try {
-          const target = await fetch(signUploadPart(key, uploadId, partNumber), {
-            method: "PUT", body: uploadBody, headers: { "content-length": String(uploadBody.byteLength) }, signal: targetController.signal,
+          const target = await uploadArchivePart({
+            sign: () => signUploadPart(key, uploadId, partNumber),
+            body: uploadBody,
+            onHedge: (elapsedMs) => observer.partHedged?.(partNumber, elapsedMs),
           });
-          const requestId = target.headers.get("x-tos-request-id") ?? undefined;
-          if (!target.ok) throw archiveHttpError(`TOS 分片上传失败 (${target.status})`, target.status, "tos_upload_part", requestId);
-          eTag = (target.headers.get("etag") ?? "").replace(/^"|"$/g, "");
-          if (!eTag) throw withTosArchiveStage(new Error("TOS 分片上传缺少 ETag"), "tos_upload_part");
-          observer.targetPartUploaded?.(partNumber, body.byteLength, Date.now() - targetStartedAt, requestId);
+          eTag = target.eTag;
+          observer.targetPartUploaded?.(partNumber, body.byteLength, target.elapsedMs, target.requestId);
           break;
         } catch (error) {
           if (uploadAttempt >= 3 || !isRetryableArchivePartFailure(error)) throw withTosArchiveStage(error, "tos_upload_part");
@@ -667,7 +721,7 @@ export const rangedObjectFromUrl = async (
           const code = String((error as { code?: string; name?: string }).code ?? (error as { name?: string }).name ?? "") || undefined;
           observer.partRetry?.(partNumber, uploadAttempt + 1, delayMs, statusCode, code);
           await new Promise((resolve) => setTimeout(resolve, delayMs));
-        } finally { clearTimeout(targetTimer); }
+        }
       }
       completed.set(partNumber, { partNumber, eTag });
       transferred += body.byteLength;
