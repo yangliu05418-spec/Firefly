@@ -5,7 +5,7 @@ import { config } from "./config.js";
 import { users } from "./store.js";
 import { archiveQueue, assetQueue, mediaQueue, previewQueue, readTask, saveTask, uploadFinalizationQueue } from "./redis.js";
 import { abortMultipartUpload, createPoster, deleteObject, fetchObjectFromUrl, optimizePlaybackObject, outputObjectKey, posterObjectKey, previewObjectKey, rangedObjectFromUrl, TosFetchPendingError, verifyProgressiveMp4, verifyStoredObject } from "./tos.js";
-import { MAX_MEDIA_RECOVERY_ATTEMPTS } from "./db.js";
+import { MAX_MEDIA_RECOVERY_ATTEMPTS, MAX_MEDIA_TIMEOUT_RECOVERY_ATTEMPTS } from "./db.js";
 import { transcodePreview, transcodePreviewFromUrl } from "./preview-transcode.js";
 import { closeWorkersWithin } from "./shutdown.js";
 import { AssetCreateUnknownError, AssetUploadPendingError, markAssetIngestFailed, registerQueuedAsset } from "./asset-ingest.js";
@@ -538,7 +538,7 @@ const handleArchiveFailure = async (job: Job | undefined, error: Error) => {
   if (!job.data.existingObjectOnly && mediaAttempts < MAX_MEDIA_RECOVERY_ATTEMPTS) {
     await enqueueArchiveRecovery(task, 60_000).catch((queueError) => console.warn(JSON.stringify({ type: "tos_recovery_queue_failed", at: new Date().toISOString(), taskId: task.id, code: (queueError as { code?: string }).code ?? "unknown" })));
   } else {
-    console.warn(JSON.stringify({ type: "tos_recovery_exhausted", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempts: mediaAttempts, maxAttempts: MAX_MEDIA_RECOVERY_ATTEMPTS }));
+    console.warn(JSON.stringify({ type: "tos_recovery_exhausted", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, attempts: mediaAttempts, maxAttempts: tosArchiveErrorCode(error) === "TOS_REQUEST_TIMEOUT" ? MAX_MEDIA_TIMEOUT_RECOVERY_ATTEMPTS : MAX_MEDIA_RECOVERY_ATTEMPTS }));
   }
 };
 
@@ -582,7 +582,7 @@ const reconcileArchives = async () => {
   const tasks = users.recoverableMediaTasks(now + 5 * 60 * 1000, now - 30 * 60 * 1000, 20);
   for (const task of tasks) await enqueueArchiveRecovery(task);
   const sourceRecoveries = new Set(tasks.map((task) => task.id));
-  const exhaustedTimeouts = users.recoverableTimedOutMultipartTasks(now + 5 * 60 * 1000, config.tosArchivePartSize, 20);
+  const exhaustedTimeouts = users.recoverableTimedOutMultipartTasks(now + 5 * 60 * 1000, config.tosArchivePartSize, now - 5 * 60 * 1000, 20);
   for (const task of exhaustedTimeouts) {
     if (sourceRecoveries.has(task.id)) continue;
     if (await enqueueArchiveRecovery(task)) {

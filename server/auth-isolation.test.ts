@@ -67,11 +67,13 @@ describe("enterprise identity and isolation", () => {
     store.saveTask(task({ id: "task-running", ownerId: owner.id, visibility: "private", status: "running" }));
     expect(store.countActiveTasksForUser(owner.id)).toBe(1);
     store.upsertMedia({ id: "media-output", ownerId: owner.id, taskId: storedTask.id, kind: "output", objectKey: "outputs/aa/result.mp4", status: "ready", fileName: "result.mp4", contentType: "video/mp4", size: 1024, etag: "etag", createdAt: Date.now(), updatedAt: Date.now() });
+    store.upsertMedia({ id: "media-poster", ownerId: owner.id, taskId: storedTask.id, kind: "poster", objectKey: "posters/aa/poster.webp", status: "ready", fileName: "poster.webp", contentType: "image/webp", size: 128, etag: "poster-etag", createdAt: Date.now(), updatedAt: Date.now() });
     store.close();
     store = openStore(databasePath);
     expect(store.listTasksForUser(owner.id).map((item) => item.id)).toContain(storedTask.id);
     expect(store.listTasksForUser(other.id).map((item) => item.id)).not.toContain(storedTask.id);
     expect(store.readTaskMedia(storedTask.id, "output")?.objectKey).toBe("outputs/aa/result.mp4");
+    expect([...store.readTaskMediaPage([storedTask.id]).keys()].sort()).toEqual([`${storedTask.id}:output`, `${storedTask.id}:poster`]);
     expect(store.softDeleteTask(storedTask.id, other.id)).toBe(false);
     expect(store.softDeleteTask(storedTask.id, owner.id)).toBe(true);
     expect(store.readTask(storedTask.id)).toBeNull();
@@ -352,8 +354,13 @@ describe("enterprise identity and isolation", () => {
     expect(recoverable.map((item) => item.id)).toContain("trace-1");
     store.saveTask({ ...loaded, mediaAttempts: 3, updatedAt: Date.now() });
     expect(store.recoverableMediaTasks(now + 5 * 60_000, now - 60_000, 20).map((item) => item.id)).not.toContain("trace-1");
-    store.saveMediaArchiveCheckpoint({ taskId: "trace-1", strategy: "stream_multipart", tosUploadId: "tos-upload-legacy", objectKey: "outputs/trace-1.mp4", sourceSize: 20_000_000, contentType: "video/mp4", partSize: 16 * 1024 * 1024, parts: [{ partNumber: 2, eTag: "etag-2" }], attemptCount: 3, lastErrorCode: "TOS_REQUEST_TIMEOUT", createdAt: now, updatedAt: now, expiresAt: now + 86_400_000 });
-    expect(store.recoverableTimedOutMultipartTasks(now + 5 * 60_000, 5 * 1024 * 1024, 20).map((item) => item.id)).toContain("trace-1");
+    store.saveMediaArchiveCheckpoint({ taskId: "trace-1", strategy: "stream_multipart", tosUploadId: "tos-upload-legacy", objectKey: "outputs/trace-1.mp4", sourceSize: 20_000_000, contentType: "video/mp4", partSize: 16 * 1024 * 1024, parts: [{ partNumber: 2, eTag: "etag-2" }], attemptCount: 3, lastErrorCode: "TOS_REQUEST_TIMEOUT", createdAt: now, updatedAt: now - 6 * 60_000, expiresAt: now + 86_400_000 });
+    expect(store.recoverableTimedOutMultipartTasks(now + 5 * 60_000, 5 * 1024 * 1024, now - 5 * 60_000, 20).map((item) => item.id)).toContain("trace-1");
+    store.saveTask({ ...store.readTask("trace-1")!, mediaAttempts: 4, updatedAt: Date.now() });
+    store.saveMediaArchiveCheckpoint({ ...store.readMediaArchiveCheckpoint("trace-1")!, partSize: 5 * 1024 * 1024, updatedAt: now - 6 * 60_000 });
+    expect(store.recoverableTimedOutMultipartTasks(now + 5 * 60_000, 5 * 1024 * 1024, now - 5 * 60_000, 20).map((item) => item.id)).toContain("trace-1");
+    store.saveTask({ ...store.readTask("trace-1")!, mediaAttempts: 6, updatedAt: Date.now() });
+    expect(store.recoverableTimedOutMultipartTasks(now + 5 * 60_000, 5 * 1024 * 1024, now - 5 * 60_000, 20).map((item) => item.id)).not.toContain("trace-1");
     store.close();
   });
 

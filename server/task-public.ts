@@ -1,6 +1,7 @@
 import type { StoredTask } from "./db.js";
 import { classifyProviderError, providerPublicMessage } from "./provider.js";
 import type { PublicLocalMediaDescriptor } from "./local-media-public.js";
+import { temporaryOriginalStatus as resolveTemporaryOriginalStatus } from "./download-contract.js";
 
 const publicFailure = (error: string | undefined, errorCode: string | undefined) => {
   if (!error) return undefined;
@@ -30,11 +31,7 @@ export const publicTask = (
 ) => {
   const revision = task.mediaRevision ?? 0;
   const downloadable = task.status === "succeeded" && task.mediaStatus === "ready" && stableOutputReady;
-  const temporaryOriginalStatus = task.status !== "succeeded" || !sourceVideoUrl
-    ? "unavailable" as const
-    : sourceVideoExpiresAt && sourceVideoExpiresAt <= Date.now()
-      ? "expired" as const
-      : "ready" as const;
+  const temporaryOriginalStatus = resolveTemporaryOriginalStatus({ status: task.status, sourceVideoUrl, sourceVideoExpiresAt });
   const temporaryOriginalAvailable = temporaryOriginalStatus === "ready";
   const previewable = task.status === "succeeded" && (stablePreviewReady || (outputIsPreview && downloadable));
   const previewStatus = previewable

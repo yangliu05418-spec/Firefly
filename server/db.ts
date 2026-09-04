@@ -80,6 +80,8 @@ export type MediaArchiveCheckpoint = {
 
 /** 归档自动恢复轮次上限：达到后停止重试，保留临时源可播放（fallback 分层保护） */
 export const MAX_MEDIA_RECOVERY_ATTEMPTS = 3;
+/** Multipart超时允许额外的有界恢复轮次；每轮由恢复扫描冷却后触发。 */
+export const MAX_MEDIA_TIMEOUT_RECOVERY_ATTEMPTS = 6;
 
 export type MediaObject = {
   id: string;
@@ -966,7 +968,7 @@ export class UserStore {
     return rows.map((row) => mapTask(row)!);
   }
 
-  recoverableTimedOutMultipartTasks(minimumSourceExpiry: number, targetPartSize: number, limit = 20) {
+  recoverableTimedOutMultipartTasks(minimumSourceExpiry: number, targetPartSize: number, staleBefore: number, limit = 20) {
     const rows = this.database.prepare(`
       SELECT generation_tasks.* FROM generation_tasks
       INNER JOIN media_archive_checkpoints ON media_archive_checkpoints.task_id = generation_tasks.id
@@ -975,12 +977,14 @@ export class UserStore {
         AND generation_tasks.source_video_url IS NOT NULL
         AND generation_tasks.source_video_expires_at > ?
         AND generation_tasks.media_attempts >= ?
+        AND generation_tasks.media_attempts < ?
         AND media_archive_checkpoints.strategy = 'stream_multipart'
         AND media_archive_checkpoints.last_error_code = 'TOS_REQUEST_TIMEOUT'
-        AND media_archive_checkpoints.part_size > ?
+        AND media_archive_checkpoints.part_size >= ?
+        AND media_archive_checkpoints.updated_at < ?
         AND media_archive_checkpoints.expires_at > ?
       ORDER BY generation_tasks.updated_at ASC LIMIT ?
-    `).all(minimumSourceExpiry, MAX_MEDIA_RECOVERY_ATTEMPTS, targetPartSize, Date.now(), limit) as TaskRow[];
+    `).all(minimumSourceExpiry, MAX_MEDIA_RECOVERY_ATTEMPTS, MAX_MEDIA_TIMEOUT_RECOVERY_ATTEMPTS, targetPartSize, staleBefore, Date.now(), limit) as TaskRow[];
     return rows.map((row) => mapTask(row)!);
   }
 
@@ -1103,6 +1107,24 @@ export class UserStore {
     return this.database.prepare("DELETE FROM upload_sessions WHERE expires_at < ?").run(now).changes;
   }
   readTaskMedia(taskId: string, kind: "output" | "preview" | "poster") { return mapMedia(this.database.prepare("SELECT * FROM media_objects WHERE task_id = ? AND kind = ? AND status = 'ready' ORDER BY created_at DESC LIMIT 1").get(taskId, kind) as MediaRow | undefined); }
+
+  /** Loads the latest public media variants for a task page in one SQLite query. */
+  readTaskMediaPage(taskIds: string[]) {
+    const result = new Map<string, MediaObject>();
+    if (!taskIds.length) return result;
+    const placeholders = taskIds.map(() => "?").join(",");
+    const rows = this.database.prepare(`
+      SELECT * FROM media_objects
+      WHERE task_id IN (${placeholders}) AND kind IN ('output', 'preview', 'poster') AND status = 'ready'
+      ORDER BY created_at DESC, id DESC
+    `).all(...taskIds) as MediaRow[];
+    for (const row of rows) {
+      const media = mapMedia(row)!;
+      const key = `${media.taskId}:${media.kind}`;
+      if (!result.has(key)) result.set(key, media);
+    }
+    return result;
+  }
 
   commitTaskMediaIfActive(taskId: string, media: MediaObject, finalizeOutput = false) {
     return this.database.transaction(() => {
