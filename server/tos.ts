@@ -392,6 +392,8 @@ export type RangedArchiveObserver = {
   resumed?: (uploadId: string, skippedParts: number) => void;
   listPartsDegraded?: (uploadId: string, statusCode?: number, code?: string) => void;
   partRetry?: (partNumber: number, attempt: number, delayMs: number, statusCode?: number, code?: string) => void;
+  sourcePartRead?: (partNumber: number, bytes: number, elapsedMs: number) => void;
+  targetPartUploaded?: (partNumber: number, bytes: number, elapsedMs: number, requestId?: string) => void;
 };
 
 export const isRetryableArchivePartFailure = (error: unknown) => {
@@ -620,6 +622,7 @@ export const rangedObjectFromUrl = async (
       const { partNumber, start, end, size: expectedBytes } = ranges[index]!;
       if (completed.has(partNumber)) return transferNext();
       let body: Uint8Array;
+      const sourceStartedAt = Date.now();
       const sourceController = new AbortController();
       const sourceTimer = setTimeout(() => sourceController.abort(), partDeadlineMs);
       try {
@@ -627,12 +630,14 @@ export const rangedObjectFromUrl = async (
         if (source.status !== 206) throw archiveHttpError(`上游 Range 分片读取失败 (${source.status})`, source.status, "source_read", source.headers.get("x-request-id") ?? undefined);
         body = new Uint8Array(await source.arrayBuffer());
         if (body.byteLength !== expectedBytes) throw new Error(`上游 Range 分片大小不一致 (${body.byteLength}/${expectedBytes})`);
+        observer.sourcePartRead?.(partNumber, body.byteLength, Date.now() - sourceStartedAt);
       } catch (error) {
         throw withTosArchiveStage(error, "source_read");
       } finally { clearTimeout(sourceTimer); }
-      const uploadBody = Uint8Array.from(body);
       let eTag = "";
+      const uploadBody = Uint8Array.from(body);
       for (let uploadAttempt = 1; uploadAttempt <= 3; uploadAttempt += 1) {
+        const targetStartedAt = Date.now();
         const targetController = new AbortController();
         const targetTimer = setTimeout(() => targetController.abort(), partDeadlineMs);
         try {
@@ -643,6 +648,7 @@ export const rangedObjectFromUrl = async (
           if (!target.ok) throw archiveHttpError(`TOS 分片上传失败 (${target.status})`, target.status, "tos_upload_part", requestId);
           eTag = (target.headers.get("etag") ?? "").replace(/^"|"$/g, "");
           if (!eTag) throw withTosArchiveStage(new Error("TOS 分片上传缺少 ETag"), "tos_upload_part");
+          observer.targetPartUploaded?.(partNumber, body.byteLength, Date.now() - targetStartedAt, requestId);
           break;
         } catch (error) {
           if (uploadAttempt >= 3 || !isRetryableArchivePartFailure(error)) throw withTosArchiveStage(error, "tos_upload_part");

@@ -56,15 +56,23 @@ describe("TOS archive latency configuration", () => {
     vi.resetModules();
   });
 
-  it("allows a complete server-side URL fetch polling window by default", async () => {
+  it("uses bounded resumable multipart by default after URL fetch proved slow for ModelArk URLs", async () => {
     delete process.env.TOS_FETCH_DEADLINE_MS;
+    delete process.env.TOS_FETCH_MAX_WAIT_MS;
+    delete process.env.TOS_FETCH_POLL_INTERVAL_MS;
+    delete process.env.TOS_URL_FETCH_ENABLED;
+    delete process.env.TOS_ARCHIVE_PART_SIZE;
+    delete process.env.TOS_ARCHIVE_PART_CONCURRENCY;
     vi.resetModules();
 
     const { config } = await import("./config.js");
 
-    expect(config.tosFetchDeadlineMs).toBe(180_000);
-    expect(config.tosFetchMaxWaitMs).toBe(300_000);
-    expect(config.tosFetchPollIntervalMs).toBe(5_000);
+    expect(config.tosUrlFetchEnabled).toBe(false);
+    expect(config.tosFetchDeadlineMs).toBe(30_000);
+    expect(config.tosFetchMaxWaitMs).toBe(60_000);
+    expect(config.tosFetchPollIntervalMs).toBe(3_000);
+    expect(config.tosArchivePartSize).toBe(8 * 1024 * 1024);
+    expect(config.tosArchivePartConcurrency).toBe(2);
   });
 
   it("keeps the fetch deadline configurable for controlled rollback", async () => {
@@ -74,5 +82,14 @@ describe("TOS archive latency configuration", () => {
     const { config } = await import("./config.js");
 
     expect(config.tosFetchDeadlineMs).toBe(60_000);
+  });
+
+  it("keeps storage-side URL fetch available as an explicit canary", async () => {
+    vi.stubEnv("TOS_URL_FETCH_ENABLED", "true");
+    vi.resetModules();
+
+    const { config } = await import("./config.js");
+
+    expect(config.tosUrlFetchEnabled).toBe(true);
   });
 });

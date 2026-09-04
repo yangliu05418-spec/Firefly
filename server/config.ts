@@ -61,13 +61,18 @@ export const config = {
   tosInputRetentionDays: positiveInt("TOS_INPUT_RETENTION_DAYS", 7),
   tosUploadPartSize: boundedInt("TOS_UPLOAD_PART_SIZE", 16 * 1024 * 1024, 5 * 1024 * 1024, 64 * 1024 * 1024),
   tosUploadConcurrency: boundedInt("TOS_UPLOAD_CONCURRENCY", 3, 1, 6),
-  tosArchiveConcurrency: boundedInt("TOS_ARCHIVE_CONCURRENCY", 3, 1, 6),
+  tosArchiveConcurrency: boundedInt("TOS_ARCHIVE_CONCURRENCY", 2, 1, 6),
+  tosArchivePartSize: boundedInt("TOS_ARCHIVE_PART_SIZE", 8 * 1024 * 1024, 5 * 1024 * 1024, 64 * 1024 * 1024),
+  tosArchivePartConcurrency: boundedInt("TOS_ARCHIVE_PART_CONCURRENCY", 2, 1, 4),
   tosRequestTimeoutMs: positiveInt("TOS_REQUEST_TIMEOUT_MS", 60000),
   tosUploadRequestTimeoutMs: positiveInt("TOS_UPLOAD_REQUEST_TIMEOUT_MS", 180000),
   tosTranscodeDeadlineMs: positiveInt("TOS_TRANSCODE_DEADLINE_MS", 10 * 60 * 1000),
-  tosFetchDeadlineMs: positiveInt("TOS_FETCH_DEADLINE_MS", 180000),
-  tosFetchMaxWaitMs: positiveInt("TOS_FETCH_MAX_WAIT_MS", 300000),
-  tosFetchPollIntervalMs: positiveInt("TOS_FETCH_POLL_INTERVAL_MS", 5000),
+  tosFetchDeadlineMs: positiveInt("TOS_FETCH_DEADLINE_MS", 30000),
+  tosFetchMaxWaitMs: positiveInt("TOS_FETCH_MAX_WAIT_MS", 60000),
+  tosFetchPollIntervalMs: positiveInt("TOS_FETCH_POLL_INTERVAL_MS", 3000),
+  // ModelArk signed URLs can remain in TOS URL Fetch's Running state for
+  // several minutes. Keep this as an operator canary; the production default
+  // uses bounded, resumable Range multipart instead of paying that delay first.
   tosUrlFetchEnabled: (process.env.TOS_URL_FETCH_ENABLED ?? "false").toLowerCase() === "true",
   tosArchiveCheckpointTtlSeconds: positiveInt("TOS_ARCHIVE_CHECKPOINT_TTL_SECONDS", 86400),
   tosSourceStreamTimeoutMs: positiveInt("TOS_SOURCE_STREAM_TIMEOUT_MS", 15 * 60 * 1000),
