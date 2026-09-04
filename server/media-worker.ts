@@ -209,7 +209,7 @@ const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputF
   }
   const strategy = archiveTransferStrategy(checkpoint, data.existingObjectOnly, now, config.tosFetchMaxWaitMs, config.tosUrlFetchEnabled);
   // Keep an existing multipart session on its original geometry. New archives
-  // use the configured larger part size, reducing cross-region round trips.
+  // use the tuned part size so short videos can benefit from parallel ranges.
   const archivePartSize = checkpoint?.strategy === "stream_multipart"
     ? checkpoint.partSize
     : config.tosArchivePartSize;
