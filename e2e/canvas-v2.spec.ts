@@ -473,19 +473,22 @@ test("full-reference accepts prompts beyond the former Firefly character ceiling
   await expect(send).toBeEnabled();
 });
 
-test("an archived preview exposes the protected original download while TOS continues in the background", async ({ page }) => {
+test("an archived preview separates the temporary download from the pending TOS download", async ({ page }) => {
   const taskId = "22222222-2222-4222-8222-222222222222";
   await mockAuthenticatedApi(page, { videoHistory: [{
     id: taskId, caseId: taskId, sessionId: "session-e2e", ownerId: "user-e2e", visibility: "private",
     status: "succeeded", mediaStatus: "archiving", mediaRevision: 1, posterStatus: "processing",
     prompt: "雨夜原片下载验证", model: videoModels[0].id, mode: "omni", ratio: "16:9", resolution: "1080p", duration: 8,
-    videoUrl: `/api/generations/${taskId}/media?rev=1`, downloadUrl: `/api/generations/${taskId}/download?rev=1`,
+    videoUrl: `/api/generations/${taskId}/media?rev=1`,
+    immediateDownloadUrl: `/api/generations/${taskId}/download/temporary`, originalDownloadStatus: "archiving",
     createdAt: Date.now() - 60_000, updatedAt: Date.now(),
   }] });
   await page.goto("/studio");
 
-  await expect(page.getByText("兼容预览已就绪 · 原片可立即下载，系统继续归档")).toBeVisible();
-  await expect(page.getByRole("link", { name: "下载原片" })).toHaveAttribute("href", `/api/generations/${taskId}/download?rev=1`);
+  await expect(page.getByText("可立即下载临时原片；TOS 高速原片正在归档")).toBeVisible();
+  await expect(page.getByRole("link", { name: "立即下载 · 较慢" })).toHaveAttribute("href", `/api/generations/${taskId}/download/temporary`);
+  await expect(page.getByRole("button", { name: "高速下载归档中" })).toBeDisabled();
+  await expect(page.getByRole("link", { name: "高速下载" })).toHaveCount(0);
 });
 
 test("asset archive preserves the selected media view across refresh", async ({ page }) => {
