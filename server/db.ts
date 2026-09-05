@@ -880,8 +880,8 @@ export class UserStore {
     return mapCreationSession(this.database.prepare(`SELECT * FROM creation_sessions WHERE id = ?${includeDeleted ? "" : " AND deleted_at IS NULL"}`).get(id) as CreationSessionRow | undefined);
   }
 
-  listCreationSessions(ownerId: string, limit = 100) {
-    return (this.database.prepare("SELECT * FROM creation_sessions WHERE owner_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT ?").all(ownerId, limit) as CreationSessionRow[])
+  listCreationSessions(ownerId: string, limit = 100, before = Number.MAX_SAFE_INTEGER, beforeId = "\uffff") {
+    return (this.database.prepare("SELECT * FROM creation_sessions WHERE owner_id = ? AND deleted_at IS NULL AND (updated_at < ? OR (updated_at = ? AND id < ?)) ORDER BY updated_at DESC, id DESC LIMIT ?").all(ownerId, before, before, beforeId, limit) as CreationSessionRow[])
       .map((row) => mapCreationSession(row)!);
   }
 
@@ -1164,8 +1164,8 @@ export class UserStore {
     return mapImageGeneration(this.database.prepare(`SELECT * FROM image_generation_tasks WHERE id = ?${includeDeleted ? "" : " AND deleted_at IS NULL"}`).get(id) as ImageGenerationRow | undefined);
   }
 
-  listImageGenerations(ownerId: string, limit = 50) {
-    return (this.database.prepare("SELECT * FROM image_generation_tasks WHERE owner_id = ? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?").all(ownerId, limit) as ImageGenerationRow[])
+  listImageGenerations(ownerId: string, limit = 50, before = Number.MAX_SAFE_INTEGER, beforeId = "\uffff") {
+    return (this.database.prepare("SELECT * FROM image_generation_tasks WHERE owner_id = ? AND deleted_at IS NULL AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT ?").all(ownerId, before, before, beforeId, limit) as ImageGenerationRow[])
       .map((row) => mapImageGeneration(row)!);
   }
 
@@ -1189,8 +1189,8 @@ export class UserStore {
     return { providerMarkerLeak, duplicateBinding, video, image };
   }
 
-  listImageGenerationsForSession(ownerId: string, sessionId: string, limit = 50) {
-    return (this.database.prepare("SELECT * FROM image_generation_tasks WHERE owner_id = ? AND session_id = ? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?").all(ownerId, sessionId, limit) as ImageGenerationRow[])
+  listImageGenerationsForSession(ownerId: string, sessionId: string, limit = 50, before = Number.MAX_SAFE_INTEGER, beforeId = "\uffff") {
+    return (this.database.prepare("SELECT * FROM image_generation_tasks WHERE owner_id = ? AND session_id = ? AND deleted_at IS NULL AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT ?").all(ownerId, sessionId, before, before, beforeId, limit) as ImageGenerationRow[])
       .map((row) => mapImageGeneration(row)!);
   }
 

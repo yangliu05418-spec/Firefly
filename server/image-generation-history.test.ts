@@ -24,6 +24,30 @@ describe("image generation history", () => {
     createdAt, updatedAt: createdAt,
   });
 
+  it("pages all images and sessions across equal timestamps without omissions or owner leaks", () => {
+    const store = freshStore();
+    const owner = store.upsertFromFeishu({ openId: "ou_pages", unionId: "on_pages", tenantKey: "tenant", email: "pages@dokuai.tv", name: "Pages", avatarUrl: "" });
+    const other = store.upsertFromFeishu({ openId: "ou_other_pages", unionId: "on_other_pages", tenantKey: "tenant", email: "otherpages@dokuai.tv", name: "Other", avatarUrl: "" });
+    for (let i = 0; i < 205; i++) {
+      const id = `page-${String(i).padStart(3, "0")}`;
+      store.createCreationSession({ id, ownerId: owner.id, title: id, createdAt: 100, updatedAt: 100 });
+      store.createImageGeneration({ ...makeTask(id, owner.id, 100), sessionId: "page-000" });
+    }
+    store.createImageGeneration(makeTask("other-image", other.id, 100));
+    const first = store.listImageGenerationsForSession(owner.id, "page-000", 100);
+    const second = store.listImageGenerationsForSession(owner.id, "page-000", 100, first.at(-1)!.createdAt, first.at(-1)!.id);
+    const third = store.listImageGenerationsForSession(owner.id, "page-000", 100, second.at(-1)!.createdAt, second.at(-1)!.id);
+    expect([first.length, second.length, third.length]).toEqual([100, 100, 5]);
+    expect(new Set([...first, ...second, ...third].map((item) => item.id)).size).toBe(205);
+    expect(store.listImageGenerations(owner.id, 100, second.at(-1)!.createdAt, second.at(-1)!.id)).toEqual(third);
+    expect(store.listImageGenerationsForSession(other.id, "page-000", 100)).toEqual([]);
+    const sessions = store.listCreationSessions(owner.id);
+    const older = store.listCreationSessions(owner.id, 100, sessions.at(-1)!.updatedAt, sessions.at(-1)!.id);
+    const oldest = store.listCreationSessions(owner.id, 100, older.at(-1)!.updatedAt, older.at(-1)!.id);
+    expect(new Set([...sessions, ...older, ...oldest].map((item) => item.id)).size).toBe(205);
+    store.close();
+  });
+
   it("persists, lists and completes image requests per owner", () => {
     const store = freshStore();
     const owner = store.upsertFromFeishu({ openId: "ou_owner", unionId: "on_owner", tenantKey: "tenant", email: "owner@dokuai.tv", name: "Owner", avatarUrl: "" });
