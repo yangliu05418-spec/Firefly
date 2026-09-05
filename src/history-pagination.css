@@ -1,0 +1,8 @@
+.history-pagination-group { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; padding: 12px 20px 24px; }
+.history-pagination { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px; font-size: 13px; }
+.history-pagination button { border: 1px solid #ffffff24; border-radius: 10px; padding: 9px 16px; color: inherit; background: transparent; cursor: pointer; }
+.history-pagination button:disabled { opacity: .6; cursor: wait; }
+.history-pagination button:focus-visible { outline: 2px solid #badbd3; outline-offset: 3px; }
+.history-pagination span { color: #a5acb6; }
+.conversation + .history-pagination-group { padding-bottom: 300px; }
+.conversation-inner > .task-card, .image-results > .image-result { content-visibility: auto; contain-intrinsic-size: auto 550px; }

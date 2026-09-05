@@ -90,7 +90,11 @@ async function mockAuthenticatedApi(page: Page, options: {
     if (path === "/api/client-events" && request.method() === "POST") return route.fulfill({ status: 204 });
     if (path === "/api/models") return json(route, videoModels);
     if (path === "/api/image-models") return json(route, { Items: imageModels, Ratios: ["16:9", "1:1", "9:16"], DefaultModel: imageModels[0].id });
-    if (path === "/api/creation-sessions" && request.method() === "GET") return json(route, creationSessions);
+    if (path === "/api/creation-sessions" && request.method() === "GET") {
+      const before = Number(url.searchParams.get("beforeUpdatedAt") ?? Number.MAX_SAFE_INTEGER);
+      const beforeId = url.searchParams.get("beforeId") ?? "\uffff";
+      return json(route, [...creationSessions].sort((a, b) => b.updatedAt - a.updatedAt || b.id.localeCompare(a.id)).filter((item) => item.updatedAt < before || item.updatedAt === before && item.id < beforeId).slice(0, Number(url.searchParams.get("limit") ?? 100)));
+    }
     if (path === "/api/creation-sessions" && request.method() === "POST") {
       const body = request.postDataJSON() as { requestId?: string };
       const id = body.requestId ?? `session-e2e-${creationSessions.length + 1}`;
@@ -127,7 +131,9 @@ async function mockAuthenticatedApi(page: Page, options: {
     if (path === "/api/image-generations" && request.method() === "GET") {
       const sessionId = url.searchParams.get("sessionId");
       if (sessionId && options.imageSessionFailures?.includes(sessionId)) return json(route, { error: "image history unavailable" }, 503);
-      return json(route, sessionId ? imageHistory.filter((item) => item.sessionId === sessionId) : imageHistory);
+      const before = Number(url.searchParams.get("beforeCreatedAt") ?? Number.MAX_SAFE_INTEGER);
+      const beforeId = url.searchParams.get("beforeId") ?? "\uffff";
+      return json(route, imageHistory.filter((item) => (!sessionId || item.sessionId === sessionId) && (Number(item.createdAt) < before || Number(item.createdAt) === before && String(item.id) < beforeId)).sort((a, b) => Number(b.createdAt) - Number(a.createdAt) || String(b.id).localeCompare(String(a.id))).slice(0, Number(url.searchParams.get("limit") ?? 50)));
     }
     if (/^\/api\/image-generations\/[^/]+$/.test(path) && request.method() === "GET") {
       const task = imageHistory.find((item) => item.id === decodeURIComponent(path.split("/").at(-1)!));
@@ -857,15 +863,51 @@ test("session switching uses the isolated cached snapshot when one history feed 
       { id: "image-a", sessionId: "session-a", modelName: "Image", ratio: "1:1", resolution: "1024", prompt: "只属于会话 A", items: [], createdAt: now, status: "failed", error: "fixture" },
       { id: "image-b", sessionId: "session-b", modelName: "Image", ratio: "1:1", resolution: "1024", prompt: "只属于会话 B", items: [], createdAt: now - 1, status: "failed", error: "fixture" },
     ],
-    imageSessionFailures: ["session-b"],
   });
-  await page.goto("/studio/sessions/session-a");
+  await page.goto("/studio/sessions/session-b");
+  await expect(page.getByText("「只属于会话 B」")).toBeVisible();
+  await page.locator(".session-item").filter({ hasText: "会话 A" }).locator(".session-item__main").click();
   await expect(page.getByText("「只属于会话 A」")).toBeVisible();
+  await page.route("**/api/image-generations?**", (route) => new URL(route.request().url()).searchParams.get("sessionId") === "session-b" ? json(route, { error: "unavailable" }, 503) : route.fallback());
 
   await page.locator(".session-item").filter({ hasText: "会话 B" }).locator(".session-item__main").click();
   await expect(page.getByText("「只属于会话 B」")).toBeVisible();
   await expect(page.getByText("「只属于会话 A」")).toHaveCount(0);
   await expect(page.getByText("同步暂时中断")).toBeVisible();
+});
+
+test("old sessions open by exact id and image history loads additional pages on demand", async ({ page }) => {
+  const sessions = Array.from({ length: 105 }, (_, i) => ({ id: `session-${i}`, title: `会话 ${i}`, createdAt: 1000 - i, updatedAt: 1000 - i }));
+  const images = Array.from({ length: 105 }, (_, i) => ({ id: `image-${String(i).padStart(3, "0")}`, sessionId: "session-104", modelName: "Image", ratio: "1:1", resolution: "1024", prompt: `历史图片 ${i}`, items: [], createdAt: 1000 - i, status: "failed", error: "fixture" }));
+  await mockAuthenticatedApi(page, { creationSessions: sessions, imageHistory: images });
+  let olderRequests = 0;
+  page.on("request", (request) => { if (request.url().includes("/api/image-generations?") && request.url().includes("beforeCreatedAt")) olderRequests++; });
+  await page.goto("/studio/sessions/session-104");
+  await expect(page.locator(".session-item.is-active")).toContainText("会话 104");
+  await expect(page.locator(".image-result")).toHaveCount(100);
+  expect(olderRequests).toBe(0);
+  await page.getByRole("button", { name: "加载更多图片记录", exact: true }).click();
+  await expect(page.locator(".image-result")).toHaveCount(105);
+  expect(olderRequests).toBe(1);
+  await page.getByRole("button", { name: "加载更多会话", exact: true }).click();
+  await expect(page.locator(".session-item")).toHaveCount(105);
+  await expect(page).toHaveURL(/session-104$/);
+});
+
+test("a delayed history or capacity feed does not block Composer or erase its draft", async ({ page }) => {
+  await mockAuthenticatedApi(page, { imageHistory: [{ id: "fast-image", sessionId: "session-e2e", modelName: "Image", ratio: "1:1", resolution: "1024", prompt: "图片记录先显示", items: [], createdAt: 10, status: "failed", error: "fixture" }] });
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("**/api/generations?**", async (route) => { await gate; await route.fallback(); });
+  await page.route("**/api/generation-capacity", async (route) => { await gate; await route.fallback(); });
+  await page.goto("/studio/sessions/session-e2e");
+  const editor = page.getByRole("textbox", { name: "创作提示词" });
+  await expect(editor).toBeVisible();
+  await expect(page.getByText("「图片记录先显示」")).toBeVisible();
+  await editor.fill("历史未完成时输入的草稿");
+  release();
+  await expect(page.getByText("正在载入创作记录…")).toHaveCount(0);
+  await expect(editor).toContainText("历史未完成时输入的草稿");
 });
 
 test("a lost video admission response reconciles by client id without creating a duplicate", async ({ page }) => {

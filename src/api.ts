@@ -1,12 +1,14 @@
 import { prepareImageForUpload } from "./image-normalize";
 import type { LocalMediaDescriptor } from "./types";
 import { seedUploadedLocalMedia } from "./local-media-client";
+import { putUploadPart } from "./upload-transport";
 
 export const AUTH_EXPIRED_EVENT = "firefly:auth-expired";
 const AUTH_CHANNEL = "firefly-auth";
 export type SignedOutReason = "expired" | "explicit";
 
 export const notifySignedOut = (reason: SignedOutReason = "expired") => {
+  resumableUploads = new WeakMap();
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent<SignedOutReason>(AUTH_EXPIRED_EVENT, { detail: reason }));
   if (typeof BroadcastChannel === "undefined") return;
@@ -150,22 +152,31 @@ async function uploadChunk(uploadId: string, file: File, offset: number, chunkSi
 
 type SignedPart = { partNumber: number; url: string };
 
-async function uploadTosPart(uploadId: string, initial: SignedPart, blob: Blob, signal?: AbortSignal) {
+async function uploadTosPart(uploadId: string, initial: SignedPart, blob: Blob, signal?: AbortSignal, onProgress?: (bytes: number) => void) {
   let signed = initial;
   let lastError: Error | undefined;
   for (let attempt = 0; attempt < 4; attempt++) {
     if (attempt) await wait([1000, 2000, 4000][attempt - 1], signal);
-    let response: Response;
-    try { response = await tosPartRequests.use(() => fetchWithTimeout(signed.url, { method: "PUT", body: blob }, 180_000, signal), signal); }
-    catch (error) { lastError = error instanceof Error ? error : new Error("TOS 分片上传失败"); if (attempt === 3) throw lastError; continue; }
+    let response: { ok: boolean; status: number; eTag: string };
+    try { response = await tosPartRequests.use(() => putUploadPart(signed.url, blob, signal, onProgress), signal); }
+    catch (error) {
+      if (signal?.aborted) throw signal.reason;
+      lastError = error instanceof Error ? error : new Error("TOS 分片上传失败");
+      // The PUT may have committed even when its response was lost.
+      const received = await api.get<{ parts: { partNumber: number; eTag: string }[] }>(`/api/uploads/${uploadId}/parts`, { signal }).catch(() => null);
+      const part = received?.parts.find((item) => item.partNumber === signed.partNumber);
+      if (part) return part;
+      if (attempt === 3) throw lastError;
+      continue;
+    }
     if (response.ok) {
-      const eTag = (response.headers.get("etag") ?? "").replace(/^"|"$/g, "");
+      const eTag = response.eTag;
       if (!eTag) throw new Error("TOS 未返回 ETag，请检查 Bucket CORS 的 Expose Headers");
       return { partNumber: signed.partNumber, eTag };
     }
     lastError = new Error(`TOS 分片上传失败 (${response.status})`);
     if ([401, 403].includes(response.status) && attempt < 3) {
-      const refreshed = await api.post<{ parts: SignedPart[] }>(`/api/uploads/${uploadId}/parts/sign`, { partNumbers: [signed.partNumber] });
+      const refreshed = await api.post<{ parts: SignedPart[] }>(`/api/uploads/${uploadId}/parts/sign`, { partNumbers: [signed.partNumber] }, { signal });
       signed = refreshed.parts[0] ?? signed;
       continue;
     }
@@ -179,6 +190,9 @@ export type UploadedFile = { id: string; uploadId?: string; name: string; type: 
 type UploadCompletionResponse = UploadedFile & { state?: "processing" | "ready" };
 export type UploadProgressPhase = "preparing" | "uploading" | "verifying" | "ready";
 export type UploadFileOptions = { signal?: AbortSignal; onTransportComplete?: (upload: UploadedFile) => void; onPreparedPreview?: (blob: Blob) => void; waitForReady?: boolean };
+type UploadInit = { id: string; chunkSize: number; direct?: boolean; concurrency?: number; parts?: SignedPart[]; localMedia?: LocalMediaDescriptor };
+// File identity prevents accidentally resuming another file with the same name and size.
+let resumableUploads = new WeakMap<File, { init: UploadInit; prepared: { file: File; normalized: boolean; previewBlob?: Blob } }>();
 
 const finalizeUpload = async (uploadId: string, body: unknown, signal?: AbortSignal, onTransportComplete?: (upload: UploadedFile) => void, waitForReady = true): Promise<UploadCompletionResponse> => {
   const deadline = Date.now() + 240_000;
@@ -214,9 +228,15 @@ const finalizeUpload = async (uploadId: string, body: unknown, signal?: AbortSig
 };
 
 export async function uploadFile(file: File, type: UploadKind, onProgress: (value: number, phase: UploadProgressPhase) => void, options: UploadFileOptions = {}) {
-  const signal = options.signal;
+  const controller = new AbortController();
+  const abort = () => controller.abort(options.signal?.reason);
+  if (options.signal?.aborted) abort();
+  else options.signal?.addEventListener("abort", abort, { once: true });
+  const signal = controller.signal;
+  try {
   onProgress(0, type === "image" ? "preparing" : "uploading");
-  const prepared = type === "image" ? await prepareImageForUpload(file, signal, Boolean(options.onPreparedPreview)) : { file, normalized: false, previewBlob: undefined };
+  const retained = resumableUploads.get(file);
+  const prepared = retained?.prepared ?? (type === "image" ? await prepareImageForUpload(file, signal, Boolean(options.onPreparedPreview)) : { file, normalized: false, previewBlob: undefined });
   if (prepared.previewBlob) options.onPreparedPreview?.(prepared.previewBlob);
   const upload = prepared.file;
   let transportReported = false;
@@ -228,28 +248,59 @@ export async function uploadFile(file: File, type: UploadKind, onProgress: (valu
     }
     : undefined;
   onProgress(0, "uploading");
-  const init = await api.post<{ id: string; chunkSize: number; direct?: boolean; concurrency?: number; parts?: SignedPart[]; localMedia?: LocalMediaDescriptor }>("/api/uploads", { name: upload.name, size: upload.size, type, mime: upload.type });
+  const previous = retained?.init;
+  const init = previous ?? await api.post<UploadInit>("/api/uploads", { name: upload.name, size: upload.size, type, mime: upload.type }, { signal });
+  if (init.direct) resumableUploads.set(file, { init, prepared });
   if (init.localMedia) void seedUploadedLocalMedia(init.localMedia, upload);
   const heartbeat = globalThis.setInterval(() => { void api.post(`/api/uploads/${init.id}/heartbeat`).catch(() => undefined); }, 60_000);
   try {
   if (init.direct) {
+    if (previous) {
+      // Complete can commit even if every response was lost. Never PUT into a
+      // completed multipart session or recreate a successfully accepted upload.
+      const accepted = await api.get<UploadCompletionResponse>(`/api/uploads/${init.id}`, { signal }).catch((error) => {
+        if (error instanceof ApiError && error.status === 404) return null;
+        throw error;
+      });
+      if (accepted) {
+        const completed = accepted.state === "processing" && options.waitForReady !== false
+          ? await finalizeUpload(init.id, {}, signal, reportTransportComplete, true) : accepted;
+        resumableUploads.delete(file);
+        reportTransportComplete?.(completed);
+        onProgress(100, completed.state === "processing" ? "verifying" : "ready");
+        return { ...completed, name: file.name, normalized: prepared.normalized };
+      }
+      await api.post(`/api/uploads/${init.id}/heartbeat`, {}, { signal });
+    }
     const parts = init.parts ?? [];
-    const results: { partNumber: number; eTag: string }[] = [];
-    let cursor = 0; let completedBytes = 0;
+    const results: { partNumber: number; eTag: string }[] = previous
+      ? (await api.get<{ parts: { partNumber: number; eTag: string }[] }>(`/api/uploads/${init.id}/parts`, { signal })).parts : [];
+    const received = new Set(results.map((part) => part.partNumber));
+    const progressBytes = new Map<number, number>();
+    for (const part of results) progressBytes.set(part.partNumber, Math.min(init.chunkSize, upload.size - (part.partNumber - 1) * init.chunkSize));
+    let cursor = 0;
     const worker = async () => {
       while (cursor < parts.length) {
         const part = parts[cursor++];
+        if (received.has(part.partNumber)) continue;
         const start = (part.partNumber - 1) * init.chunkSize;
         const blob = upload.slice(start, Math.min(upload.size, start + init.chunkSize));
-        results.push(await uploadTosPart(init.id, part, blob, signal));
-        completedBytes += blob.size;
-        onProgress(Math.min(100, Math.round(completedBytes / upload.size * 100)), "uploading");
+        results.push(await uploadTosPart(init.id, part, blob, signal, (bytes) => {
+          progressBytes.set(part.partNumber, bytes);
+          onProgress(Math.min(99, Math.round([...progressBytes.values()].reduce((sum, value) => sum + value, 0) / upload.size * 100)), "uploading");
+        }));
+        progressBytes.set(part.partNumber, blob.size);
+        onProgress(Math.min(100, Math.round([...progressBytes.values()].reduce((sum, value) => sum + value, 0) / upload.size * 100)), "uploading");
       }
     };
-    await Promise.all(Array.from({ length: Math.min(init.concurrency ?? 3, parts.length) }, worker));
+    const workers = Array.from({ length: Math.min(init.concurrency ?? 3, parts.length) }, () => worker().catch((error) => { controller.abort(error); throw error; }));
+    const settled = await Promise.allSettled(workers);
+    const failure = settled.find((item): item is PromiseRejectedResult => item.status === "rejected");
+    if (failure) throw failure.reason;
     onProgress(100, "verifying");
     const completed = { ...(await finalizeUpload(init.id, { parts: results.sort((a, b) => a.partNumber - b.partNumber) }, signal, reportTransportComplete, options.waitForReady !== false)), name: file.name, normalized: prepared.normalized };
     reportTransportComplete?.(completed);
+    resumableUploads.delete(file);
     if (completed.state !== "processing") onProgress(100, "ready");
     return completed;
   }
@@ -264,9 +315,14 @@ export async function uploadFile(file: File, type: UploadKind, onProgress: (valu
   if (completed.state !== "processing") onProgress(100, "ready");
   return completed;
   } catch (error) {
+    if (error instanceof ApiError && [404, 410, 422].includes(error.status)) resumableUploads.delete(file);
     // Cancellation is completion-lock-aware: it cannot delete an object that the server is finalizing
     // or has already committed to the durable media database.
-    await api.delete(`/api/uploads/${init.id}`, { timeoutMs: 5_000 }).catch(() => undefined);
+    if (options.signal?.aborted) {
+      resumableUploads.delete(file);
+      await api.delete(`/api/uploads/${init.id}`, { timeoutMs: 5_000 }).catch(() => undefined);
+    }
     throw error;
   } finally { globalThis.clearInterval(heartbeat); }
+  } finally { options.signal?.removeEventListener("abort", abort); }
 }

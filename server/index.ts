@@ -22,7 +22,7 @@ import { callAssetApi } from "./asset-api.js";
 import { ensureAutoReferenceGroup } from "./asset-registration.js";
 import { previewRedirectCacheControl } from "./media-cache.js";
 import { stablePreviewUrl } from "./preview-url-cache.js";
-import { abortMultipartUpload, canvasExportObjectKey, completeMultipartUpload, createMultipartUpload, deleteObject, headObject, inputObjectKey, inspectMediaObject, signUploadPart, signedObjectUrl, tosConfigured, tosEnabled, tosHealth, verifyStoredObject } from "./tos.js";
+import { abortMultipartUpload, listAllUploadedParts, canvasExportObjectKey, completeMultipartUpload, createMultipartUpload, deleteObject, headObject, inputObjectKey, inspectMediaObject, signUploadPart, signedObjectUrl, tosConfigured, tosEnabled, tosHealth, verifyStoredObject } from "./tos.js";
 import { DependencyHealthGate } from "./dependency-health.js";
 import { canonicalUploadContentType, uploadKindFromContentType } from "./upload-policy.js";
 import { acquireUploadCompletionLock, claimUploadSlot, releaseUploadCompletionLock, releaseUploadSlot, renewUploadSlot, UPLOAD_SESSION_TTL_SECONDS } from "./upload-slots.js";
@@ -349,6 +349,19 @@ app.post("/api/uploads", requireAuth, async (req, res) => {
   } catch (error) { respondError(res, error); }
 });
 
+app.get("/api/uploads/:id/parts", requireAuth, async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  try {
+    const id = param(req.params.id);
+    const meta = await readUploadMeta(id);
+    if (!meta || !meta.direct || meta.ownerId !== (res.locals.user as SessionUser).id) return res.status(404).json({ error: "上传不存在或已过期" });
+    res.json({ parts: await listAllUploadedParts(meta.objectKey, meta.tosUploadId) });
+  } catch (error) {
+    if ((error as { code?: string }).code === "NoSuchUpload") return res.status(410).json({ error: "上传会话已失效，请重试上传", code: "UPLOAD_EXPIRED" });
+    respondError(res, error, 502);
+  }
+});
+
 app.post("/api/uploads/:id/parts/sign", requireAuth, async (req, res) => {
   try {
     const uploadId = param(req.params.id);
@@ -575,9 +588,11 @@ const creationSessionCreateSchema = z.object({
   title: z.string().trim().min(1, "会话名称不能为空").max(64, "会话名称不能超过 64 个字符").optional(),
 });
 
-app.get("/api/creation-sessions", requireAuth, (_req, res) => {
+app.get("/api/creation-sessions", requireAuth, (req, res) => {
   const user = res.locals.user as SessionUser;
-  res.json(users.listCreationSessions(user.id).map(publicCreationSession));
+  const parsed = z.object({ limit: z.coerce.number().int().min(1).max(100).default(100), beforeUpdatedAt: z.coerce.number().int().nonnegative().optional(), beforeId: z.string().max(128).optional() }).safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: "分页参数无效" });
+  res.json(users.listCreationSessions(user.id, parsed.data.limit, parsed.data.beforeUpdatedAt, parsed.data.beforeId).map(publicCreationSession));
 });
 
 app.post("/api/creation-sessions", requireAuth, (req, res) => {
@@ -1287,14 +1302,16 @@ app.get("/api/image-models", requireAuth, async (_req, res) => {
 app.get("/api/image-generations", requireAuth, (req, res) => {
   const user = res.locals.user as SessionUser;
   users.failStaleImageGenerations(Date.now() - 6 * 60 * 60_000);
-  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+  const parsed = z.object({ limit: z.coerce.number().int().min(1).max(100).default(50), beforeCreatedAt: z.coerce.number().int().nonnegative().optional(), beforeId: z.string().max(128).optional() }).safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: "分页参数无效" });
+  const { limit, beforeCreatedAt, beforeId } = parsed.data;
   const sessionId = typeof req.query.sessionId === "string" ? req.query.sessionId : "";
   if (sessionId) {
     const session = users.readCreationSession(sessionId);
     if (!session || session.ownerId !== user.id) return res.status(404).json({ error: "创作会话不存在" });
-    return res.json(users.listImageGenerationsForSession(user.id, sessionId, limit).map(publicImageGenerationTask));
+    return res.json(users.listImageGenerationsForSession(user.id, sessionId, limit, beforeCreatedAt, beforeId).map(publicImageGenerationTask));
   }
-  res.json(users.listImageGenerations(user.id, limit).map(publicImageGenerationTask));
+  res.json(users.listImageGenerations(user.id, limit, beforeCreatedAt, beforeId).map(publicImageGenerationTask));
 });
 
 app.get("/api/image-generations/:id", requireAuth, (req, res) => {

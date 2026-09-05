@@ -6,6 +6,7 @@ import { ClientErrorBoundary } from "./ClientErrorBoundary";
 import { installClientErrorCapture } from "./client-observability";
 import "./styles.css";
 import "./features/assets/archive.css";
+import "./history-pagination.css";
 import { GenerateEmbedApp } from "./features/atlas-generate/GenerateEmbedApp";
 
 registerPrivateMediaCache();

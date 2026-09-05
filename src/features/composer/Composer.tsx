@@ -54,6 +54,8 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
   const [draftHydrated, setDraftHydrated] = useState(false); const [draftNotice, setDraftNotice] = useState("");
   const [promptFocusSignal, setPromptFocusSignal] = useState<number | undefined>();
   const uploadControllers = useRef(new Map<string, AbortController>());
+  const failedUploads = useRef(new Map<string, { file: File; pending: UploadAsset }>());
+  const [retryingUploads, setRetryingUploads] = useState(false);
   const localPreviewUrls = useRef(new Set<string>());
   const consumedRestore = useRef<number | null>(null);
   const restoringDraft = useRef(false);
@@ -64,6 +66,7 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
     if (url && localPreviewUrls.current.delete(url)) URL.revokeObjectURL(url);
   };
   const cancelAssetTransfer = (asset: UploadAsset) => {
+    failedUploads.current.delete(asset.id);
     uploadControllers.current.get(asset.id)?.abort();
     uploadControllers.current.delete(asset.id);
     releaseLocalPreview(asset.preview);
@@ -247,11 +250,20 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
   useEffect(() => { const close = () => setOpen(null); window.addEventListener("click", close); return () => window.removeEventListener("click", close); }, []);
   if (!model) return null;
 
-  const pickFiles = async (files: FileList | null) => {
-    if (!files || (mode === "text" && engine === "video")) return;
+  const pickFiles = async (files: FileList | null, resume = false) => {
+    if ((!files && !resume) || (mode === "text" && engine === "video")) return;
     const plannedAssets = [...assets];
     const pendingUploads: { file: File; pending: UploadAsset; controller: AbortController }[] = [];
-    for (const file of Array.from(files)) {
+    if (resume) {
+      for (const [id, item] of failedUploads.current) {
+        if (!assets.some((asset) => asset.id === id)) continue;
+        const controller = new AbortController();
+        uploadControllers.current.set(id, controller);
+        pendingUploads.push({ ...item, controller });
+      }
+      failedUploads.current.clear(); setError(""); setRetryingUploads(true);
+    }
+    for (const file of Array.from(files ?? [])) {
       const type = inferUploadType(file);
       if (!type) { setError(`不支持素材格式：${file.name}`); continue; }
       if (engine === "image" && type !== "image") { setError("图片生成只接受图片参考（图生图）"); continue; }
@@ -270,7 +282,7 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
       uploadControllers.current.set(tempId, controller);
       pendingUploads.push({ file, pending, controller });
     }
-    setAssets(plannedAssets);
+    setAssets(resume ? plannedAssets.map((asset) => pendingUploads.some((item) => item.pending.id === asset.id) ? { ...asset, status: undefined, phase: "uploading" } : asset) : plannedAssets);
     let cursor = 0;
     const failures: string[] = [];
     const uploadNext = async () => {
@@ -282,17 +294,23 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
       try {
         const uploaded = await uploadFileUntilAccepted(file, pending.type, (progress, phase) => setAssets((old) => old.map((a) => a.id === tempId ? { ...a, progress, phase } : a)), {
           signal: controller.signal,
-          onTransportComplete: (transport) => setAssets((old) => old.map((asset) => asset.id === tempId ? { ...asset, uploadId: transport.uploadId ?? transport.id, name: file.name, size: transport.size, progress: 100, phase: "verifying" } : asset)),
+          onTransportComplete: (transport) => setAssets((old) => old.map((asset) => asset.id === tempId ? { ...asset, status: undefined, uploadId: transport.uploadId ?? transport.id, name: file.name, size: transport.size, progress: 100, phase: "verifying" } : asset)),
         });
-        setAssets((old) => old.map((a) => a.id === tempId ? { ...a, ...uploaded, id: tempId, uploadId: uploaded.uploadId ?? uploaded.id, role, progress: 100, phase: "verifying" } : a));
+        setAssets((old) => old.map((a) => a.id === tempId ? { ...a, ...uploaded, status: undefined, id: tempId, uploadId: uploaded.uploadId ?? uploaded.id, role, progress: 100, phase: "verifying" } : a));
         } catch (e) {
-          releaseLocalPreview(pending.preview);
-          setAssets((old) => old.filter((a) => a.id !== tempId));
-          if (!(e instanceof DOMException && e.name === "AbortError")) failures.push(`${file.name}：${e instanceof Error ? e.message : "上传失败"}`);
+          if (controller.signal.aborted) {
+            releaseLocalPreview(pending.preview);
+            setAssets((old) => old.filter((a) => a.id !== tempId));
+          } else {
+            failedUploads.current.set(tempId, { file, pending });
+            setAssets((old) => old.map((a) => a.id === tempId ? { ...a, status: "Failed" } : a));
+            failures.push(`${file.name}：${e instanceof Error ? e.message : "上传失败"}`);
+          }
         } finally { uploadControllers.current.delete(tempId); }
       }
     }
     await Promise.all(Array.from({ length: Math.min(3, pendingUploads.length) }, uploadNext));
+    setRetryingUploads(false);
     if (failures.length) setError(`${failures.length} 个素材上传失败：${failures.slice(0, 2).join("；")}${failures.length > 2 ? " 等" : ""}`);
     if (fileInput.current) fileInput.current.value = "";
   };
@@ -426,7 +444,7 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
       {!loading && submitBlockReason && <div id="composer-submit-hint" className="composer-submit-hint" role="status" aria-live="polite">{submitBlockReason}</div>}
       {draftNotice && <div className="composer-draft-status" role="status" aria-live="polite"><RefreshCw /><span>{draftNotice}</span></div>}
       {engine === "image" && imageModelCatalogError && !imageModels.length && <div className="composer-error">{imageModelCatalogError}</div>}
-      {error && <div className="composer-error">{error}</div>}
+      {error && <div className="composer-error">{error}{failedUploads.current.size > 0 && <button disabled={retryingUploads} onClick={() => void pickFiles(null, true)}>{retryingUploads ? "正在恢复上传…" : "继续上传失败的素材"}</button>}</div>}
     </div>
   </div>;
 }
