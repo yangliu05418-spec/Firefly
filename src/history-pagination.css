@@ -4,5 +4,6 @@
 .history-pagination button:disabled { opacity: .6; cursor: wait; }
 .history-pagination button:focus-visible { outline: 2px solid #badbd3; outline-offset: 3px; }
 .history-pagination span { color: #a5acb6; }
-.conversation + .history-pagination-group { padding-bottom: 300px; }
+.workspace > .conversation { padding-bottom: 24px; }
+.conversation + .history-pagination-group { padding-bottom: var(--composer-clearance, 300px); }
 .conversation-inner > .task-card, .image-results > .image-result { content-visibility: auto; contain-intrinsic-size: auto 550px; }

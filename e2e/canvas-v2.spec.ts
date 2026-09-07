@@ -158,7 +158,9 @@ async function mockAuthenticatedApi(page: Page, options: {
     }
     if (path === "/api/generations" && request.method() === "GET") {
       const sessionId = url.searchParams.get("sessionId");
-      return json(route, sessionId ? videoHistory.filter((item) => item.sessionId === sessionId) : videoHistory);
+      const before = Number(url.searchParams.get("beforeCreatedAt") ?? Number.MAX_SAFE_INTEGER);
+      const beforeId = url.searchParams.get("beforeId") ?? "\uffff";
+      return json(route, videoHistory.filter((item) => (!sessionId || item.sessionId === sessionId) && (Number(item.createdAt) < before || Number(item.createdAt) === before && String(item.id) < beforeId)).sort((a, b) => Number(b.createdAt) - Number(a.createdAt) || String(b.id).localeCompare(String(a.id))).slice(0, Number(url.searchParams.get("pageSize") ?? 100)));
     }
     if (path === "/api/generations" && request.method() === "POST") {
       const body = request.postDataJSON() as Record<string, unknown>;
@@ -893,6 +895,40 @@ test("old sessions open by exact id and image history loads additional pages on 
   await expect(page.locator(".session-item")).toHaveCount(105);
   await expect(page).toHaveURL(/session-104$/);
 });
+
+for (const width of [1440, 390]) {
+  test(`video pagination stays clickable below a growing composer at width ${width}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const videoHistory = Array.from({ length: 101 }, (_, i) => ({
+      id: `video-${String(i).padStart(3, "0")}`, sessionId: "session-e2e", ownerId: "user-e2e", visibility: "private",
+      model: videoModels[0].id, mode: "omni", ratio: "16:9", resolution: "720p", duration: 5,
+      prompt: `历史视频 ${i}`, createdAt: 1000 - i, status: "failed", error: "fixture",
+    }));
+    await mockAuthenticatedApi(page, { videoHistory });
+    await page.goto("/studio/sessions/session-e2e");
+    await expect(page.locator(".task-card")).toHaveCount(100);
+    const editor = page.getByRole("textbox", { name: "创作提示词" });
+    const dock = page.locator(".composer-dock");
+    const initialHeight = (await dock.boundingBox())!.height;
+    await editor.fill(Array.from({ length: 24 }, (_, i) => `第 ${i + 1} 行，保留人物、构图与镜头运动。`).join("\n"));
+    await page.locator('.composer input[type="file"]').setInputFiles("public/ciridae/video-placeholder.webp");
+    await expect(page.locator(".asset-chip")).toHaveCount(1);
+    await expect.poll(async () => (await dock.boundingBox())!.height).toBeGreaterThan(initialHeight + 70);
+    const more = page.getByRole("button", { name: "加载更多视频记录", exact: true });
+    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    await expect.poll(async () => {
+      const button = await more.boundingBox(); const input = await dock.boundingBox();
+      return Boolean(button && input && button.y >= 0 && button.y + button.height + 12 <= input.y);
+    }).toBe(true);
+    await more.click({ timeout: 5000 });
+    await expect(page.locator(".task-card")).toHaveCount(101);
+    await expect(editor).toContainText("第 24 行");
+    const expanded = await page.locator(".workspace").evaluate((node) => parseFloat((node as HTMLElement).style.getPropertyValue("--composer-clearance")));
+    await editor.fill("");
+    await page.getByRole("button", { name: "移除 video-placeholder.webp", exact: true }).click();
+    await expect.poll(() => page.locator(".workspace").evaluate((node) => parseFloat((node as HTMLElement).style.getPropertyValue("--composer-clearance")))).toBeLessThan(expanded - 70);
+  });
+}
 
 test("a delayed history or capacity feed does not block Composer or erase its draft", async ({ page }) => {
   await mockAuthenticatedApi(page, { imageHistory: [{ id: "fast-image", sessionId: "session-e2e", modelName: "Image", ratio: "1:1", resolution: "1024", prompt: "图片记录先显示", items: [], createdAt: 10, status: "failed", error: "fixture" }] });
