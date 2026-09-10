@@ -461,7 +461,7 @@ const worker = new Worker("media", async (job) => {
     return;
   }
   throw new Error(`Unknown media job: ${job.name}`);
-}, { connection, concurrency: 2, lockDuration: 120000 });
+}, { connection, concurrency: config.mediaMaintenanceConcurrency, lockDuration: 120000 });
 
 const archiveWorker = new Worker("archive", async (job) => {
   if (job.name !== "archive-output") throw new Error(`Unknown archive job: ${job.name}`);
@@ -479,7 +479,7 @@ const uploadFinalizationWorker = new Worker("upload-finalization", async (job) =
     failAsset: (assetId, error) => markAssetIngestFailed(assetId, error),
     enqueueAsset: (assetId) => assetQueue.add("register", { assetId }, { jobId: assetId, attempts: 3, backoff: { type: "exponential", delay: 15_000 }, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } }),
   });
-}, { connection, concurrency: 2, lockDuration: 120_000 });
+}, { connection, concurrency: config.uploadFinalizationConcurrency, lockDuration: 120_000 });
 
 const previewWorker = new Worker("preview", async (job) => {
   if (job.name !== "create-preview") throw new Error(`Unknown preview job: ${job.name}`);
@@ -490,10 +490,17 @@ const assetWorker = new Worker("asset-ingest", async (job) => {
   if (job.name === "register") return registerQueuedAsset(job.data.assetId);
   if (job.name === "delete-provider") return deleteQueuedProviderAsset(job.data.assetId);
   throw new Error(`Unknown asset job: ${job.name}`);
-}, { connection, concurrency: 2, lockDuration: 240_000 });
+}, { connection, concurrency: config.assetIngestConcurrency, lockDuration: 240_000 });
 
 await Promise.all([worker.waitUntilReady(), archiveWorker.waitUntilReady(), previewWorker.waitUntilReady(), assetWorker.waitUntilReady(), uploadFinalizationWorker.waitUntilReady()]);
 const heartbeat = await startWorkerHeartbeat(connection, "media");
+console.info(JSON.stringify({
+  type: "media_worker_started", level: "info", at: new Date().toISOString(),
+  maintenance: config.mediaMaintenanceConcurrency, uploadFinalization: config.uploadFinalizationConcurrency,
+  assetIngest: config.assetIngestConcurrency, archive: config.tosArchiveConcurrency,
+  sourceReads: config.tosSourceReadConcurrency, preview: config.tosPreviewConcurrency,
+  archiveParts: config.tosArchivePartConcurrency, archivePartBytes: config.tosArchivePartSize,
+}));
 
 previewWorker.on("failed", (job, error) => {
   console.warn(JSON.stringify({ type: "tos_preview_failed", at: new Date().toISOString(), taskId: job?.data.taskId, attempt: job?.attemptsMade, code: (error as { code?: string }).code ?? "unknown", message: error.message }));
