@@ -18,6 +18,11 @@ const ready = {
 };
 
 describe("composer submission readiness", () => {
+  it("admits the sixth video and blocks the seventh using server capacity", () => {
+    expect(submissionBlockReason({ ...ready, capacity: { active: 5, limit: 6, available: 1 } })).toBe("");
+    expect(submissionBlockReason({ ...ready, capacity: { active: 6, limit: 6, available: 0 } })).toBe("已达 6 项并行上限，完成一项后可继续");
+  });
+
   it("allows consecutive video submissions while capacity remains", () => {
     expect(submissionBlockReason({ ...ready, capacity: { active: 1, limit: 4, available: 3 } })).toBe("");
     expect(submissionBlockReason({ ...ready, capacity: { active: 3, limit: 4, available: 1 } })).toBe("");

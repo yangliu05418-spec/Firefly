@@ -1,5 +1,27 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+describe("video generation capacity", () => {
+  afterEach(() => { vi.unstubAllEnvs(); vi.resetModules(); });
+
+  it("defaults to six user admissions and six worker slots", async () => {
+    vi.stubEnv("GENERATION_CONCURRENCY", undefined);
+    vi.stubEnv("MAX_ACTIVE_GENERATIONS_PER_USER", undefined);
+    vi.resetModules();
+    const { config } = await import("./config.js");
+    expect(config.generationConcurrency).toBe(6);
+    expect(config.maxActiveGenerationsPerUser).toBe(6);
+  });
+
+  it("preserves independent environment overrides for operational rollback", async () => {
+    vi.stubEnv("GENERATION_CONCURRENCY", "4");
+    vi.stubEnv("MAX_ACTIVE_GENERATIONS_PER_USER", "3");
+    vi.resetModules();
+    const { config } = await import("./config.js");
+    expect(config.generationConcurrency).toBe(4);
+    expect(config.maxActiveGenerationsPerUser).toBe(3);
+  });
+});
+
 describe("Canvas V2 rollout configuration", () => {
   afterEach(() => {
     vi.unstubAllEnvs();

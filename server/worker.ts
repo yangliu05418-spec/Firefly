@@ -159,6 +159,7 @@ const worker = new Worker<{ input: unknown }>("generation", async (job) => {
 
 await worker.waitUntilReady();
 const heartbeat = await startWorkerHeartbeat(connection, "generation");
+console.info(JSON.stringify({ type: "generation_worker_started", level: "info", at: new Date().toISOString(), concurrency: config.generationConcurrency, maxActiveGenerationsPerUser: config.maxActiveGenerationsPerUser }));
 
 worker.on("failed", async (job, error) => {
   if (!job?.id) return;

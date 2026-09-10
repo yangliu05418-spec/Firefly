@@ -154,7 +154,7 @@ async function mockAuthenticatedApi(page: Page, options: {
     if (path === "/api/image-media/image-e2e") return route.fulfill({ status: 200, contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><path fill="#b8d9cf" d="M0 0h8v8H0z"/></svg>' });
     if (path === "/api/generation-capacity" && request.method() === "GET") {
       const active = videoHistory.filter((item) => ["queued", "submitting", "running"].includes(String(item.status))).length;
-      return json(route, { active, limit: 4, available: Math.max(0, 4 - active) });
+      return json(route, { active, limit: 6, available: Math.max(0, 6 - active) });
     }
     if (path === "/api/generations" && request.method() === "GET") {
       const sessionId = url.searchParams.get("sessionId");
@@ -978,7 +978,15 @@ test("video composer keeps the accepted draft ready for consecutive parallel sub
 
   await expect.poll(() => mock.postedGenerations()).toHaveLength(2);
   await expect(page.locator(".task-card")).toHaveCount(2);
-  await expect(dock.locator(".generation-capacity")).toContainText("2/4 生成中");
+  await expect(dock.locator(".generation-capacity")).toContainText("2/6 生成中");
+  for (let count = 3; count <= 6; count++) {
+    await expect(dock.getByRole("button", { name: "生成视频" })).toBeEnabled();
+    await dock.getByRole("button", { name: "生成视频" }).click();
+    await expect.poll(() => mock.postedGenerations()).toHaveLength(count);
+    await expect(dock.locator(".generation-capacity")).toContainText(`${count}/6 生成中`);
+  }
+  await expect(dock.getByRole("button", { name: "生成视频" })).toBeDisabled();
+  await expect(dock.getByRole("textbox", { name: "创作提示词" })).toContainText(prompt);
 });
 
 test("video generation acknowledges the click while task admission completes in the background", async ({ page }) => {
