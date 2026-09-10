@@ -32,6 +32,25 @@ const queues = (add: ReturnType<typeof vi.fn>, getJob = vi.fn(async () => undefi
 };
 
 describe("durable async job outbox", () => {
+  it("admits six videos atomically, rejects the seventh without an outbox entry, and releases a terminal slot", () => {
+    const { store, owner } = createStore();
+    try {
+      const admit = (id: string) => {
+        const record = task(id, owner.id);
+        return store.admitTaskWithinLimit(record, 6, { queueName: "generation", jobId: id, jobName: "generate", payload: { input: record.request } });
+      };
+      for (let index = 0; index < 6; index++) expect(admit(`capacity-${index}`).status).toBe("created");
+      expect(admit("capacity-6").status).toBe("limit");
+      expect(store.readTask("capacity-6")).toBeNull();
+      expect(store.readAsyncJobIntent("generation", "capacity-6")).toBeNull();
+      expect(admit("capacity-0").status).toBe("existing");
+      expect(store.countActiveTasksForUser(owner.id)).toBe(6);
+      store.saveTask({ ...task("capacity-0", owner.id), status: "succeeded", updatedAt: 200 });
+      expect(admit("capacity-6").status).toBe("created");
+      expect(store.countActiveTasksForUser(owner.id)).toBe(6);
+    } finally { store.close(); }
+  });
+
   it("commits the Atlas delivery destination in the same transaction as task, snapshot, and queue admission", () => {
     const { store, owner, databasePath } = createStore();
     const atlas = new AtlasStore(databasePath);
