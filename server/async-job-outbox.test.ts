@@ -32,22 +32,23 @@ const queues = (add: ReturnType<typeof vi.fn>, getJob = vi.fn(async () => undefi
 };
 
 describe("durable async job outbox", () => {
-  it("admits six videos atomically, rejects the seventh without an outbox entry, and releases a terminal slot", () => {
+  it.each([6, 10])("admits %i videos atomically, rejects overflow without an outbox entry, and releases a terminal slot", (limit) => {
     const { store, owner } = createStore();
     try {
       const admit = (id: string) => {
         const record = task(id, owner.id);
-        return store.admitTaskWithinLimit(record, 6, { queueName: "generation", jobId: id, jobName: "generate", payload: { input: record.request } });
+        return store.admitTaskWithinLimit(record, limit, { queueName: "generation", jobId: id, jobName: "generate", payload: { input: record.request } });
       };
-      for (let index = 0; index < 6; index++) expect(admit(`capacity-${index}`).status).toBe("created");
-      expect(admit("capacity-6").status).toBe("limit");
-      expect(store.readTask("capacity-6")).toBeNull();
-      expect(store.readAsyncJobIntent("generation", "capacity-6")).toBeNull();
+      for (let index = 0; index < limit; index++) expect(admit(`capacity-${index}`).status).toBe("created");
+      const overflowId = `capacity-${limit}`;
+      expect(admit(overflowId).status).toBe("limit");
+      expect(store.readTask(overflowId)).toBeNull();
+      expect(store.readAsyncJobIntent("generation", overflowId)).toBeNull();
       expect(admit("capacity-0").status).toBe("existing");
-      expect(store.countActiveTasksForUser(owner.id)).toBe(6);
+      expect(store.countActiveTasksForUser(owner.id)).toBe(limit);
       store.saveTask({ ...task("capacity-0", owner.id), status: "succeeded", updatedAt: 200 });
-      expect(admit("capacity-6").status).toBe("created");
-      expect(store.countActiveTasksForUser(owner.id)).toBe(6);
+      expect(admit(overflowId).status).toBe("created");
+      expect(store.countActiveTasksForUser(owner.id)).toBe(limit);
     } finally { store.close(); }
   });
 

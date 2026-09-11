@@ -3,13 +3,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 describe("video generation capacity", () => {
   afterEach(() => { vi.unstubAllEnvs(); vi.resetModules(); });
 
-  it("defaults to six user admissions and six worker slots", async () => {
+  it("defaults to ten user admissions and ten worker slots", async () => {
     vi.stubEnv("GENERATION_CONCURRENCY", undefined);
     vi.stubEnv("MAX_ACTIVE_GENERATIONS_PER_USER", undefined);
     vi.resetModules();
     const { config } = await import("./config.js");
-    expect(config.generationConcurrency).toBe(6);
-    expect(config.maxActiveGenerationsPerUser).toBe(6);
+    expect(config.generationConcurrency).toBe(10);
+    expect(config.maxActiveGenerationsPerUser).toBe(10);
   });
 
   it("preserves independent environment overrides for operational rollback", async () => {
@@ -30,10 +30,10 @@ describe("downstream capacity headroom", () => {
     keys.forEach(key => vi.stubEnv(key, undefined));
     vi.resetModules();
     const { config } = await import("./config.js");
-    expect(config.maxActiveUploadsPerUser).toBe(9);
-    expect(config.mediaMaintenanceConcurrency).toBe(3);
-    expect(config.uploadFinalizationConcurrency).toBe(3);
-    expect(config.assetIngestConcurrency).toBe(3);
+    expect(config.maxActiveUploadsPerUser).toBe(15);
+    expect(config.mediaMaintenanceConcurrency).toBe(5);
+    expect(config.uploadFinalizationConcurrency).toBe(5);
+    expect(config.assetIngestConcurrency).toBe(5);
     expect(config.tosPreviewConcurrency).toBe(2);
     expect(config.tosUploadConcurrency).toBe(3);
   });
@@ -129,12 +129,12 @@ describe("TOS archive latency configuration", () => {
     expect(config.tosFetchDeadlineMs).toBe(30_000);
     expect(config.tosFetchMaxWaitMs).toBe(60_000);
     expect(config.tosFetchPollIntervalMs).toBe(3_000);
-    expect(config.tosArchiveConcurrency).toBe(4);
+    expect(config.tosArchiveConcurrency).toBe(6);
     expect(config.tosArchivePartSize).toBe(5 * 1024 * 1024);
     expect(config.tosArchivePartConcurrency).toBe(4);
     expect(config.tosArchivePartRequestTimeoutMs).toBe(60_000);
     expect(config.tosArchivePartHedgeDelayMs).toBe(20_000);
-    expect(config.tosSourceReadConcurrency).toBe(10);
+    expect(config.tosSourceReadConcurrency).toBe(14);
   });
 
   it("keeps the fetch deadline configurable for controlled rollback", async () => {
