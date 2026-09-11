@@ -21,16 +21,16 @@ describe("MediaSourceBudget", () => {
     expect(order).toEqual(["archive-1", "preview", "archive-2"]);
   });
 
-  it("never exceeds its source connection budget", async () => {
-    const budget = new MediaSourceBudget(2);
+  it.each([2, 10, 14])("never exceeds its source connection budget of %i under a burst", async (limit) => {
+    const budget = new MediaSourceBudget(limit);
     let active = 0;
     let peak = 0;
-    const work = Array.from({ length: 6 }, () => budget.run("archive", async () => {
+    const work = Array.from({ length: limit * 3 }, () => budget.run("archive", async () => {
       active += 1; peak = Math.max(peak, active);
       await new Promise((resolve) => setTimeout(resolve, 5));
       active -= 1;
     }));
     await Promise.all(work);
-    expect(peak).toBe(2);
+    expect(peak).toBe(limit);
   });
 });
