@@ -21,6 +21,8 @@ APIKEY+MODEL.txt
 !e2e/**/*-snapshots/*.png
 
 # 本地工具与测试产物
+/.codex-work/
+/.local-maintenance/
 output/
 .playwright-cli/
 .playwright-mcp/
