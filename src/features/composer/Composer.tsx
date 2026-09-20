@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { AudioLines, Check, ChevronDown, Clock3, Clapperboard, Film, ImageIcon, Layers3, LoaderCircle, Plus, RefreshCw, Send, Settings2, Sparkles, Video, WandSparkles, X } from "lucide-react";
+import { AudioLines, Check, ChevronDown, Clock3, Clapperboard, Film, ImageIcon, Layers3, LoaderCircle, Plus, RefreshCw, Send, Settings2, Sparkles, Type, Video, WandSparkles, X } from "lucide-react";
 import { api, inferUploadType } from "../../api";
 import { useAssetCacheUserId } from "../../asset-cache-context";
 import { reconcileComposerAssets } from "../../composer-assets";
@@ -34,7 +34,7 @@ function Popover({ children, className = "" }: { children: ReactNode; className?
   return <div className={`popover ${className}`} onClick={(event) => event.stopPropagation()}>{children}</div>;
 }
 
-export function Composer({ models, compact, sessionId, restore, onRestoreConsumed, onCreated, onImagesGenerated, generationCapacity, admissionConfirmationPending = false, onAdmissionConfirmationChange, onGenerationSettled, destination }: { models: ModelCapability[]; compact: boolean; sessionId: string; restore?: ComposerRestore; onRestoreConsumed?: () => void; onCreated: (task: Task) => void; onImagesGenerated?: (bundle: ImageResultBundle) => void; generationCapacity?: GenerationCapacity | null; admissionConfirmationPending?: boolean; onAdmissionConfirmationChange?: (pending: boolean) => void; onGenerationSettled?: () => void; destination?: { kind: "atlas_project"; projectId: string } }) {
+export function Composer({ models, compact, sessionId, restore, onRestoreConsumed, onCreated, onImagesGenerated, generationCapacity, admissionConfirmationPending = false, onAdmissionConfirmationChange, onGenerationSettled, destination, onTextGeneration, engineRequest }: { models: ModelCapability[]; compact: boolean; sessionId: string; restore?: ComposerRestore; onRestoreConsumed?: () => void; onCreated: (task: Task) => void; onImagesGenerated?: (bundle: ImageResultBundle) => void; generationCapacity?: GenerationCapacity | null; admissionConfirmationPending?: boolean; onAdmissionConfirmationChange?: (pending: boolean) => void; onGenerationSettled?: () => void; destination?: { kind: "atlas_project"; projectId: string }; onTextGeneration?: () => void; engineRequest?: { engine: "video" | "image"; nonce: number } }) {
   const userId = useAssetCacheUserId();
   const { catalog: imageModelCatalog, error: imageModelCatalogError } = useImageModelCatalog();
   const defaultModel = models[0];
@@ -61,6 +61,13 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
   const restoringDraft = useRef(false);
   const skipHydrationAfterRestore = useRef<string | null>(null);
   const submissionInFlight = useRef(false);
+  const appliedEngineRequest = useRef<number | null>(null);
+  useEffect(() => {
+    if (draftHydrated && engineRequest && appliedEngineRequest.current !== engineRequest.nonce) {
+      appliedEngineRequest.current = engineRequest.nonce;
+      setEngine(engineRequest.engine);
+    }
+  }, [draftHydrated, engineRequest]);
 
   const releaseLocalPreview = (url?: string) => {
     if (url && localPreviewUrls.current.delete(url)) URL.revokeObjectURL(url);
@@ -420,7 +427,7 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
         <input ref={fileInput} hidden type="file" multiple={mode !== "first_frame"} accept={fileAccept} onChange={(e) => pickFiles(e.target.files)} />
       </div>
       <div className="control-row">
-        <div className="control-wrap"><button className="control control--accent" onClick={() => setOpen(open === "generation" ? null : "generation")}><WandSparkles /> {engine === "video" ? "视频生成" : "图片生成"} <ChevronDown /></button>{open === "generation" && <Popover className="mode-pop generation-pop"><p>选择创作类型</p><button className={engine === "video" ? "selected" : ""} aria-pressed={engine === "video"} onClick={() => { setEngine("video"); setOpen(null); }}><span className="model-icon"><Film /></span><span><b>视频生成</b><small>使用 Seedance 生成或编辑视频</small></span>{engine === "video" && <Check />}</button><button className={engine === "image" ? "selected" : ""} aria-pressed={engine === "image"} onClick={() => { setEngine("image"); setOpen(null); }}><span className="model-icon"><ImageIcon /></span><span><b>图片生成</b><small>支持文生图与图生图</small></span>{engine === "image" && <Check />}</button></Popover>}</div>
+        <div className="control-wrap"><button className="control control--accent" onClick={() => setOpen(open === "generation" ? null : "generation")}><WandSparkles /> {engine === "video" ? "视频生成" : "图片生成"} <ChevronDown /></button>{open === "generation" && <Popover className="mode-pop generation-pop"><p>选择创作类型</p><button className={engine === "video" ? "selected" : ""} aria-pressed={engine === "video"} onClick={() => { setEngine("video"); setOpen(null); }}><span className="model-icon"><Film /></span><span><b>视频生成</b><small>使用 Seedance 生成或编辑视频</small></span>{engine === "video" && <Check />}</button><button className={engine === "image" ? "selected" : ""} aria-pressed={engine === "image"} onClick={() => { setEngine("image"); setOpen(null); }}><span className="model-icon"><ImageIcon /></span><span><b>图片生成</b><small>支持文生图与图生图</small></span>{engine === "image" && <Check />}</button>{onTextGeneration && <button onClick={() => { setOpen(null); onTextGeneration(); }}><span className="model-icon"><Type /></span><span><b>文本生成</b><small>单轮输入，流式输出</small></span></button>}</Popover>}</div>
         {engine === "image" ? <div className="control-wrap"><button className="control" onClick={() => setOpen(open === "image-model" ? null : "image-model")}><Layers3 /> {(imageSpec?.name ?? "选择图片模型")} <ChevronDown /></button>{open === "image-model" && <Popover className="model-pop image-model-pop"><p>选择图片模型</p>{imageModels.map((item) => <button key={item.id} className={item.id === imageModelId ? "selected" : ""} onClick={() => { setImageModelId(item.id); setImageResolution(item.resolutions.includes(imageResolution) ? imageResolution : (item.resolutions.includes("1024") ? "1024" : item.resolutions[item.resolutions.length - 1])); setImageCount((count) => Math.min(count, item.maxCount)); setOpen(null); }}><span className="model-icon"><ImageIcon /></span><span><b>{item.name}</b><small>{item.resolutions.join(" / ")}px · 单次最多 {item.maxCount} 张</small></span>{item.id === imageModelId && <Check />}</button>)}</Popover>}</div> : <div className="control-wrap"><button className="control" onClick={() => setOpen(open === "model" ? null : "model")}><Layers3 /> {model.name} <Sparkles className="tiny-spark" /></button>{open === "model" && <Popover className="model-pop"><p>选择模型</p>{models.map((item) => <button key={item.id} className={item.id === model.id ? "selected" : ""} onClick={() => { setModelId(item.id); setOpen(null); }}><span className="model-icon"><Sparkles /></span><span><b>{item.name}</b><small>{item.note}</small></span>{item.id === model.id && <Check />}</button>)}</Popover>}</div>}
         {engine === "image" ? (
           <>

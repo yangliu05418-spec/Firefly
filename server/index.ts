@@ -6,6 +6,7 @@ import express from "express";
 import cookieParser from "cookie-parser";
 import { z } from "zod";
 import { config } from "./config.js";
+import { registerTextGenerationRoutes } from "./text-generation-routes.js";
 import { MODELS, availableModels } from "./capabilities.js";
 import { clearSession, createSession, getSessionUser, publicUser, requireAuth, type SessionUser } from "./auth.js";
 import type { AssetCategory, CanvasJob, CanvasProject, CanvasProjectAsset, CreationSession, CreationSnapshotBundle, ImageGenerationTask, MediaObject, UploadSession, UserAsset } from "./db.js";
@@ -108,6 +109,8 @@ app.use((req, res, next) => {
   if (req.path.startsWith("/api/") && ["POST", "PATCH", "PUT", "DELETE"].includes(req.method) && req.header("origin") !== applicationOrigin) return res.status(403).json({ error: "请求来源无效" });
   next();
 });
+
+registerTextGenerationRoutes(app, redis);
 
 const respondError = (res: express.Response, error: unknown, status = 400) => {
   const message = error instanceof z.ZodError ? error.issues[0]?.message : error instanceof Error ? error.message : "请求失败";
