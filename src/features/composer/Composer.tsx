@@ -34,7 +34,7 @@ function Popover({ children, className = "" }: { children: ReactNode; className?
   return <div className={`popover ${className}`} onClick={(event) => event.stopPropagation()}>{children}</div>;
 }
 
-export function Composer({ models, compact, sessionId, restore, onRestoreConsumed, onCreated, onImagesGenerated, generationCapacity, admissionConfirmationPending = false, onAdmissionConfirmationChange, onGenerationSettled, destination, onTextGeneration, engineRequest }: { models: ModelCapability[]; compact: boolean; sessionId: string; restore?: ComposerRestore; onRestoreConsumed?: () => void; onCreated: (task: Task) => void; onImagesGenerated?: (bundle: ImageResultBundle) => void; generationCapacity?: GenerationCapacity | null; admissionConfirmationPending?: boolean; onAdmissionConfirmationChange?: (pending: boolean) => void; onGenerationSettled?: () => void; destination?: { kind: "atlas_project"; projectId: string }; onTextGeneration?: () => void; engineRequest?: { engine: "video" | "image"; nonce: number } }) {
+export function Composer({ models, compact, sessionId, restore, onRestoreConsumed, onCreated, onImagesGenerated, generationCapacity, admissionConfirmationPending = false, onAdmissionConfirmationChange, onGenerationSettled, destination, onTextGeneration, engineRequest, onEngineRequestConsumed }: { models: ModelCapability[]; compact: boolean; sessionId: string; restore?: ComposerRestore; onRestoreConsumed?: () => void; onCreated: (task: Task) => void; onImagesGenerated?: (bundle: ImageResultBundle) => void; generationCapacity?: GenerationCapacity | null; admissionConfirmationPending?: boolean; onAdmissionConfirmationChange?: (pending: boolean) => void; onGenerationSettled?: () => void; destination?: { kind: "atlas_project"; projectId: string }; onTextGeneration?: () => void; onEngineRequestConsumed?: () => void; engineRequest?: { engine: "video" | "image"; nonce: number } }) {
   const userId = useAssetCacheUserId();
   const { catalog: imageModelCatalog, error: imageModelCatalogError } = useImageModelCatalog();
   const defaultModel = models[0];
@@ -66,8 +66,9 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
     if (draftHydrated && engineRequest && appliedEngineRequest.current !== engineRequest.nonce) {
       appliedEngineRequest.current = engineRequest.nonce;
       setEngine(engineRequest.engine);
+      onEngineRequestConsumed?.();
     }
-  }, [draftHydrated, engineRequest]);
+  }, [draftHydrated, engineRequest, onEngineRequestConsumed]);
 
   const releaseLocalPreview = (url?: string) => {
     if (url && localPreviewUrls.current.delete(url)) URL.revokeObjectURL(url);
