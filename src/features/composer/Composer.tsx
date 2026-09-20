@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { AudioLines, Check, ChevronDown, Clock3, Clapperboard, Film, ImageIcon, Layers3, LoaderCircle, Plus, RefreshCw, Send, Settings2, Sparkles, Type, Video, WandSparkles, X } from "lucide-react";
+import { AudioLines, Check, ChevronDown, Clock3, Clapperboard, Film, ImageIcon, Layers3, LoaderCircle, Plus, RefreshCw, Send, Settings2, Sparkles, Video, X } from "lucide-react";
+import { ComposerFrame } from "./ComposerFrame";
+import { CreationTypeControl } from "./CreationTypeControl";
 import { api, inferUploadType } from "../../api";
 import { useAssetCacheUserId } from "../../asset-cache-context";
 import { reconcileComposerAssets } from "../../composer-assets";
@@ -418,9 +420,7 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
     capacity: generationCapacity,
   });
 
-  return <div className={`composer ${compact ? "composer--compact" : ""}`} onClick={(e) => e.stopPropagation()}>
-    {!compact && <h1>今晚，想创造什么？</h1>}
-    <div className="composer-shell">
+  return <ComposerFrame compact={compact}>
       {!!assets.length && <div className="asset-rail" aria-label={`已选择 ${assets.length} 个参考素材`}><div className="asset-rail__label"><span>参考</span><b>{assets.length}</b></div><div className="asset-strip">{assets.map((asset) => <div className="asset-chip" key={referenceBindingId(asset)}>{asset.preview ? <RecoveringThumbnail src={asset.preview} alt={asset.name || "参考素材"} loading="lazy" decoding="async" fallbackClassName="asset-chip__media" manualRecovery={false} /> : asset.type === "image" ? <ImageIcon /> : asset.type === "video" ? <Video /> : <AudioLines />}<span><b>{asset.role === "first_frame" ? "首帧" : asset.role === "last_frame" ? "尾帧" : promptAssetLabel(asset, assets).replace("Image", "图片").replace("Video", "视频").replace("Audio", "音频")}</b><small>{asset.status === "Processing" ? "正在恢复素材引用" : asset.snapshotReferenceId && asset.phase === "ready" ? `${asset.name} · 引用已恢复，可直接生成` : asset.phase === "preparing" ? "正在检查图片" : asset.phase === "verifying" ? `${asset.name} · 已上传，可立即生成` : asset.phase === "ready" ? `${asset.name} · 已就绪` : asset.progress === 100 ? `${asset.name}${asset.normalized ? " · 已自动补白" : ""}` : `上传 ${asset.progress ?? 0}%`}</small></span>{asset.progress !== 100 && <i style={{ width: `${asset.progress ?? 0}%` }} />}<button aria-label={`移除 ${asset.name}`} onClick={() => removeAttachedAsset(asset.id)}><X /></button></div>)}</div></div>}
       <div className={`prompt-row ${referenceSlots.length > 1 ? "prompt-row--dual" : ""} ${!referenceSlots.length ? "prompt-row--text" : ""}`}>
         {!!referenceSlots.length && <div className="reference-slots">{referenceSlots.map((label, index) => <button className="add-reference" key={label} onClick={() => { void persistPrivateMediaStorage(); fileInput.current?.click(); }} disabled={(mode === "first_frame" && assets.length >= 1) || (mode === "first_last" && assets.length > index)}><Plus /><span>{label}</span></button>)}</div>}
@@ -428,7 +428,7 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
         <input ref={fileInput} hidden type="file" multiple={mode !== "first_frame"} accept={fileAccept} onChange={(e) => pickFiles(e.target.files)} />
       </div>
       <div className="control-row">
-        <div className="control-wrap"><button className="control control--accent" onClick={() => setOpen(open === "generation" ? null : "generation")}><WandSparkles /> {engine === "video" ? "视频生成" : "图片生成"} <ChevronDown /></button>{open === "generation" && <Popover className="mode-pop generation-pop"><p>选择创作类型</p><button className={engine === "video" ? "selected" : ""} aria-pressed={engine === "video"} onClick={() => { setEngine("video"); setOpen(null); }}><span className="model-icon"><Film /></span><span><b>视频生成</b><small>使用 Seedance 生成或编辑视频</small></span>{engine === "video" && <Check />}</button><button className={engine === "image" ? "selected" : ""} aria-pressed={engine === "image"} onClick={() => { setEngine("image"); setOpen(null); }}><span className="model-icon"><ImageIcon /></span><span><b>图片生成</b><small>支持文生图与图生图</small></span>{engine === "image" && <Check />}</button>{onTextGeneration && <button onClick={() => { setOpen(null); onTextGeneration(); }}><span className="model-icon"><Type /></span><span><b>文本生成</b><small>单轮输入，流式输出</small></span></button>}</Popover>}</div>
+        <CreationTypeControl value={engine} open={open === "generation"} setOpen={(visible) => setOpen(visible ? "generation" : null)} allowText={Boolean(onTextGeneration)} choose={(next) => { if (next === "text") onTextGeneration?.(); else setEngine(next); }} />
         {engine === "image" ? <div className="control-wrap"><button className="control" onClick={() => setOpen(open === "image-model" ? null : "image-model")}><Layers3 /> {(imageSpec?.name ?? "选择图片模型")} <ChevronDown /></button>{open === "image-model" && <Popover className="model-pop image-model-pop"><p>选择图片模型</p>{imageModels.map((item) => <button key={item.id} className={item.id === imageModelId ? "selected" : ""} onClick={() => { setImageModelId(item.id); setImageResolution(item.resolutions.includes(imageResolution) ? imageResolution : (item.resolutions.includes("1024") ? "1024" : item.resolutions[item.resolutions.length - 1])); setImageCount((count) => Math.min(count, item.maxCount)); setOpen(null); }}><span className="model-icon"><ImageIcon /></span><span><b>{item.name}</b><small>{item.resolutions.join(" / ")}px · 单次最多 {item.maxCount} 张</small></span>{item.id === imageModelId && <Check />}</button>)}</Popover>}</div> : <div className="control-wrap"><button className="control" onClick={() => setOpen(open === "model" ? null : "model")}><Layers3 /> {model.name} <Sparkles className="tiny-spark" /></button>{open === "model" && <Popover className="model-pop"><p>选择模型</p>{models.map((item) => <button key={item.id} className={item.id === model.id ? "selected" : ""} onClick={() => { setModelId(item.id); setOpen(null); }}><span className="model-icon"><Sparkles /></span><span><b>{item.name}</b><small>{item.note}</small></span>{item.id === model.id && <Check />}</button>)}</Popover>}</div>}
         {engine === "image" ? (
           <>
@@ -453,6 +453,5 @@ export function Composer({ models, compact, sessionId, restore, onRestoreConsume
       {draftNotice && <div className="composer-draft-status" role="status" aria-live="polite"><RefreshCw /><span>{draftNotice}</span></div>}
       {engine === "image" && imageModelCatalogError && !imageModels.length && <div className="composer-error">{imageModelCatalogError}</div>}
       {error && <div className="composer-error">{error}{failedUploads.current.size > 0 && <button disabled={retryingUploads} onClick={() => void pickFiles(null, true)}>{retryingUploads ? "正在恢复上传…" : "继续上传失败的素材"}</button>}</div>}
-    </div>
-  </div>;
+  </ComposerFrame>;
 }
