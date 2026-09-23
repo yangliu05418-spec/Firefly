@@ -270,12 +270,16 @@ export const streamObjectToTos = async (
   fileName: string,
   contentType: string,
   onPart?: (partNumber: number, bytes: number, requestId?: string) => void,
-  partSize = config.tosUploadPartSize
+  partSize = config.tosUploadPartSize,
+  producer: { signal?: AbortSignal; beforeComplete?: () => Promise<void> } = {},
 ) => {
   requireTos();
+  producer.signal?.throwIfAborted();
   if (!Number.isSafeInteger(partSize) || partSize < 5 * 1024 * 1024) throw new Error("TOS Multipart 分片不得小于 5 MiB");
-  try { return await verifyStoredObject(key); }
-  catch (error) { if ((error as { statusCode?: number }).statusCode !== 404) throw withTosArchiveStage(error, "tos_head"); }
+  if (!producer.beforeComplete) {
+    try { return await verifyStoredObject(key); }
+    catch (error) { if ((error as { statusCode?: number }).statusCode !== 404) throw withTosArchiveStage(error, "tos_head"); }
+  }
 
   let uploadId = "";
   try {
@@ -283,35 +287,30 @@ export const streamObjectToTos = async (
     uploadId = created.data.UploadId;
     const parts: { partNumber: number; eTag: string }[] = [];
     let pending = Buffer.alloc(0); let transferred = 0;
-    const requestDeadlineMs = config.tosUploadRequestTimeoutMs;
     const upload = async (body: Buffer) => {
       const partNumber = parts.length + 1;
       let eTag = "";
       let requestId = "";
       let lastError: unknown;
       for (let attempt = 0; attempt < 3; attempt += 1) {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), requestDeadlineMs);
+        producer.signal?.throwIfAborted();
         try {
-          const url = signUploadPart(key, uploadId, partNumber);
-          const response = await fetch(url, {
-            method: "PUT",
-            body: new Uint8Array(body),
-            headers: { "content-length": String(body.length) },
-            signal: controller.signal
+          const result = await uploadArchivePart({
+            sign: () => signUploadPart(key, uploadId, partNumber),
+            body: new Uint8Array(body).buffer,
+            signal: producer.signal,
           });
-          requestId = response.headers.get("x-tos-request-id") ?? "";
-          if (!response.ok) throw new Error(`TOS 分片上传失败 (${response.status})${requestId ? ` requestId=${requestId}` : ""}`);
-          eTag = (response.headers.get("etag") ?? "").replace(/^"|"$/g, "");
-          if (!eTag) throw new Error(`TOS 分片上传缺少 ETag${requestId ? ` requestId=${requestId}` : ""}`);
+          requestId = result.requestId ?? "";
+          eTag = result.eTag;
           break;
         } catch (error) {
           lastError = error;
+          producer.signal?.throwIfAborted();
+          if (!isRetryableArchivePartFailure(error)) throw error;
           if (attempt < 2) await delay(1000 * (2 ** attempt));
-        } finally { clearTimeout(timer); }
+        }
       }
       if (!eTag) {
-        if ((lastError as Error | undefined)?.name === "AbortError") throw new Error(`TOS 分片上传超过 ${Math.round(requestDeadlineMs / 1000)} 秒`);
         throw lastError ?? new Error("TOS 分片上传失败");
       }
       parts.push({ partNumber, eTag });
@@ -319,6 +318,7 @@ export const streamObjectToTos = async (
       onPart?.(partNumber, transferred, requestId || undefined);
     };
     for await (const value of source) {
+      producer.signal?.throwIfAborted();
       pending = Buffer.concat([pending, Buffer.from(value)]);
       while (pending.length >= partSize) {
         await upload(pending.subarray(0, partSize));
@@ -327,6 +327,10 @@ export const streamObjectToTos = async (
     }
     if (pending.length) await upload(pending);
     if (!parts.length) throw new Error("媒体处理没有产生可上传的数据");
+    // EOF is not proof of successful encoding: a killed FFmpeg also closes
+    // stdout and may leave a playable but truncated fragmented MP4.
+    await producer.beforeComplete?.();
+    producer.signal?.throwIfAborted();
     try {
       await tos.completeMultipartUpload({ bucket: config.tosBucket, key, uploadId, parts, forbidOverwrite: true });
     } catch (error) {
@@ -421,6 +425,7 @@ export const uploadArchivePart = async ({
   hedgeDelayMs = config.tosArchivePartHedgeDelayMs,
   fetcher = (url, init) => fetch(url, init),
   onHedge,
+  signal,
 }: {
   sign: () => string;
   body: ArrayBuffer;
@@ -428,7 +433,9 @@ export const uploadArchivePart = async ({
   hedgeDelayMs?: number;
   fetcher?: ArchivePartFetch;
   onHedge?: (elapsedMs: number) => void;
+  signal?: AbortSignal;
 }) => {
+  signal?.throwIfAborted();
   const startedAt = Date.now();
   const controllers = [new AbortController(), new AbortController()];
   const request = async (controller: AbortController) => {
@@ -436,7 +443,7 @@ export const uploadArchivePart = async ({
       method: "PUT",
       body,
       headers: { "content-length": String(body.byteLength) },
-      signal: controller.signal,
+      signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
     });
     const requestId = response.headers.get("x-tos-request-id") ?? undefined;
     if (!response.ok) throw archiveHttpError(`TOS 分片上传失败 (${response.status})`, response.status, "tos_upload_part", requestId);
