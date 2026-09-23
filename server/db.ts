@@ -1106,7 +1106,7 @@ export class UserStore {
   deleteExpiredUploadSessions(now = Date.now()) {
     return this.database.prepare("DELETE FROM upload_sessions WHERE expires_at < ?").run(now).changes;
   }
-  readTaskMedia(taskId: string, kind: "output" | "preview" | "poster") { return mapMedia(this.database.prepare("SELECT * FROM media_objects WHERE task_id = ? AND kind = ? AND status = 'ready' ORDER BY created_at DESC LIMIT 1").get(taskId, kind) as MediaRow | undefined); }
+  readTaskMedia(taskId: string, kind: "output" | "preview" | "poster") { return mapMedia(this.database.prepare("SELECT * FROM media_objects WHERE task_id = ? AND kind = ? AND status = 'ready' ORDER BY updated_at DESC, created_at DESC, id DESC LIMIT 1").get(taskId, kind) as MediaRow | undefined); }
 
   /** Loads the latest public media variants for a task page in one SQLite query. */
   readTaskMediaPage(taskIds: string[]) {
@@ -1116,7 +1116,7 @@ export class UserStore {
     const rows = this.database.prepare(`
       SELECT * FROM media_objects
       WHERE task_id IN (${placeholders}) AND kind IN ('output', 'preview', 'poster') AND status = 'ready'
-      ORDER BY created_at DESC, id DESC
+      ORDER BY updated_at DESC, created_at DESC, id DESC
     `).all(...taskIds) as MediaRow[];
     for (const row of rows) {
       const media = mapMedia(row)!;

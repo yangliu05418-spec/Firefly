@@ -118,9 +118,12 @@ describe("canvas generated image lifecycle", () => {
     expect(store.commitOriginalPreviewIfMissing(archived.id, fallback)).toMatchObject({ mediaRevision: 2 });
     expect(store.readTaskMedia(archived.id, "preview")?.objectKey).toBe(fallback.objectKey);
     expect(store.commitOriginalPreviewIfMissing(archived.id, fallback)).toBeNull();
-    store.commitTaskMediaIfActive(archived.id, { ...makeOutput(archived.id), id: `${archived.id}:preview`, kind: "preview", objectKey: "optimized.mp4", createdAt: fallback.createdAt + 1 });
+    // Repaired rows keep their original creation timestamp. Publication order
+    // must use updated_at, including the paginated task projection.
+    store.commitTaskMediaIfActive(archived.id, { ...makeOutput(archived.id), id: `${archived.id}:preview`, kind: "preview", objectKey: "optimized.mp4", createdAt: fallback.createdAt - 100, updatedAt: fallback.updatedAt + 1 });
     expect(store.commitOriginalPreviewIfMissing(archived.id, fallback)).toBeNull();
     expect(store.readTaskMedia(archived.id, "preview")?.objectKey).toBe("optimized.mp4");
+    expect(store.readTaskMediaPage([archived.id]).get(`${archived.id}:preview`)?.objectKey).toBe("optimized.mp4");
     expect(store.softDeleteTask(archived.id, owner.id)).toBe(true);
     expect(store.readMedia(`${archived.id}:output`)?.status).toBe("delete_pending");
 
