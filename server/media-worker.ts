@@ -111,6 +111,9 @@ const createTaskPreview = async (taskId: string, sourceUrl?: string) => {
   try {
   const output = users.readTaskMedia(taskId, "output");
   if (!output && !sourceUrl) return false;
+  // Retries must stop reading an old/slow Provider URL once the durable source
+  // is ready. Preview and original archiving remain independently scheduled.
+  if (output) sourceUrl = undefined;
   const startedAt = Date.now();
   const previewKey = previewObjectKey(task.ownerId, task.id);
   console.info(JSON.stringify({ type: "tos_preview_started", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, source: sourceUrl ? "provider" : "tos", sourceBytes: output?.size }));
