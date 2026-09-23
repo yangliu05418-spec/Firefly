@@ -43,3 +43,11 @@ export const canRemuxPreview = (source: PreviewProbe, maxBitrate: number) =>
   && source.width > 0 && source.height > 0 && Math.max(source.width, source.height) <= 1280
   && source.bitrate > 0 && source.bitrate <= maxBitrate
   && source.audioCodecs.every((codec) => codec === "aac");
+
+/** A normal MP4 with moov at the end is still playable using TOS Range. It
+ * need not wait for a second cross-region upload just to become fast-start. */
+export const isBrowserCompatibleOriginal = (source: PreviewProbe) =>
+  source.duration > 0 && Number.isFinite(source.duration)
+  && source.codec === "h264" && source.pixelFormat === "yuv420p"
+  && source.width > 0 && source.height > 0
+  && source.audioCodecs.every((codec) => codec === "aac");

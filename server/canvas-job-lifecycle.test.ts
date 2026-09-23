@@ -114,6 +114,16 @@ describe("canvas generated image lifecycle", () => {
     const archived = makeTask("task-archive-wins");
     store.saveTask(archived);
     expect(store.commitTaskMediaIfActive(archived.id, makeOutput(archived.id), true)).toMatchObject({ status: "succeeded", mediaStatus: "ready", mediaRevision: 1 });
+    const fallback: MediaObject = { ...makeOutput(archived.id), id: `${archived.id}:preview-original`, kind: "preview", objectKey: "compatible-original.mp4" };
+    expect(store.commitOriginalPreviewIfMissing(archived.id, fallback)).toMatchObject({ mediaRevision: 2 });
+    expect(store.readTaskMedia(archived.id, "preview")?.objectKey).toBe(fallback.objectKey);
+    expect(store.commitOriginalPreviewIfMissing(archived.id, fallback)).toBeNull();
+    // Repaired rows keep their original creation timestamp. Publication order
+    // must use updated_at, including the paginated task projection.
+    store.commitTaskMediaIfActive(archived.id, { ...makeOutput(archived.id), id: `${archived.id}:preview`, kind: "preview", objectKey: "optimized.mp4", createdAt: fallback.createdAt - 100, updatedAt: fallback.updatedAt + 1 });
+    expect(store.commitOriginalPreviewIfMissing(archived.id, fallback)).toBeNull();
+    expect(store.readTaskMedia(archived.id, "preview")?.objectKey).toBe("optimized.mp4");
+    expect(store.readTaskMediaPage([archived.id]).get(`${archived.id}:preview`)?.objectKey).toBe("optimized.mp4");
     expect(store.softDeleteTask(archived.id, owner.id)).toBe(true);
     expect(store.readMedia(`${archived.id}:output`)?.status).toBe("delete_pending");
 
@@ -122,6 +132,7 @@ describe("canvas generated image lifecycle", () => {
     expect(store.softDeleteTask(cancelled.id, owner.id)).toBe(true);
     expect(store.commitTaskMediaIfActive(cancelled.id, makeOutput(cancelled.id), true)).toBeNull();
     expect(store.readMedia(`${cancelled.id}:output`)).toBeNull();
+    expect(store.commitOriginalPreviewIfMissing(cancelled.id, { ...fallback, taskId: cancelled.id })).toBeNull();
     store.close();
   });
 
