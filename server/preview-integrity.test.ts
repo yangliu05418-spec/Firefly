@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertPreviewDuration, canRemuxPreview, type PreviewProbe } from "./preview-integrity.js";
+import { assertPreviewDuration, canRemuxPreview, isBrowserCompatibleOriginal, type PreviewProbe } from "./preview-integrity.js";
 
 const source: PreviewProbe = { duration: 30.042, codec: "h264", pixelFormat: "yuv420p", width: 720, height: 1280, bitrate: 2_000_000, audioCodecs: ["aac"] };
 describe("preview publication integrity", () => {
@@ -17,6 +17,12 @@ describe("preview publication integrity", () => {
     expect(canRemuxPreview(source, 3_500_000)).toBe(true);
     for (const patch of [{ codec: "hevc" }, { pixelFormat: "yuv420p10le" }, { bitrate: 10_000_000 }, { bitrate: NaN }, { width: 1920 }, { audioCodecs: ["opus"] }]) {
       expect(canRemuxPreview({ ...source, ...patch }, 3_500_000)).toBe(false);
+    }
+  });
+  it("allows a complete high-bitrate H.264 original while compression is pending, but never HEVC", () => {
+    expect(isBrowserCompatibleOriginal({ ...source, bitrate: 10_221_813 })).toBe(true);
+    for (const patch of [{ codec: "hevc" }, { pixelFormat: "yuv420p10le" }, { duration: 0 }, { audioCodecs: ["ac3"] }]) {
+      expect(isBrowserCompatibleOriginal({ ...source, ...patch })).toBe(false);
     }
   });
 });

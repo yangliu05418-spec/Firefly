@@ -1126,6 +1126,16 @@ export class UserStore {
     return result;
   }
 
+  commitOriginalPreviewIfMissing(taskId: string, preview: MediaObject) {
+    return this.database.transaction(() => {
+      const task = this.readTask(taskId);
+      const original = this.readTaskMedia(taskId, "output");
+      if (!task || task.status !== "succeeded" || !original || this.readTaskMedia(taskId, "preview")) return null;
+      if (preview.kind !== "preview" || preview.objectKey === original.objectKey) throw new Error("兼容预览必须是独立的 TOS 副本");
+      return this.commitTaskMediaIfActive(taskId, preview);
+    })();
+  }
+
   commitTaskMediaIfActive(taskId: string, media: MediaObject, finalizeOutput = false) {
     return this.database.transaction(() => {
       const task = this.readTask(taskId, true);

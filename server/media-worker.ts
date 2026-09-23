@@ -7,6 +7,7 @@ import { archiveQueue, assetQueue, mediaQueue, previewQueue, readTask, saveTask,
 import { abortMultipartUpload, createPoster, deleteObject, fetchObjectFromUrl, optimizePlaybackObject, outputObjectKey, posterObjectKey, previewObjectKey, rangedObjectFromUrl, TosFetchPendingError, verifyProgressiveMp4, verifyStoredObject } from "./tos.js";
 import { MAX_MEDIA_RECOVERY_ATTEMPTS, MAX_MEDIA_TIMEOUT_RECOVERY_ATTEMPTS } from "./db.js";
 import { transcodePreview, transcodePreviewFromUrl } from "./preview-transcode.js";
+import { compatibleOriginalPreviewKey, exposeCompatibleOriginalPreview } from "./compatible-original-preview.js";
 import { closeWorkersWithin } from "./shutdown.js";
 import { AssetCreateUnknownError, AssetUploadPendingError, markAssetIngestFailed, registerQueuedAsset } from "./asset-ingest.js";
 import { deleteQueuedProviderAsset } from "./asset-cleanup.js";
@@ -103,7 +104,10 @@ const createTaskPreview = async (taskId: string, sourceUrl?: string) => {
   if (!config.tosPreviewTranscodeEnabled) return false;
   const task = await readTask(taskId, true);
   if (!task || task.deletedAt || !task.ownerId) return false;
-  if (users.readTaskMedia(taskId, "preview")) { await finalizeCanvasVideoPreview(taskId); await enqueueAtlasVideoDestinations(taskId); return true; }
+  const currentPreview = users.readTaskMedia(taskId, "preview");
+  // A passthrough original is already playable, but is not proof that the
+  // optional lower-bitrate rendition has finished.
+  if (currentPreview && currentPreview.objectKey !== compatibleOriginalPreviewKey(task.ownerId, task.id)) { await finalizeCanvasVideoPreview(taskId); await enqueueAtlasVideoDestinations(taskId); return true; }
   const leaseKey = `media:preview:lease:${taskId}`;
   const leaseToken = crypto.randomUUID();
   const acquired = await connection.set(leaseKey, leaseToken, "PX", previewLeaseMs, "NX");
@@ -114,6 +118,7 @@ const createTaskPreview = async (taskId: string, sourceUrl?: string) => {
   // Retries must stop reading an old/slow Provider URL once the durable source
   // is ready. Preview and original archiving remain independently scheduled.
   if (output) sourceUrl = undefined;
+  if (output) await exposeCompatibleOriginalPreview(task.id).catch((error) => console.warn(JSON.stringify({ type: "tos_original_preview_deferred", taskId: task.id, code: (error as { code?: string }).code ?? "unknown" })));
   const startedAt = Date.now();
   const previewKey = previewObjectKey(task.ownerId, task.id);
   console.info(JSON.stringify({ type: "tos_preview_started", at: new Date().toISOString(), taskId: task.id, userId: task.ownerId, source: sourceUrl ? "provider" : "tos", sourceBytes: output?.size }));
@@ -293,6 +298,15 @@ const archiveOutput = async (data: { taskId: string; sourceUrl?: string; outputF
     const contentType = String(dataOut.contentType ?? headers["content-type"] ?? (data.outputFormat === "mov" ? "video/quicktime" : "video/mp4"));
     const committed = users.commitTaskMediaIfActive(task.id, { id: `${task.id}:output`, ownerId: task.ownerId, taskId: task.id, kind: "output", objectKey, status: "ready", fileName: `result.${data.outputFormat}`, contentType, size, etag, createdAt: now, updatedAt: now }, true);
     if (!committed) { await deleteObject(objectKey); return; }
+    // Do not wait behind a stalled preview PUT/encoder lease to expose an
+    // already browser-compatible TOS original. Compression stays optional.
+    if (config.tosPreviewTranscodeEnabled) {
+      const exposed = await exposeCompatibleOriginalPreview(task.id).catch((error) => {
+        console.warn(JSON.stringify({ type: "tos_original_preview_deferred", taskId: task.id, code: (error as { code?: string }).code ?? "unknown" }));
+        return false;
+      });
+      if (exposed) { await finalizeCanvasVideoPreview(task.id); await enqueueAtlasVideoDestinations(task.id); }
+    }
     // Preview readiness is user-facing and must not wait behind poster, Canvas,
     // or Atlas bookkeeping. This is also the durable fallback when the direct
     // provider-source preview job was interrupted.
